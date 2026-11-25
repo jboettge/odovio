@@ -5,7 +5,7 @@ on:
     paths: ["fahrzeugbuch/ios/**", ".github/workflows/fahrzeugbuch-screenshots.yml"]
 
 permissions:
-  contents: read
+  contents: write   # Screenshots werden auf denselben (Feature-)Branch committet
 
 jobs:
   screenshots:
@@ -50,20 +50,26 @@ jobs:
           xcrun simctl ui "$UDID" appearance dark
           for s in list overview maintenance-detail; do shoot "$s" "dark-$s"; done
           ls -la shots
-      - name: Kontaktbogen
+      - name: Verkleinern
         run: |
-          pip3 install --quiet --break-system-packages pillow
-          python3 - <<'PY'
-          from PIL import Image
-          import glob, os
-          files = sorted(glob.glob("shots/*.png"))
-          imgs = [Image.open(f).convert("RGB") for f in files]
-          w = 390; h = int(imgs[0].height * w / imgs[0].width)
-          for f, im in zip(files, imgs):
-              im.resize((w, h)).save(f.replace(".png", ".jpg").replace("shots/", "shots/small-"), quality=80)
-          PY
+          mkdir -p ../docs/screenshots
+          for f in shots/*.png; do
+            sips -s format jpeg -s formatOptions 80 -Z 1000 "$f" --out "../docs/screenshots/$(basename "${f%.png}").jpg" >/dev/null
+          done
+          ls -la ../docs/screenshots
       - uses: actions/upload-artifact@v4
         with:
           name: fahrzeugbuch-screenshots
           path: fahrzeugbuch/ios/shots/
           retention-days: 14
+      - name: Screenshots committen (nicht auf main)
+        if: github.ref != 'refs/heads/main'
+        working-directory: .
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add fahrzeugbuch/docs/screenshots
+          git diff --cached --quiet && exit 0
+          git commit -m "Fahrzeugbuch: Screenshots aktualisiert [skip ci]"
+          git pull --rebase origin "$GITHUB_REF_NAME"
+          git push origin "HEAD:$GITHUB_REF_NAME"
