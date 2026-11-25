@@ -53,8 +53,8 @@ enum AuthError: LocalizedError {
 @MainActor
 @Observable
 final class AuthManager {
-    static let callbackScheme = "net.jmb.fahrzeugbuch"
-    static let redirectURI = "net.jmb.fahrzeugbuch:/oauth2redirect"
+    static let callbackScheme = "ch.odovio"
+    static let redirectURI = "ch.odovio:/oauth2redirect"
 
     private(set) var isLoggedIn: Bool
     private(set) var userName: String?

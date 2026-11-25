@@ -2,7 +2,7 @@
 # Mehr CPU → mehr uvicorn-Worker (webConcurrency=auto aus limits.cpu) → dafür Valkey als gemeinsamer Zustand.
 # Ohne Valkey: stateBackend=memory, webConcurrency=1 und vpa.controlledResources=[memory].
 #
-#   helm upgrade --install fahrzeugbuch ./fahrzeugbuch/deploy/helm/fahrzeugbuch \
+#   helm upgrade --install fahrzeugbuch ./deploy/helm/fahrzeugbuch \
 #     -n fahrzeugbuch --create-namespace -f examples/values-single.yaml
 
 image:

@@ -10,7 +10,7 @@ Werkzeuge (nur Test-/Entwicklungsabhängigkeiten: `httpx`, `psycopg`, `pyjwt` au
 | `python -m loadtest.issuer` | lokaler OIDC-Test-Issuer (Discovery + JWKS über http) und Token-Erzeugung |
 | `python -m loadtest.run` | Lasttest (httpx async, geschlossenes Modell) mit RPS und p50/p95/p99 je Szenario |
 
-Alle Befehle aus `fahrzeugbuch/server`.
+Alle Befehle aus `server`.
 
 ## 1. Datenbank, Valkey, Testdaten
 

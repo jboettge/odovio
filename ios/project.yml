@@ -1,6 +1,6 @@
 name: Fahrzeugbuch
 options:
-  bundleIdPrefix: net.jmb
+  bundleIdPrefix: ch.odovio
   deploymentTarget:
     iOS: "17.0"
 settings:
@@ -14,7 +14,7 @@ targets:
     sources: [Fahrzeugbuch]
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: net.jmb.fahrzeugbuch
+        PRODUCT_BUNDLE_IDENTIFIER: ch.odovio
         MARKETING_VERSION: "1.0"
         CURRENT_PROJECT_VERSION: "1"
         TARGETED_DEVICE_FAMILY: "1"
@@ -28,17 +28,17 @@ targets:
         UILaunchScreen: {}
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
         # Einrichtung per Link/QR: fahrzeugbuch://setup?server=https://…
-        # (das OIDC-Callback-Schema net.jmb.fahrzeugbuch behandelt ASWebAuthenticationSession – nicht hier eintragen)
+        # (das OIDC-Callback-Schema ch.odovio behandelt ASWebAuthenticationSession – nicht hier eintragen)
         CFBundleURLTypes:
-          - CFBundleURLName: net.jmb.fahrzeugbuch.setup
+          - CFBundleURLName: ch.odovio.setup
             CFBundleURLSchemes: [fahrzeugbuch]
         # Home-Screen-Quick-Actions (Behandlung: AppDelegate/QuickAction in AppRouter.swift)
         UIApplicationShortcutItems:
-          - UIApplicationShortcutItemType: net.jmb.fahrzeugbuch.addFuel
+          - UIApplicationShortcutItemType: ch.odovio.addFuel
             UIApplicationShortcutItemTitle: Tanken
             UIApplicationShortcutItemSubtitle: Tankvorgang erfassen
             UIApplicationShortcutItemIconType: UIApplicationShortcutIconTypeAdd
-          - UIApplicationShortcutItemType: net.jmb.fahrzeugbuch.startTrip
+          - UIApplicationShortcutItemType: ch.odovio.startTrip
             UIApplicationShortcutItemTitle: Fahrt starten
             UIApplicationShortcutItemSubtitle: Mit dem Standardfahrzeug
             UIApplicationShortcutItemIconType: UIApplicationShortcutIconTypePlay
@@ -75,7 +75,7 @@ targets:
     settings:
       base:
         GENERATE_INFOPLIST_FILE: "YES"
-        PRODUCT_BUNDLE_IDENTIFIER: net.jmb.fahrzeugbuch.tests
+        PRODUCT_BUNDLE_IDENTIFIER: ch.odovio.tests
         TEST_HOST: "$(BUILT_PRODUCTS_DIR)/Fahrzeugbuch.app/Fahrzeugbuch"
         BUNDLE_LOADER: "$(TEST_HOST)"
         CODE_SIGN_STYLE: Automatic

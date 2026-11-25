@@ -9,7 +9,7 @@
 #     -e KC_ADMIN_PASSWORD=... <keycloak-container> bash -s < setup-client.sh
 #
 # Optional: KC_ADMIN_REALM (master), CLIENT (fahrzeugbuch-ios),
-#           REDIRECT (net.jmb.fahrzeugbuch:/oauth2redirect), ROLE (fahrzeugbuch-user),
+#           REDIRECT (ch.odovio:/oauth2redirect), ROLE (fahrzeugbuch-user),
 #           ASSIGN_USERS ("jakob anna" → erhalten die Rolle), KCADM
 # Web-Frontend (öffentlicher Client, PKCE S256, KEIN offline_access; nur dort: Mitgliederverwaltung und
 # Steuerparameter – der Server prüft azp = OIDC_WEB_CLIENT_ID):
@@ -47,7 +47,7 @@ set -euo pipefail
 : "${KC_ADMIN:?KC_ADMIN setzen}"
 KC_ADMIN_REALM=${KC_ADMIN_REALM:-master}
 CLIENT=${CLIENT:-fahrzeugbuch-ios}
-REDIRECT=${REDIRECT:-net.jmb.fahrzeugbuch:/oauth2redirect}
+REDIRECT=${REDIRECT:-ch.odovio:/oauth2redirect}
 ROLE=${ROLE:-fahrzeugbuch-user}
 ASSIGN_USERS=${ASSIGN_USERS:-}
 TENANTS=${TENANTS:-}

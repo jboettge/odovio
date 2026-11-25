@@ -1,9 +1,9 @@
 name: fahrzeugbuch-web
 on:
   push:
-    paths: ["fahrzeugbuch/web/**", ".github/workflows/fahrzeugbuch-web.yml"]
+    paths: ["web/**", ".github/workflows/fahrzeugbuch-web.yml"]
   pull_request:
-    paths: ["fahrzeugbuch/web/**", ".github/workflows/fahrzeugbuch-web.yml"]
+    paths: ["web/**", ".github/workflows/fahrzeugbuch-web.yml"]
 
 permissions:
   contents: read
@@ -13,7 +13,7 @@ jobs:
     runs-on: ubuntu-24.04
     defaults:
       run:
-        working-directory: fahrzeugbuch/web
+        working-directory: web
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:

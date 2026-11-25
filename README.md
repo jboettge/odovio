@@ -79,7 +79,7 @@ docker exec -i -e KC_URL=http://localhost:8080 -e REALM=<realm> -e KC_ADMIN=admi
 ```
 
 Legt an bzw. aktualisiert:
-- Client `fahrzeugbuch-ios`: public, nur Standard Flow, PKCE S256 erzwungen, Redirect `net.jmb.fahrzeugbuch:/oauth2redirect`
+- Client `fahrzeugbuch-ios`: public, nur Standard Flow, PKCE S256 erzwungen, Redirect `ch.odovio:/oauth2redirect`
 - optionaler Scope `offline_access` → Refresh-Token übersteht SSO-Session-Timeout (kein Login alle 30 min)
 - Client-Rolle `fahrzeugbuch-user`, zugewiesen an `ASSIGN_USERS`
 - Mapper `groups` (volle Gruppenpfade im Access-Token)
@@ -99,7 +99,7 @@ Dienste: `db` (PostgreSQL), `migrate` (einmalig je Deploy: Schema, Trigger, App-
 
 1. Geheimnisse erzeugen: `openssl rand -hex 32` (`DB_PASSWORD`, `APP_DB_PASSWORD`), `openssl rand -base64 32` (`ANCHOR_SIGNING_KEY`)
 2. Portainer → **Stacks → Add stack → Repository**
-   - Compose path: `fahrzeugbuch/docker-compose.yml`
+   - Compose path: `docker-compose.yml`
    - Environment variables:
 
 | Variable | Pflicht | Beispiel / Default |
@@ -159,7 +159,7 @@ Voraussetzung: Mac mit Xcode 16+, [XcodeGen](https://github.com/yonaskolb/XcodeG
 
 ```bash
 brew install xcodegen
-cd fahrzeugbuch/ios
+cd ios
 xcodegen generate
 open Fahrzeugbuch.xcodeproj
 ```
@@ -225,7 +225,7 @@ Voll-zu-voll: Liter aller Tankvorgänge nach einer Volltankung bis inkl. der nä
 ## Entwicklung
 
 ```bash
-cd fahrzeugbuch/server
+cd server
 pip install --require-hashes --no-deps -r requirements.txt && pip install -r requirements-test.txt   # Lock-Datei mit Hashes
 ruff check app tests alembic
 pytest -q                                  # SQLite, JWTs mit lokalem Testschlüssel

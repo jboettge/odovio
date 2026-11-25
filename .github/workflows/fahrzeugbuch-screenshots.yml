@@ -3,7 +3,7 @@ on:
   workflow_dispatch:
   push:
     branches-ignore: [main]   # schreibt Screenshots zurück → nie auf main
-    paths: ["fahrzeugbuch/ios/**", ".github/workflows/fahrzeugbuch-screenshots.yml"]
+    paths: ["ios/**", ".github/workflows/fahrzeugbuch-screenshots.yml"]
 
 permissions:
   contents: write   # Screenshots werden auf denselben (Feature-)Branch committet
@@ -13,7 +13,7 @@ jobs:
     runs-on: macos-15
     defaults:
       run:
-        working-directory: fahrzeugbuch/ios
+        working-directory: ios
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
       - run: brew install xcodegen
@@ -40,7 +40,7 @@ jobs:
         run: |
           mkdir -p shots
           shoot() {  # $1 = Screen, $2 = Dateiname
-            xcrun simctl launch --terminate-running-process "$UDID" net.jmb.fahrzeugbuch \
+            xcrun simctl launch --terminate-running-process "$UDID" ch.odovio \
               -demo -screen "$1" -AppleLanguages "(de-CH)" -AppleLocale de_CH >/dev/null
             sleep 4
             xcrun simctl io "$UDID" screenshot --type=png "shots/$2.png" >/dev/null
@@ -61,7 +61,7 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         with:
           name: fahrzeugbuch-screenshots
-          path: fahrzeugbuch/ios/shots/
+          path: ios/shots/
           retention-days: 14
       - name: Screenshots committen (nicht auf main)
         if: github.ref != 'refs/heads/main'
@@ -69,7 +69,7 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add fahrzeugbuch/docs/screenshots
+          git add docs/screenshots
           git diff --cached --quiet && exit 0
           git commit -m "Fahrzeugbuch: Screenshots aktualisiert [skip ci]"
           git pull --rebase origin "$GITHUB_REF_NAME"

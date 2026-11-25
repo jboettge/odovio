@@ -23,8 +23,8 @@ kubectl -n $NS create secret generic fahrzeugbuch-db \
   --from-literal=app-password="$(openssl rand -hex 32)" --from-literal=owner-password="<Owner-Passwort>"
 kubectl -n $NS create secret generic fahrzeugbuch-valkey --from-literal=valkey-password="$(openssl rand -hex 32)"
 
-helm upgrade --install fahrzeugbuch fahrzeugbuch/deploy/helm/fahrzeugbuch -n $NS \
-  -f fahrzeugbuch/deploy/helm/fahrzeugbuch/examples/values-single.yaml
+helm upgrade --install fahrzeugbuch deploy/helm/fahrzeugbuch -n $NS \
+  -f deploy/helm/fahrzeugbuch/examples/values-single.yaml
 ```
 
 Pflicht: `config.OIDC_ISSUER`, `database.host`, DB-Passwörter (`database.existingSecret`, Schlüssel
@@ -99,5 +99,5 @@ Wechsel alte Public Keys in `config.ANCHOR_PUBLIC_KEYS`. Signierte Anker zusätz
 ## Tests
 
 ```bash
-fahrzeugbuch/deploy/helm/test-chart.sh   # helm + kubeconform im PATH (oder HELM=/KUBECONFORM=)
+deploy/helm/test-chart.sh   # helm + kubeconform im PATH (oder HELM=/KUBECONFORM=)
 ```

@@ -25,8 +25,8 @@ final class AppRouter {
 
 /// Home-Screen-Quick-Actions (`UIApplicationShortcutItems` in project.yml).
 enum QuickAction {
-    static let addFuel = "net.jmb.fahrzeugbuch.addFuel"
-    static let startTrip = "net.jmb.fahrzeugbuch.startTrip"
+    static let addFuel = "ch.odovio.addFuel"
+    static let startTrip = "ch.odovio.startTrip"
 
     /// Verarbeitet eine Quick Action; Rückgabe: erkannt.
     @MainActor

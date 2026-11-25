@@ -1,4 +1,4 @@
-# Build-Kontext: fahrzeugbuch/  (docker build -f server/Dockerfile .  bzw. docker compose, siehe .dockerignore)
+# Build-Kontext: Repo-Root  (docker build -f server/Dockerfile .  bzw. docker compose, siehe .dockerignore)
 #
 # Stufe 1: Web-Frontend (Vue/Vite) → /web/dist. Image per Digest gepinnt (node:22-alpine). Aktualisieren:
 #   docker pull node:22-alpine && docker image inspect --format '{{index .RepoDigests 0}}' node:22-alpine

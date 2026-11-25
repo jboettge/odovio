@@ -7,7 +7,7 @@ nameOverride: ""
 fullnameOverride: ""
 
 image:
-  # lokal gebaut: docker build -f fahrzeugbuch/server/Dockerfile fahrzeugbuch -t fahrzeugbuch-api:<version>
+  # lokal gebaut: docker build -f server/Dockerfile fahrzeugbuch -t fahrzeugbuch-api:<version>
   repository: fahrzeugbuch-api
   # leer → Chart.appVersion
   tag: ""
@@ -90,7 +90,7 @@ pdb:
   unhealthyPodEvictionPolicy: AlwaysAllow
 
 # ------------------------------------------------------------------------------------------------
-# App-Konfiguration (ConfigMap → Env). Namen wie in fahrzeugbuch/.env.example; leere Werte werden weggelassen
+# App-Konfiguration (ConfigMap → Env). Namen wie in .env.example; leere Werte werden weggelassen
 # (Server-Default). Vom Chart gesetzt und hier NICHT eintragen: WEB_CONCURRENCY, STATE_BACKEND, STORAGE_BACKEND,
 # FILES_DIR/ATTACHMENT_DIR, S3_*, DB_*, PG_MAX_CONNECTIONS, GRACEFUL_TIMEOUT_S, AUTO_MIGRATE, REDIS_URL.
 # Geheimnisse gehören in secrets.values bzw. secrets.existingSecret.

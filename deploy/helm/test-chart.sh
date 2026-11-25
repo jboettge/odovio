@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Prüft das Helm-Chart: helm lint, helm template + kubeconform (inkl. CRD-Schemas) für alle Beispiel-Values,
 # dazu Negativtests (Template muss mit erwarteter Meldung abbrechen).
-# Aufruf: fahrzeugbuch/deploy/helm/test-chart.sh   (helm und kubeconform im PATH oder HELM=/KUBECONFORM= setzen)
+# Aufruf: deploy/helm/test-chart.sh   (helm und kubeconform im PATH oder HELM=/KUBECONFORM= setzen)
 # Optional: KUBE_VERSIONS="1.30.0 1.34.0", KUBECONFORM_CACHE=<dir>
 set -euo pipefail
 

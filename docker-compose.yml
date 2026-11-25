@@ -1,5 +1,5 @@
 # Portainer: Stacks → Add stack → Repository
-#   Compose path: fahrzeugbuch/docker-compose.yml
+#   Compose path: docker-compose.yml
 #   Env: siehe .env.example (DB_PASSWORD, APP_DB_PASSWORD, OIDC_ISSUER, ANCHOR_SIGNING_KEY, API_BIND …)
 # Vertikal skalieren (ein Host, mehrere Worker): Profil "scale" startet Valkey (gemeinsamer Zustand):
 #   COMPOSE_PROFILES=scale, STATE_BACKEND=redis, VALKEY_PASSWORD, WEB_CONCURRENCY=auto|N (+ Ressourcen, PG-Tuning)
