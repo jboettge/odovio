@@ -104,6 +104,36 @@ struct MaintenanceItem: SyncEntity {
     var position: Int = 0
 }
 
+/// Verbautes Material/Ersatzteil einer Wartung.
+struct MaintenanceMaterial: SyncEntity {
+    static let entityName = "maintenance_material"
+    /// Grenzen wie Server (schemas.MaintenanceMaterialData)
+    static let maxName = 150
+    static let maxPartNumber = 60
+    static let maxUnit = 20
+    static let maxQuantity = 100_000.0
+    static let maxUnitPrice = 100_000.0
+
+    var id = UUID().uuidString.lowercased()
+    var version = 0
+    var deleted = false
+    var maintenanceId: String
+    var name: String
+    var partNumber: String?
+    var quantity: Double = 1
+    var unit: String = "Stk"
+    var unitPrice: Double?
+    var position: Int = 0
+
+    /// Menge × Einzelpreis; `nil` ohne Preis
+    var lineTotal: Double? { unitPrice.map { $0 * quantity } }
+
+    /// Materialsumme: nur nicht stornierte Positionen mit Preis.
+    static func total(_ list: [MaintenanceMaterial]) -> Double {
+        list.reduce(0.0) { sum, m in m.deleted ? sum : sum + (m.lineTotal ?? 0) }
+    }
+}
+
 // MARK: Server-Antworten
 
 struct TenantInfo: Codable, Hashable, Identifiable {
@@ -126,6 +156,7 @@ struct ChangesResponse: Decodable {
     var fuel: [FuelEntry]
     var maintenance: [Maintenance]
     var maintenanceItems: [MaintenanceItem]
+    var maintenanceMaterials: [MaintenanceMaterial]
 }
 
 struct OpResult: Decodable {

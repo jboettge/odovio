@@ -77,6 +77,16 @@ enum Demo {
             MaintenanceItem(id: String(format: "99999999-9999-4999-8999-%012ld", n), version: 1,
                             maintenanceId: "66666666-6666-4666-8666-666666666666", label: l.0, done: l.1, position: n)
         }
+        let parts: [(String, String?, Double, String, Double)] = [
+            ("Motoröl 5W-30", nil, 4.5, "l", 14.90),
+            ("Ölfilter", "W 712/95", 1, "Stk", 18.50),
+            ("Luftfilter", nil, 1, "Stk", 32.00),
+        ]
+        let materials = parts.enumerated().map { n, p in
+            MaintenanceMaterial(id: String(format: "cccccccc-cccc-4ccc-8ccc-%012ld", n), version: 1,
+                                maintenanceId: serviceId, name: p.0, partNumber: p.1, quantity: p.2,
+                                unit: p.3, unitPrice: p.4, position: n)
+        }
         let odometer = [
             OdometerReading(id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", version: 1, vehicleId: vehicleId,
                             date: day("2026-07-01"), km: 51700, note: "Ferienbeginn"),
@@ -84,7 +94,7 @@ enum Demo {
                             date: day("2026-07-21"), km: 52010, note: "Ferienende"),
         ]
         store.demoSeed(vehicles: [octavia, bus], odometer: odometer, fuel: fuelEntries,
-                       maintenance: maintenance, items: items, pending: [pendingFuel])
+                       maintenance: maintenance, items: items, materials: materials, pending: [pendingFuel])
     }
 }
 
@@ -104,6 +114,8 @@ struct DemoScreen: View {
                     NavigationStack { MaintenanceDetailView(maintenanceId: Demo.serviceId, vehicle: v) }
                 case "fuel-form": FuelFormView(vehicle: v, entry: nil)
                 case "maintenance-form": MaintenanceFormView(vehicle: v, maintenance: nil)
+                case "maintenance-edit":
+                    MaintenanceFormView(vehicle: v, maintenance: store.maintenance(id: Demo.serviceId))
                 case "report": ReportView(vehicle: v)
                 case "settings": NavigationStack { SettingsView() }
                 case "login": LoginView()

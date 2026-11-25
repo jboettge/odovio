@@ -45,7 +45,7 @@ jobs:
             sleep 4
             xcrun simctl io "$UDID" screenshot --type=png "shots/$2.png" >/dev/null
           }
-          for s in list overview fuel maintenance maintenance-detail odometer fuel-form maintenance-form report settings login; do
+          for s in list overview fuel maintenance maintenance-detail maintenance-edit odometer fuel-form maintenance-form report settings login; do
             shoot "$s" "$s"
           done
           xcrun simctl ui "$UDID" appearance dark

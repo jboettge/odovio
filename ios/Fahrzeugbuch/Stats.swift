@@ -75,8 +75,14 @@ enum StatsCalculator {
         ([vehicle.initialKm] + odometer.map(\.km) + fuel.map(\.km) + maintenance.compactMap(\.km)).max() ?? 0
     }
 
+    /// Kosten einer Wartung für die Statistik: Rechnungsbetrag, sonst Materialsumme.
+    static func maintenanceCost(_ m: Maintenance, materialTotal: Double) -> Double {
+        m.cost ?? materialTotal
+    }
+
     static func stats(vehicle: Vehicle, odometer: [OdometerReading], fuel: [FuelEntry],
-                      maintenance: [Maintenance], today: Date = Date()) -> VehicleStats {
+                      maintenance: [Maintenance], materials: [MaintenanceMaterial],
+                      today: Date = Date()) -> VehicleStats {
         let current = currentKm(vehicle: vehicle, odometer: odometer, fuel: fuel, maintenance: maintenance)
         let points = consumptionPoints(fuel)
         let dist = Double(points.reduce(0) { $0 + $1.distance })
@@ -87,6 +93,11 @@ enum StatsCalculator {
         for m in maintenance.sorted(by: { ($0.date, $0.id) < ($1.date, $1.id) }) {
             latest[m.title.trimmed.lowercased()] = m
         }
+        let materialsByMaintenance = Dictionary(grouping: materials, by: \.maintenanceId)
+        let maintenanceTotal = maintenance.reduce(0.0) { sum, m in
+            sum + Self.maintenanceCost(m, materialTotal: MaintenanceMaterial.total(materialsByMaintenance[m.id] ?? []))
+        }
+
         let startOfToday = Calendar.current.startOfDay(for: today)
         let due = latest.values.compactMap { m -> DueItem? in
             guard m.nextDueKm != nil || m.nextDueDate != nil else { return nil }
@@ -111,7 +122,7 @@ enum StatsCalculator {
             avgCostPerKm: dist > 0 ? cost / dist : nil,
             totalLiters: fuel.reduce(0) { $0 + $1.liters },
             totalFuelCost: fuel.reduce(0) { $0 + $1.priceTotal },
-            totalMaintenanceCost: maintenance.reduce(0) { $0 + ($1.cost ?? 0) },
+            totalMaintenanceCost: maintenanceTotal,
             points: points,
             due: due
         )

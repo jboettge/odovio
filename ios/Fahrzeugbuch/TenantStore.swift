@@ -18,6 +18,7 @@ final class TenantStore {
     private(set) var fuel: [String: FuelEntry] = [:]
     private(set) var maintenance: [String: Maintenance] = [:]
     private(set) var items: [String: MaintenanceItem] = [:]
+    private(set) var materials: [String: MaintenanceMaterial] = [:]
     private(set) var outbox: [PendingOp] = []
     private(set) var cursor = 0
     private(set) var lastSync: Date?
@@ -64,12 +65,25 @@ final class TenantStore {
             .sorted { ($0.position, $0.label) < ($1.position, $1.label) }
     }
 
+    func materials(for maintenanceId: String) -> [MaintenanceMaterial] {
+        materials.values.filter { $0.maintenanceId == maintenanceId && !$0.deleted }
+            .sorted { ($0.position, $0.name) < ($1.position, $1.name) }
+    }
+
+    /// Σ Menge × Einzelpreis (nicht stornierte Positionen mit Preis)
+    func materialTotal(for maintenanceId: String) -> Double {
+        MaintenanceMaterial.total(materials(for: maintenanceId))
+    }
+
     func maintenance(id: String) -> Maintenance? { maintenance[id] }
     func vehicle(id: String) -> Vehicle? { vehicles[id] }
 
     func stats(for v: Vehicle) -> VehicleStats {
-        StatsCalculator.stats(vehicle: v, odometer: odometer(for: v.id), fuel: fuel(for: v.id),
-                              maintenance: maintenance(for: v.id))
+        let list = maintenance(for: v.id)
+        let ids = Set(list.map(\.id))
+        let mats = materials.values.filter { !$0.deleted && ids.contains($0.maintenanceId) }
+        return StatsCalculator.stats(vehicle: v, odometer: odometer(for: v.id), fuel: fuel(for: v.id),
+                                     maintenance: list, materials: mats)
     }
 
     func currentKm(_ v: Vehicle) -> Int {
@@ -100,8 +114,9 @@ final class TenantStore {
     func delete(_ f: FuelEntry) { remove(f, in: \.fuel) }
     func delete(_ m: Maintenance) { remove(m, in: \.maintenance) }
 
-    /// Wartung inkl. Checkliste speichern; entfernte Punkte werden storniert.
-    func save(_ m: Maintenance, items newItems: [MaintenanceItem]) {
+    /// Wartung inkl. Checkliste und Material speichern; entfernte Punkte/Positionen werden storniert,
+    /// unveränderte nicht erneut gesendet.
+    func save(_ m: Maintenance, items newItems: [MaintenanceItem], materials newMaterials: [MaintenanceMaterial]) {
         upsert(m, in: \.maintenance)
         let keep = Set(newItems.map(\.id))
         for old in items(for: m.id) where !keep.contains(old.id) {
@@ -115,6 +130,21 @@ final class TenantStore {
                 continue // unverändert → keine Revision
             }
             upsert(item, in: \.items)
+        }
+        let keepMaterials = Set(newMaterials.map(\.id))
+        for old in materials(for: m.id) where !keepMaterials.contains(old.id) {
+            remove(old, in: \.materials)
+        }
+        for (n, var material) in newMaterials.enumerated() {
+            material.position = n
+            material.maintenanceId = m.id
+            if let existing = materials[material.id], !existing.deleted {
+                var compare = material
+                compare.version = existing.version
+                compare.deleted = existing.deleted
+                if compare == existing { continue } // unverändert → keine Revision
+            }
+            upsert(material, in: \.materials)
         }
     }
 
@@ -227,12 +257,14 @@ final class TenantStore {
             fuel = fuel.filter { isPending($0.key) }
             maintenance = maintenance.filter { isPending($0.key) }
             items = items.filter { isPending($0.key) }
+            materials = materials.filter { isPending($0.key) }
         }
         merge(ch.vehicles, into: \.vehicles)
         merge(ch.odometer, into: \.odometer)
         merge(ch.fuel, into: \.fuel)
         merge(ch.maintenance, into: \.maintenance)
         merge(ch.maintenanceItems, into: \.items)
+        merge(ch.maintenanceMaterials, into: \.materials)
         cursor = ch.cursor
     }
 
@@ -251,18 +283,21 @@ final class TenantStore {
         case FuelEntry.entityName: fuel[id]?.version = v
         case Maintenance.entityName: maintenance[id]?.version = v
         case MaintenanceItem.entityName: items[id]?.version = v
+        case MaintenanceMaterial.entityName: materials[id]?.version = v
         default: break
         }
     }
 
     #if DEBUG
     func demoSeed(vehicles v: [Vehicle], odometer o: [OdometerReading], fuel f: [FuelEntry],
-                  maintenance m: [Maintenance], items i: [MaintenanceItem], pending: [FuelEntry]) {
+                  maintenance m: [Maintenance], items i: [MaintenanceItem], materials mat: [MaintenanceMaterial],
+                  pending: [FuelEntry]) {
         vehicles = Dictionary(uniqueKeysWithValues: v.map { ($0.id, $0) })
         odometer = Dictionary(uniqueKeysWithValues: o.map { ($0.id, $0) })
         fuel = Dictionary(uniqueKeysWithValues: f.map { ($0.id, $0) })
         maintenance = Dictionary(uniqueKeysWithValues: m.map { ($0.id, $0) })
         items = Dictionary(uniqueKeysWithValues: i.map { ($0.id, $0) })
+        materials = Dictionary(uniqueKeysWithValues: mat.map { ($0.id, $0) })
         outbox = pending.map { PendingOp(entity: FuelEntry.entityName, entityId: $0.id, action: "upsert",
                                          baseVersion: nil, data: nil, clientTs: "") }
         lastSync = Date().addingTimeInterval(-600)
@@ -277,6 +312,8 @@ final class TenantStore {
         var fuel: [String: FuelEntry]
         var maintenance: [String: Maintenance]
         var items: [String: MaintenanceItem]
+        /// Optional, damit Dateien älterer App-Versionen (ohne Material) weiter laden
+        var materials: [String: MaintenanceMaterial]?
         var outbox: [PendingOp]
         var cursor: Int
         var lastSync: Date?
@@ -296,7 +333,7 @@ final class TenantStore {
 
     private func persist() {
         let snap = Snapshot(vehicles: vehicles, odometer: odometer, fuel: fuel, maintenance: maintenance,
-                            items: items, outbox: outbox, cursor: cursor, lastSync: lastSync)
+                            items: items, materials: materials, outbox: outbox, cursor: cursor, lastSync: lastSync)
         do {
             let data = try Self.fileEncoder.encode(snap)
             try data.write(to: fileURL, options: [.atomic, .completeFileProtectionUnlessOpen])
@@ -313,8 +350,10 @@ final class TenantStore {
         fuel = snap.fuel
         maintenance = snap.maintenance
         items = snap.items
+        materials = snap.materials ?? [:]
         outbox = snap.outbox
-        cursor = snap.cursor
+        // Datei ohne Material (ältere App-Version): ab 0 holen, damit bereits erfasste Positionen ankommen
+        cursor = snap.materials == nil ? 0 : snap.cursor
         lastSync = snap.lastSync
     }
 
@@ -357,6 +396,7 @@ final class TenantStore {
         case FuelEntry.entityName: "Tankvorgang"
         case Maintenance.entityName: "Wartung"
         case MaintenanceItem.entityName: "Checkpunkt"
+        case MaintenanceMaterial.entityName: "Material"
         default: entity
         }
     }

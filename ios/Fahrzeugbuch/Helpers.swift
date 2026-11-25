@@ -18,6 +18,11 @@ enum Fmt {
     static func day(_ d: Date) -> String { d.formatted(date: .abbreviated, time: .omitted) }
     /// Für Eingabefelder: ohne Tausendertrenner, damit es wieder geparst werden kann
     static func edit(_ v: Double) -> String { v.formatted(.number.grouping(.never).precision(.fractionLength(2))) }
+    /// Mengen: nur nötige Nachkommastellen (1, 4.5, 0.25)
+    static func qty(_ v: Double) -> String { v.formatted(.number.precision(.fractionLength(0...3))) }
+    static func editQty(_ v: Double) -> String {
+        v.formatted(.number.grouping(.never).precision(.fractionLength(0...3)))
+    }
 }
 
 /// Wrapper für `.sheet(item:)` – `value == nil` bedeutet "neu anlegen".

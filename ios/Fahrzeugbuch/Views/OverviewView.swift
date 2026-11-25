@@ -92,7 +92,7 @@ struct OverviewView: View {
                 RuleMark(y: .value("Durchschnitt", average))
                     .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 3]))
                     .foregroundStyle(.secondary)
-                    .annotation(position: .top, alignment: .leading) {
+                    .annotation(position: .top, alignment: .trailing) {
                         Text("Ø \(Fmt.num(average, 1))").font(.caption2).foregroundStyle(.secondary)
                     }
             }
