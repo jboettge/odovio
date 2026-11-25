@@ -84,13 +84,14 @@ private struct MaintenanceRow: View {
             HStack(spacing: 8) {
                 Text(Fmt.day(maintenance.date) + (maintenance.km.map { " · " + Fmt.km($0) } ?? ""))
                     .lineLimit(1)
-                    .layoutPriority(1)
+                    .minimumScaleFactor(0.85)
                 Spacer(minLength: 4)
                 if !materials.isEmpty {
                     HStack(spacing: 2) {
                         Image(systemName: "shippingbox")
                         Text("\(materials.count)")
                     }
+                    .fixedSize()
                     .accessibilityElement(children: .ignore)
                     .accessibilityLabel(materials.count == 1 ? "1 Materialposition"
                                         : "\(materials.count) Materialpositionen")
@@ -100,6 +101,7 @@ private struct MaintenanceRow: View {
                     Label("\(doneCount)/\(items.count)",
                           systemImage: complete ? "checkmark.circle.fill" : "circle.dashed")
                         .foregroundStyle(complete ? .green : .secondary)
+                        .fixedSize()
                 }
             }
             .font(.subheadline)
