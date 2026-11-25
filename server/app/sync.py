@@ -28,7 +28,7 @@ from sqlalchemy.exc import DataError, IntegrityError
 from sqlalchemy.orm import Session
 
 from . import models, privacy, schemas, security
-from .attachments import blob_path
+from .attachments import storage
 from .audit import append_revision
 from .auth import User
 from .timeutil import local_month
@@ -249,7 +249,7 @@ def _attachment_rules(ctx: OpContext, obj, data):
     if data is None:            # Storno: Datei bleibt erhalten
         return None
     if obj is not None and (obj.sha256, obj.mime, obj.size) != (data.sha256, data.mime, data.size) \
-            and blob_path(ctx.tenant.id, obj.id).is_file():
+            and storage().exists(ctx.tenant.id, obj.id):
         raise Rejected("Datei bereits hochgeladen: sha256/mime/size unveränderlich (neuen Beleg anlegen)")
     if data.vehicle_id is not None:
         for fld, model in (("fuel_id", models.FuelEntry), ("maintenance_id", models.Maintenance)):
@@ -384,18 +384,28 @@ def changes_since(db: Session, tenant: models.Tenant, since: int, limit: int = C
                   mask_private: bool = False) -> dict:
     """Änderungen mit last_seq > since, höchstens `limit` Zeilen über alle Typen.
 
-    Jede Revision betrifft genau ein Objekt → last_seq ist je Mandant eindeutig. Je Tabelle werden die
-    ersten limit+1 Zeilen gelesen; die global ersten `limit` liegen sicher darunter. Ist mehr da, ist
-    cursor = höchste gelieferte last_seq (alles ≤ cursor ist vollständig geliefert) und has_more = True."""
+    Jede Revision betrifft genau ein Objekt → last_seq ist je Mandant eindeutig. Zweistufig mit konstantem
+    Speicher: (1) je Tabelle nur die ersten limit+1 last_seq (Index-Only-Scan über (tenant_id, last_seq)),
+    daraus die Grenze = limit-kleinste last_seq; (2) nur Zeilen mit since < last_seq ≤ Grenze laden (höchstens
+    `limit` Objekte statt bis zu 14 × limit). Ist mehr da, ist cursor = Grenze (alles ≤ cursor ist vollständig
+    geliefert) und has_more = True."""
     limit = max(1, min(limit, CHANGES_MAX))
+    seqs: list[int] = []
+    for model, _, _ in ENTITIES.values():
+        seqs += db.scalars(select(model.last_seq).where(model.tenant_id == tenant.id, model.last_seq > since)
+                           .order_by(model.last_seq).limit(limit + 1))
+    seqs.sort()
+    has_more = len(seqs) > limit
+    upper = seqs[limit - 1] if has_more else None
     rows: list[tuple[int, str, object]] = []
     for entity, (model, _, _) in ENTITIES.items():
-        q = select(model).where(model.tenant_id == tenant.id, model.last_seq > since) \
-            .order_by(model.last_seq).limit(limit + 1)
-        rows += [(r.last_seq, entity, r) for r in db.scalars(q)]
+        if not seqs:
+            break
+        q = select(model).where(model.tenant_id == tenant.id, model.last_seq > since)
+        if upper is not None:
+            q = q.where(model.last_seq <= upper)
+        rows += [(r.last_seq, entity, r) for r in db.scalars(q.order_by(model.last_seq))]
     rows.sort(key=lambda x: x[0])
-    has_more = len(rows) > limit
-    rows = rows[:limit]
     out: dict = {"cursor": rows[-1][0] if has_more else tenant.seq, "has_more": has_more}
     for entity in ENTITIES:
         out[CHANGE_KEYS[entity]] = []

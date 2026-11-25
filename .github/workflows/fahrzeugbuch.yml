@@ -21,6 +21,20 @@ jobs:
         ports: ["5432:5432"]
         options: >-
           --health-cmd "pg_isready -U fzb" --health-interval 5s --health-timeout 5s --health-retries 10
+      # gemeinsamer Zustand (STATE_BACKEND=redis) – gleicher Digest wie docker-compose.yml
+      valkey:
+        image: valkey/valkey:8-alpine@sha256:9971099af41c36e887aabdfe22b80c0fe45df949163dfc9cb434febc57cfc3fc
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "valkey-cli ping" --health-interval 5s --health-timeout 3s --health-retries 10
+      # S3-kompatibler Belegspeicher (STORAGE_BACKEND=s3), RustFS 1.0.6
+      s3:
+        image: rustfs/rustfs@sha256:ee717072290bec9b11abfc0365f8310b00df1cd9b3639943edae47bdef05044a
+        env:
+          RUSTFS_ACCESS_KEY: fzbtestaccess
+          RUSTFS_SECRET_KEY: fzbtestsecret123
+          RUSTFS_CONSOLE_ENABLE: "false"
+        ports: ["9000:9000"]
     defaults:
       run:
         working-directory: fahrzeugbuch/server
@@ -34,7 +48,7 @@ jobs:
           pip install --require-hashes --no-deps -r requirements.txt
           pip install -r requirements-test.txt
       - name: Lint (ruff)
-        run: ruff check app tests alembic
+        run: ruff check app tests alembic loadtest
       - name: Lint (bandit, Schweregrad ≥ mittel)
         run: bandit -r app -q -ll
       - name: Schwachstellen in Abhängigkeiten (pip-audit, Lock-Datei mit Hashes)
@@ -60,10 +74,16 @@ jobs:
           diff <(grep -E '^[a-z]' requirements.txt) <(grep -E '^[a-z]' /tmp/req.txt)
       - name: Tests (SQLite)
         run: pytest -q
-      - name: Tests (PostgreSQL)
+      - name: Tests (PostgreSQL + Valkey + S3, inkl. Mehrprozess-E2E mit 2 uvicorn-Workern)
         env:
           FZB_TEST_DATABASE_URL: postgresql+psycopg://fzb:fzb@localhost:5432/fzb
-        run: pytest -q
+          FZB_TEST_REDIS_URL: redis://localhost:6379/0
+          FZB_TEST_S3_ENDPOINT: http://localhost:9000
+          FZB_TEST_S3_ACCESS_KEY: fzbtestaccess
+          FZB_TEST_S3_SECRET_KEY: fzbtestsecret123
+        run: |
+          for i in $(seq 1 30); do curl -s -o /dev/null http://localhost:9000/ && break; sleep 1; done
+          pytest -q -rs
       - name: Docker-Build (Web-Frontend + API, Kontext fahrzeugbuch/)
         working-directory: .
         run: docker build -f fahrzeugbuch/server/Dockerfile -t fahrzeugbuch-api:ci fahrzeugbuch

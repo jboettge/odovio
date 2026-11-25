@@ -119,3 +119,40 @@ def bearer_token(**claims) -> dict:
 def web_headers(**claims) -> dict:
     """Token des Web-Frontends (azp = OIDC_WEB_CLIENT_ID): Steuerparameter, Mitgliederverwaltung."""
     return bearer_token(azp=WEB_CLIENT_ID, **claims)
+
+
+# ---------- externe Dienste (optional) ----------
+REDIS_URL = os.environ.get("FZB_TEST_REDIS_URL")
+S3_ENDPOINT = os.environ.get("FZB_TEST_S3_ENDPOINT")
+IS_PG = engine.dialect.name == "postgresql"
+
+
+def pytest_configure(config):
+    config.addinivalue_line("markers", "requires_redis: braucht Valkey/Redis (FZB_TEST_REDIS_URL)")
+    config.addinivalue_line("markers", "requires_s3: braucht S3-kompatiblen Speicher (FZB_TEST_S3_ENDPOINT)")
+    config.addinivalue_line("markers", "requires_pg: braucht PostgreSQL (FZB_TEST_DATABASE_URL)")
+
+
+def pytest_collection_modifyitems(config, items):
+    for item in items:
+        if "requires_redis" in item.keywords and not REDIS_URL:
+            item.add_marker(pytest.mark.skip(reason="FZB_TEST_REDIS_URL nicht gesetzt"))
+        if "requires_s3" in item.keywords and not S3_ENDPOINT:
+            item.add_marker(pytest.mark.skip(reason="FZB_TEST_S3_ENDPOINT nicht gesetzt"))
+        if "requires_pg" in item.keywords and not IS_PG:
+            item.add_marker(pytest.mark.skip(reason="nur mit PostgreSQL (FZB_TEST_DATABASE_URL)"))
+
+
+@pytest.fixture
+def redis_state(monkeypatch):
+    """STATE_BACKEND=redis mit eigenem Schlüsselpräfix je Test; danach aufgeräumt."""
+    from app import state
+    monkeypatch.setenv("STATE_BACKEND", "redis")
+    monkeypatch.setenv("REDIS_URL", REDIS_URL)
+    monkeypatch.setenv("REDIS_RETRY_S", "0")
+    shared = state.RedisState(REDIS_URL, key_prefix=f"fzbtest:{uuid.uuid4().hex[:8]}:")
+    state.configure(shared)
+    shared.reset()
+    yield shared
+    shared.reset()
+    state.configure(None)

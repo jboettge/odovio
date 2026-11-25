@@ -1,6 +1,8 @@
 # Portainer: Stacks → Add stack → Repository
 #   Compose path: fahrzeugbuch/docker-compose.yml
 #   Env: siehe .env.example (DB_PASSWORD, APP_DB_PASSWORD, OIDC_ISSUER, ANCHOR_SIGNING_KEY, API_BIND …)
+# Vertikal skalieren (ein Host, mehrere Worker): Profil "scale" startet Valkey (gemeinsamer Zustand):
+#   COMPOSE_PROFILES=scale, STATE_BACKEND=redis, VALKEY_PASSWORD, WEB_CONCURRENCY=auto|N (+ Ressourcen, PG-Tuning)
 x-api: &api
   # Kontext fahrzeugbuch/: Stufe 1 baut das Web-Frontend (web/), Stufe 2 die API (server/)
   build:
@@ -14,7 +16,7 @@ x-api: &api
   security_opt: [no-new-privileges:true]
   init: true                     # PID 1 = tini: Signale weiterleiten, Zombies einsammeln
   ulimits:
-    nofile: {soft: 4096, hard: 8192}
+    nofile: {soft: 16384, hard: 32768}
 
 services:
   db:
@@ -26,6 +28,39 @@ services:
       POSTGRES_DB: fahrzeugbuch
       POSTGRES_USER: fahrzeugbuch          # Owner/Superuser – nur für Migration und Backup
       POSTGRES_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD fehlt}
+    # Tuning per Env (Defaults konservativ für ≈ 1 GB RAM; Werte für 8/16/32 GB siehe .env.example)
+    command:
+      - postgres
+      - -c
+      - max_connections=${PG_MAX_CONNECTIONS:-100}
+      - -c
+      - shared_buffers=${PG_SHARED_BUFFERS:-256MB}
+      - -c
+      - effective_cache_size=${PG_EFFECTIVE_CACHE_SIZE:-768MB}
+      - -c
+      - work_mem=${PG_WORK_MEM:-4MB}
+      - -c
+      - maintenance_work_mem=${PG_MAINTENANCE_WORK_MEM:-64MB}
+      - -c
+      - max_worker_processes=${PG_MAX_WORKER_PROCESSES:-8}
+      - -c
+      - max_parallel_workers=${PG_MAX_PARALLEL_WORKERS:-2}
+      - -c
+      - max_parallel_workers_per_gather=${PG_MAX_PARALLEL_WORKERS_PER_GATHER:-1}
+      - -c
+      - max_parallel_maintenance_workers=${PG_MAX_PARALLEL_MAINTENANCE_WORKERS:-1}
+      - -c
+      - wal_buffers=${PG_WAL_BUFFERS:-8MB}
+      - -c
+      - random_page_cost=1.1
+      - -c
+      - effective_io_concurrency=200
+      - -c
+      - checkpoint_completion_target=0.9
+      - -c
+      - max_wal_size=${PG_MAX_WAL_SIZE:-1GB}
+    # shared_buffers liegen im gemeinsamen Speicher; /dev/shm für parallele Abfragen (≥ 256 MB)
+    shm_size: ${PG_SHM_SIZE:-256mb}
     volumes:
       - fahrzeugbuch-db:/var/lib/postgresql/data
     healthcheck:
@@ -34,7 +69,11 @@ services:
       timeout: 5s
       retries: 10
     security_opt: [no-new-privileges:true]
-    mem_limit: 1g
+    deploy:
+      resources:
+        limits:
+          cpus: "${DB_CPUS:-2}"
+          memory: ${DB_MEMORY:-1g}
     networks: [internal]
 
   # Einmalig je Deploy: Schema (Alembic upgrade head)/Trigger als Owner, App-Rolle ohne Owner-/Superuser-Rechte
@@ -81,7 +120,7 @@ services:
       APP_TIMEZONE: ${APP_TIMEZONE:-Europe/Zurich}
       MAX_BODY_BYTES: ${MAX_BODY_BYTES:-1048576}
       # Belege (Fotos/PDF): Ablage im Volume fahrzeugbuch-files, Upload-Limit nur für …/blob
-      ATTACHMENT_DIR: /data/attachments
+      FILES_DIR: /data/attachments
       MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES:-8388608}
       ATTACHMENT_QUOTA_MB: ${ATTACHMENT_QUOTA_MB:-2048}
       FORWARDED_ALLOW_IPS: ${FORWARDED_ALLOW_IPS:-127.0.0.1}
@@ -92,7 +131,7 @@ services:
       # exakte Cross-Origin-Origins (leer = keine; das Web-Frontend läuft same-origin)
       CORS_ORIGINS: ${CORS_ORIGINS:-}
       FORCE_HSTS: ${FORCE_HSTS:-0}
-      # In-Memory je Prozess → uvicorn läuft mit genau 1 Worker (Dockerfile)
+      # STATE_BACKEND=memory: je Prozess (1 Worker); redis: gemeinsam für alle Worker
       RATE_IP_PER_MIN: ${RATE_IP_PER_MIN:-600}
       RATE_PUBLIC_PER_MIN: ${RATE_PUBLIC_PER_MIN:-120}
       RATE_WEB_PER_MIN: ${RATE_WEB_PER_MIN:-3000}
@@ -107,7 +146,40 @@ services:
       JSON_MAX_ITEMS: ${JSON_MAX_ITEMS:-100000}
       # 1 → unsichere Konfiguration (siehe Sicherheits-Log config_warning) verhindert den Start
       STRICT_CONFIG: ${STRICT_CONFIG:-0}
+      # ---------- Skalierung (app/serve.py, app/state.py, app/db.py) ----------
+      # Worker je Container: 1 | N | auto (= min(2 × cpus-Limit, 16)); > 1 nur mit STATE_BACKEND=redis
+      WEB_CONCURRENCY: ${WEB_CONCURRENCY:-1}
       UVICORN_LIMIT_CONCURRENCY: ${UVICORN_LIMIT_CONCURRENCY:-200}
+      UVICORN_LIMIT_MAX_REQUESTS: ${UVICORN_LIMIT_MAX_REQUESTS:-0}
+      GRACEFUL_TIMEOUT_S: ${GRACEFUL_TIMEOUT_S:-25}
+      THREADPOOL_SIZE: ${THREADPOOL_SIZE:-40}
+      PDF_CONCURRENCY: ${PDF_CONCURRENCY:-2}
+      # memory (Einzelbetrieb) | redis (Valkey, Profil "scale")
+      STATE_BACKEND: ${STATE_BACKEND:-memory}
+      REDIS_URL: ${REDIS_URL:-redis://valkey:6379/0}
+      REDIS_PASSWORD: ${VALKEY_PASSWORD:-}
+      DB_POOL_SIZE: ${DB_POOL_SIZE:-5}
+      DB_MAX_OVERFLOW: ${DB_MAX_OVERFLOW:-10}
+      DB_POOL_TIMEOUT: ${DB_POOL_TIMEOUT:-30}
+      DB_POOL_RECYCLE: ${DB_POOL_RECYCLE:-1800}
+      DB_STATEMENT_TIMEOUT_MS: ${DB_STATEMENT_TIMEOUT_MS:-30000}
+      DB_IDLE_IN_TRANSACTION_TIMEOUT_MS: ${DB_IDLE_IN_TRANSACTION_TIMEOUT_MS:-60000}
+      DB_DISABLE_PREPARED: ${DB_DISABLE_PREPARED:-0}
+      # Startprüfung: WEB_CONCURRENCY × (DB_POOL_SIZE + DB_MAX_OVERFLOW) + Reserve ≤ PG_MAX_CONNECTIONS
+      PG_MAX_CONNECTIONS: ${PG_MAX_CONNECTIONS:-100}
+      DB_CONNECTION_RESERVE: ${DB_CONNECTION_RESERVE:-10}
+      # Prometheus: /metrics nur mit Bearer-Token oder aus diesen CIDRs (sonst 404)
+      METRICS_TOKEN: ${METRICS_TOKEN:-}
+      METRICS_ALLOW: ${METRICS_ALLOW:-}
+      # Belegspeicher: fs (Volume unten) | s3 (S3_ENDPOINT, S3_BUCKET, S3_ACCESS_KEY_ID, S3_SECRET_ACCESS_KEY …)
+      STORAGE_BACKEND: ${STORAGE_BACKEND:-fs}
+      S3_ENDPOINT: ${S3_ENDPOINT:-}
+      S3_BUCKET: ${S3_BUCKET:-}
+      S3_REGION: ${S3_REGION:-us-east-1}
+      S3_PREFIX: ${S3_PREFIX:-attachments/}
+      S3_FORCE_PATH_STYLE: ${S3_FORCE_PATH_STYLE:-1}
+      S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:-}
+      S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:-}
       # Intelligente Dienste (optional, leer = aus). OSRM/vLLM laufen beim Nutzer als eigene Container:
       # erreichbar über das default-Netz per Host-IP bzw. host.docker.internal (siehe extra_hosts).
       OSRM_URL: ${OSRM_URL:-}
@@ -144,10 +216,16 @@ services:
     ports:
       # Nur für den Reverse Proxy freigeben: API_BIND = IP der Docker-VM (+ Firewall nur OPNsense)
       - "${API_BIND:-127.0.0.1}:${API_PORT:-8085}:8000"
-    mem_limit: 512m
-    pids_limit: 200
+    deploy:
+      resources:
+        limits:
+          cpus: "${API_CPUS:-2}"
+          memory: ${API_MEMORY:-1g}
+          pids: ${API_PIDS_LIMIT:-1024}     # Threads zählen als PIDs: je Worker ≈ THREADPOOL_SIZE + 10
+    # SIGTERM → laufende Anfragen bis GRACEFUL_TIMEOUT_S fertigstellen
+    stop_grace_period: ${API_STOP_GRACE:-30s}
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=4)"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/live', timeout=4)"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -155,10 +233,55 @@ services:
     depends_on:
       migrate:
         condition: service_completed_successfully
+      valkey:
+        condition: service_healthy
+        required: false          # nur mit Profil "scale"
     # Dienste auf dem Docker-Host (z. B. OSRM/vLLM mit veröffentlichtem Port): http://host.docker.internal:<port>
     extra_hosts:
       - "host.docker.internal:host-gateway"
     networks: [internal, default]
+
+  # Gemeinsamer, flüchtiger Zustand (Rate-Limits, Brute-Force-Sperren, Circuit-Breaker, Metrik-Schnappschüsse)
+  # für mehrere Worker – nur mit Profil "scale" (Einzelbetrieb unverändert):
+  #   COMPOSE_PROFILES=scale  +  STATE_BACKEND=redis, VALKEY_PASSWORD (openssl rand -hex 32), WEB_CONCURRENCY
+  # Keine Persistenz (Neustart = Limits/Sperren zurückgesetzt, beabsichtigt), maxmemory + allkeys-lru,
+  # nur internes Netz, read-only, ohne Capabilities. Digest-Update: docker pull valkey/valkey:8-alpine
+  valkey:
+    image: valkey/valkey:8-alpine@sha256:9971099af41c36e887aabdfe22b80c0fe45df949163dfc9cb434febc57cfc3fc
+    container_name: fahrzeugbuch-valkey
+    profiles: ["scale"]
+    restart: unless-stopped
+    user: "999:1000"               # valkey-Benutzer des Images (kein chown/setpriv nötig → cap_drop ALL)
+    # Passwort Pflicht (ohne → Abbruch); Werte über Env, damit Einzelbetrieb ohne VALKEY_PASSWORD startet
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >-
+        [ -n "$$VALKEY_PASSWORD" ] || { echo "VALKEY_PASSWORD fehlt" >&2; exit 1; };
+        exec valkey-server --requirepass "$$VALKEY_PASSWORD" --save "" --appendonly no
+        --maxmemory "$$VALKEY_MAXMEMORY" --maxmemory-policy allkeys-lru --protected-mode yes
+        --io-threads "$$VALKEY_IO_THREADS"
+    environment:
+      VALKEY_PASSWORD: ${VALKEY_PASSWORD:-}
+      VALKEY_MAXMEMORY: ${VALKEY_MAXMEMORY:-256mb}
+      VALKEY_IO_THREADS: ${VALKEY_IO_THREADS:-2}
+      REDISCLI_AUTH: ${VALKEY_PASSWORD:-}     # nur für den Healthcheck (valkey-cli)
+    read_only: true
+    tmpfs: ["/tmp:size=8m,mode=1777,noexec,nosuid,nodev"]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    ulimits:
+      nofile: {soft: 10032, hard: 10032}
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: "${VALKEY_CPUS:-1}"
+          memory: ${VALKEY_MEMORY:-384m}
+    networks: [internal]
 
   # OPTIONAL – Reverse-Geocoding (Photon, CH-Extrakt). Start nur mit Profil:
   #   docker compose --profile geo up -d photon      →  PHOTON_URL=http://photon:2322

@@ -336,3 +336,5 @@ for _m in SYNCED_MODELS:
     Index(f"ix_{_m.__tablename__}_tenant_last_seq", _m.tenant_id, _m.last_seq)
 Index("ix_revisions_tenant_entity", Revision.tenant_id, Revision.entity, Revision.entity_id)
 Index("ix_trips_vehicle_start", Trip.vehicle_id, Trip.start_at)
+# letzter Anker je Mandant (maybe_anchor bei jedem Sync), Alembic 0003
+Index("ix_anchors_tenant_seq", Anchor.tenant_id, Anchor.seq)

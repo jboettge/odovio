@@ -27,7 +27,13 @@
 }
 
 fahrzeugbuch.j-mb.net {
+	# Die API liefert vorkomprimierte Assets (br/gzip) und gzip für /api/*-JSON selbst; Caddy komprimiert
+	# bereits kodierte Antworten nicht erneut (nur der Rest wird hier komprimiert)
 	encode zstd gzip
+
+	# Prometheus-Metriken nur intern (direkt am API-Port mit METRICS_TOKEN), nie über den Proxy
+	@metrics path /metrics
+	respond @metrics 404
 
 	header {
 		Strict-Transport-Security "max-age=31536000; includeSubDomains"
@@ -70,8 +76,9 @@ fahrzeugbuch.j-mb.net {
 			max_size 1MB
 		}
 		reverse_proxy 10.0.10.5:8085 {
-			# Healthcheck des Upstreams (unauthentifiziert, Rate-Limit RATE_PUBLIC_PER_MIN beachten)
-			health_uri /health
+			# Healthcheck des Upstreams (unauthentifiziert, Rate-Limit RATE_PUBLIC_PER_MIN beachten):
+			# /health/ready = DB + Schema-Stand + gemeinsamer Zustand, 503 beim Herunterfahren (SIGTERM)
+			health_uri /health/ready
 			health_interval 60s
 		}
 	}

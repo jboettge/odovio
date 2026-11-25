@@ -271,15 +271,20 @@ def _cell(v) -> str:
     return "'" + s if first in FORMULA_START else s
 
 
-def trips_csv(db: Session, tenant: models.Tenant, data: VehicleData, date_from: dt.date, date_to: dt.date,
-              mask_private: bool = False) -> bytes:
+CSV_CHUNK_ROWS = 500
+
+
+def iter_trips_csv(db: Session, tenant: models.Tenant, data: VehicleData, date_from: dt.date, date_to: dt.date,
+                   mask_private: bool = False):
+    """CSV (UTF-8 mit BOM, ;) blockweise als Bytes – für StreamingResponse ohne die ganze Datei im Speicher."""
     lk = Lookup(db, tenant.id)
     v = data.vehicle
     buf = io.StringIO()
     w = csv.writer(buf, delimiter=";", lineterminator="\r\n")
+    buf.write("\ufeff")
     w.writerow(["Datum", "Start", "Ende", "km Beginn", "km Ende", "Distanz km", "Startort", "Zielort", "Kategorie",
                 "Zweck", "Kunde", "Fahrer", "Status", "Quelle", "Notiz", "Fahrzeug", "Kennzeichen", "ID"])
-    for t in trips_between(db, tenant.id, v.id, date_from, date_to):
+    for i, t in enumerate(trips_between(db, tenant.id, v.id, date_from, date_to), 1):
         hide = masked(t, mask_private)
         start, end = _route(t, lk, mask_private)
         s, e = _local(t.start_at), _local(t.end_at)
@@ -293,7 +298,16 @@ def trips_csv(db: Session, tenant: models.Tenant, data: VehicleData, date_from: 
             SOURCE_NAMES.get(t.source, t.source), "" if hide else _cell(t.note), _cell(v.name), _cell(v.plate),
             t.id,
         ])
-    return ("﻿" + buf.getvalue()).encode("utf-8")
+        if i % CSV_CHUNK_ROWS == 0:
+            yield buf.getvalue().encode("utf-8")
+            buf.seek(0)
+            buf.truncate()
+    yield buf.getvalue().encode("utf-8")
+
+
+def trips_csv(db: Session, tenant: models.Tenant, data: VehicleData, date_from: dt.date, date_to: dt.date,
+              mask_private: bool = False) -> bytes:
+    return b"".join(iter_trips_csv(db, tenant, data, date_from, date_to, mask_private))
 
 
 # ---------- Jahresbericht ----------

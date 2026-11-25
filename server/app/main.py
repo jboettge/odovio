@@ -1,41 +1,39 @@
+import asyncio
 import datetime as dt
 import hashlib
+import hmac
 import json
 import logging
 import os
 import re
+import signal
+import threading
+import time
 import unicodedata
 import uuid
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass
 from typing import Annotated
 from urllib.parse import quote
 
+import anyio
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, Request, Response, status
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import FileResponse, JSONResponse
-from sqlalchemy import select
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, StreamingResponse
+from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
+from starlette.middleware.gzip import DEFAULT_EXCLUDED_CONTENT_TYPES, GZipMiddleware
 
-from . import intel, logfilter, members, models, privacy, schemas, security, web
+from . import config, geo, intel, logfilter, members, metrics, models, privacy, runtime, schemas, security, state, web
 from .activity import ACTIVITY_LIMIT, ACTIVITY_MAX, activity
-from .attachments import (
-    EXTENSIONS,
-    blob_path,
-    content_matches,
-    file_sha256,
-    max_upload,
-    quota_bytes,
-    store_blob,
-    tenant_usage,
-)
+from .attachments import EXTENSIONS, StorageError, content_matches, max_upload, quota_bytes, storage
 from .auth import TENANT_SLUG, User, can_write, get_config, require_user
 from .db import engine, get_session, snapshot_session
 from .geo import UpstreamError
-from .integrity import key_id, maybe_anchor, public_key_b64, signing_key, verify_tenant
-from .logbook import build_logbook, build_year_report, trips_csv
-from .migrate import create_schema
+from .integrity import VerifyBusy, key_id, maybe_anchor, public_key_b64, signing_key, verify_tenant
+from .logbook import build_logbook, build_year_report, iter_trips_csv
+from .migrate import create_schema, head_revision
 from .report import build_report
 from .schemas import is_month
 from .stats import VehicleData, current_km_by_vehicle, load_vehicle, vehicle_stats
@@ -50,14 +48,77 @@ logfilter.install()          # Zugriffslog ohne Query-Strings
 security.install_logging()   # Logs ohne Steuerzeichen, mit Request-ID; Sicherheits-Log als JSON-Zeilen
 
 
+# ---------- Lebenszyklus ----------
+SHUTTING_DOWN = threading.Event()      # SIGTERM empfangen → /health/ready 503, laufende Anfragen enden normal
+_thread_limiter = None
+
+
+def _flag_on_sigterm() -> None:
+    """uvicorn fängt SIGTERM selbst ab (Graceful Shutdown); vorgeschaltet nur das Readiness-Flag setzen."""
+    try:
+        prev = signal.getsignal(signal.SIGTERM)
+
+        def handler(sig, frame):
+            SHUTTING_DOWN.set()
+            if callable(prev):
+                prev(sig, frame)
+        signal.signal(signal.SIGTERM, handler)
+    except ValueError:          # nicht im Hauptthread (Tests) → nur Flag beim Lifespan-Ende
+        pass
+
+
+def _push_metrics() -> None:
+    if (shared := state.shared()) is not None:
+        shared.metrics_put(metrics.instance_group(), metrics.WORKER_ID, json.dumps(metrics.snapshot()),
+                           3 * _metrics_interval() + 5)
+
+
+def _metrics_interval() -> float:
+    return config.env_float("METRICS_PUSH_S", 5.0, minimum=0.2)
+
+
+async def _metrics_loop() -> None:
+    while True:
+        await asyncio.sleep(_metrics_interval())
+        try:
+            await anyio.to_thread.run_sync(_push_metrics)
+        except state.StateUnavailable:
+            security.state_error("metrics")
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    # Unsichere Konfiguration → Warnungen im Sicherheits-Log (config_warning); STRICT_CONFIG=1 → Abbruch
-    security.check_config()
-    # Mit getrennter App-Rolle (Compose) migriert der Dienst "migrate"; die API darf das nicht.
+    global _thread_limiter
+    if os.environ.get("FZB_SERVE") != "1":
+        # Direkter uvicorn-Start (ohne app.serve): Prozessmodell und Konfiguration hier prüfen
+        runtime.check()
+        # Unsichere Konfiguration → Warnungen im Sicherheits-Log (config_warning); STRICT_CONFIG=1 → Abbruch
+        security.check_config()
+    SHUTTING_DOWN.clear()
+    _flag_on_sigterm()
+    # Threadpool (sync-Endpunkte, DB, PDF): THREADPOOL_SIZE je Worker
+    _thread_limiter = anyio.to_thread.current_default_thread_limiter()
+    _thread_limiter.total_tokens = config.env_int("THREADPOOL_SIZE", 40, minimum=1)
+    # Mit getrennter App-Rolle (Compose/Kubernetes) migriert ein eigener Lauf (python -m app.migrate);
+    # die API darf das nicht. Mehrere Worker mit AUTO_MIGRATE=1: Advisory-Lock (app.migrate).
     if os.environ.get("AUTO_MIGRATE", "1") == "1":
-        create_schema(engine)
-    yield
+        await anyio.to_thread.run_sync(create_schema, engine)
+    task = asyncio.create_task(_metrics_loop()) if state.shared() is not None else None
+    try:
+        yield
+    finally:
+        SHUTTING_DOWN.set()
+        if task is not None:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            try:
+                state.shared().metrics_delete(metrics.instance_group(), metrics.WORKER_ID)
+            except state.StateUnavailable:
+                pass
+        engine.dispose()        # Verbindungen (und damit Session-Advisory-Locks) freigeben
 
 
 # Bildauswertung: Bild ≤ 2 MiB als Base64 im JSON (≈ 4/3) + Rand für die übrigen Felder
@@ -149,15 +210,37 @@ _docs = os.environ.get("DOCS_ENABLED") == "1"
 app = FastAPI(title="Fahrzeugbuch", version="2.2.0", lifespan=lifespan,
               docs_url="/docs" if _docs else None, redoc_url=None,
               openapi_url="/openapi.json" if _docs else None)
-# Reihenfolge (aussen → innen): SecurityMiddleware (Request-ID, Host, IP-Sperre/Rate-Limit, CORS/CSRF, Header)
-# → WebSecurityHeaders (CSP für das Frontend) → RequestGuard (Bearer vorhanden, Body-Limits, no-store)
-# → JsonGuard (JSON-Tiefe/-Elemente vor dem Parsen) → App
+
+
+class ApiGZip:
+    """GZip nur für /api/*-Antworten ≥ GZIP_MIN_BYTES (1 KiB) bei Accept-Encoding gzip; nicht für Belegdateien
+    (…/blob), PDF und bereits komprimierte Typen. Stufe GZIP_LEVEL (5: gutes Verhältnis CPU/Grösse)."""
+
+    EXCLUDED = (*DEFAULT_EXCLUDED_CONTENT_TYPES, "application/pdf", "application/octet-stream", "image/heic")
+
+    def __init__(self, app):
+        self.app = app
+        self.gzip = GZipMiddleware(app, minimum_size=config.env_int("GZIP_MIN_BYTES", 1024, minimum=1),
+                                   compresslevel=config.env_int("GZIP_LEVEL", 5, minimum=1, maximum=9),
+                                   exclude_content_types=self.EXCLUDED)
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http" and scope["path"].startswith("/api/") and not scope["path"].endswith("/blob"):
+            return await self.gzip(scope, receive, send)
+        return await self.app(scope, receive, send)
+
+
+# Reihenfolge (aussen → innen): MetricsMiddleware (Dauer/Status je Route) → SecurityMiddleware (Request-ID, Host,
+# IP-Sperre/Rate-Limit, CORS/CSRF, Header) → WebSecurityHeaders (CSP für das Frontend) → RequestGuard (Bearer
+# vorhanden, Body-Limits, no-store) → JsonGuard (JSON-Tiefe/-Elemente vor dem Parsen) → ApiGZip → App
+app.add_middleware(ApiGZip)
 app.add_middleware(security.JsonGuard)
 app.add_middleware(RequestGuard, max_body=int(os.environ.get("MAX_BODY_BYTES", str(1024 * 1024))),
                    max_upload=max_upload())
 app.include_router(intel.router)
 app.add_middleware(web.WebSecurityHeaders)
 app.add_middleware(security.SecurityMiddleware)
+app.add_middleware(metrics.MetricsMiddleware)
 
 
 @app.exception_handler(RequestValidationError)
@@ -339,10 +422,136 @@ def content_disposition(filename: str, disposition: str = "attachment") -> str:
     return f'{disposition}; filename="{ascii_name}"; filename*=UTF-8\'\'{quote(clean, safe="")}'
 
 
+# ---------- PDF: Gleichzeitigkeit je Worker ----------
+_pdf_lock = threading.Lock()
+_pdf_slots: threading.BoundedSemaphore | None = None
+_pdf_busy = 0
+
+
+@contextmanager
+def pdf_slot():
+    """PDF_CONCURRENCY (2) gleichzeitige PDF-Erzeugungen je Worker (Speicherspitzen); weitere warten bis
+    PDF_WAIT_S (20 s), dann 503 mit Retry-After."""
+    global _pdf_slots, _pdf_busy
+    with _pdf_lock:
+        if _pdf_slots is None:
+            _pdf_slots = threading.BoundedSemaphore(config.env_int("PDF_CONCURRENCY", 2, minimum=1))
+    if not _pdf_slots.acquire(timeout=config.env_float("PDF_WAIT_S", 20.0)):
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Berichtserzeugung ausgelastet – bitte erneut",
+                            headers={"Retry-After": "5"})
+    with _pdf_lock:
+        _pdf_busy += 1
+    try:
+        yield
+    finally:
+        with _pdf_lock:
+            _pdf_busy -= 1
+        _pdf_slots.release()
+
+
+def _gauges() -> list[tuple[str, str, dict, float]]:
+    out = []
+    pool = engine.pool
+    for name, fn, help_ in (("fzb_db_pool_checked_out", "checkedout", "DB-Verbindungen in Benutzung"),
+                            ("fzb_db_pool_overflow", "overflow", "DB-Verbindungen über DB_POOL_SIZE"),
+                            ("fzb_db_pool_size", "size", "DB-Poolgrösse")):
+        if callable(getattr(pool, fn, None)):
+            out.append((name, help_, {}, float(getattr(pool, fn)())))
+    now = time.monotonic()
+    for name, u in geo.UPSTREAMS.items():
+        out.append(("fzb_upstream_circuit_open", "Circuit-Breaker gesperrt (1) je Upstream (lokale Sicht)",
+                    {"upstream": name}, 1.0 if u.open_until > now else 0.0))
+        out.append(("fzb_upstream_active", "laufende Upstream-Anfragen", {"upstream": name}, float(u.active)))
+    shared = state.shared()
+    out.append(("fzb_state_backend_up", "gemeinsamer Zustand erreichbar (1), memory immer 1",
+                {"backend": state.backend_name()}, 0.0 if shared is not None and shared.degraded() else 1.0))
+    if _thread_limiter is not None:
+        out.append(("fzb_threadpool_busy", "belegte Threads", {}, float(_thread_limiter.borrowed_tokens)))
+        out.append(("fzb_threadpool_size", "Threadpool-Grösse", {}, float(_thread_limiter.total_tokens)))
+    out.append(("fzb_pdf_in_progress", "laufende PDF-Erzeugungen", {}, float(_pdf_busy)))
+    return out
+
+
+metrics.register_gauge(_gauges)
+
+
 # ---------- öffentlich ----------
 @app.get("/health")
 def health():
+    """Leichtgewichtig (keine DB/Netz): "degraded", wenn der gemeinsame Zustand zuletzt nicht erreichbar war."""
+    shared = state.shared()
+    return {"status": "degraded" if shared is not None and shared.degraded() else "ok"}
+
+
+@app.get("/health/live", include_in_schema=False)
+def health_live():
+    """Liveness: Prozess antwortet (keine Abhängigkeiten)."""
     return {"status": "ok"}
+
+
+_head: str | None = None
+
+
+def _schema_ok() -> bool:
+    global _head
+    if _head is None:
+        _head = head_revision()
+    with engine.connect() as conn:
+        try:
+            current = conn.execute(text("SELECT version_num FROM alembic_version")).scalar()
+        except SQLAlchemyError:
+            return False
+    return current == _head
+
+
+@app.get("/health/ready", include_in_schema=False)
+def health_ready():
+    """Readiness: DB erreichbar und Schema = Alembic head, gemeinsamer Zustand erreichbar, kein SIGTERM."""
+    checks = {"shutdown": "ok" if not SHUTTING_DOWN.is_set() else "shutting_down"}
+    try:
+        checks["database"] = "ok" if _schema_ok() else "migration_pending"
+    except SQLAlchemyError:
+        checks["database"] = "unavailable"
+    shared = state.shared()
+    if shared is None:
+        checks["state"] = "memory"
+    else:
+        try:
+            shared.ping()
+            checks["state"] = "ok"
+        except state.StateUnavailable:
+            checks["state"] = "unavailable"
+    ready = all(v in ("ok", "memory") for v in checks.values())
+    return JSONResponse({"status": "ready" if ready else "not_ready", **checks}, status_code=200 if ready else 503)
+
+
+def _metrics_allowed(request: Request) -> bool:
+    token = (os.environ.get("METRICS_TOKEN") or "").strip()
+    auth = request.headers.get("authorization") or ""
+    if token and auth[:7].lower() == "bearer " and hmac.compare_digest(auth[7:].strip().encode(), token.encode()):
+        return True
+    if auth:
+        security.mark_probe("metrics_token")
+    allow = os.environ.get("METRICS_ALLOW") or ""
+    ctx = security.current()
+    return bool(allow) and ctx is not None and security.in_list(ctx.ip, allow)
+
+
+@app.get("/metrics", include_in_schema=False)
+def get_metrics(request: Request):
+    """Prometheus-Textformat; nur mit METRICS_TOKEN (Bearer) oder aus METRICS_ALLOW, sonst 404."""
+    if not _metrics_allowed(request):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Nicht gefunden")
+    own = metrics.snapshot()
+    snaps = [own]
+    if (shared := state.shared()) is not None:
+        try:
+            snaps += [x for x in metrics.snapshots_json(shared.metrics_all(metrics.instance_group()))
+                      if x.get("id") != own["id"]]
+        except state.StateUnavailable:
+            security.state_error("metrics")
+    return PlainTextResponse(metrics.render(snaps), media_type="text/plain; version=0.0.4; charset=utf-8",
+                             headers={"Cache-Control": "no-store"})
 
 
 @app.get("/auth/config", response_model=schemas.AuthConfig)
@@ -425,7 +634,7 @@ def get_report(
     date_from, date_to = _period(date_from, date_to)
     _vehicle_or_404(db, access, vid, allow_deleted=True, children=False)
     _anchor_and_release(db, access)
-    with snapshot_session() as s:
+    with pdf_slot(), snapshot_session() as s:
         tenant = s.get(models.Tenant, access.tenant.id)
         data = _vehicle_or_404(s, access, vid, allow_deleted=True)
         pdf = build_report(s, tenant, data, date_from, date_to, access.user.name)
@@ -483,7 +692,7 @@ def get_logbook(vid: VehicleId, access: TenantAccess, db: DB, month: MonthQ = No
     date_from, date_to = _period(date_from, date_to, month, max_days=LOGBOOK_MAX_DAYS)
     _vehicle_or_404(db, access, vid, allow_deleted=True, children=False)
     _anchor_and_release(db, access)
-    with snapshot_session() as s:
+    with pdf_slot(), snapshot_session() as s:
         tenant = s.get(models.Tenant, access.tenant.id)
         data = _vehicle_or_404(s, access, vid, allow_deleted=True, children=False)
         pdf = build_logbook(s, tenant, data, date_from, date_to, access.user.name,
@@ -492,18 +701,23 @@ def get_logbook(vid: VehicleId, access: TenantAccess, db: DB, month: MonthQ = No
         f"Fahrtenbuch_{data.vehicle.name}_{month or f'{date_from}_{date_to}'}.pdf")})
 
 
+def _csv_rows(access: Access, vid: str, date_from: dt.date, date_to: dt.date):
+    """CSV blockweise aus einem Snapshot (Sitzung lebt bis zum letzten Block)."""
+    with snapshot_session() as s:
+        tenant = s.get(models.Tenant, access.tenant.id)
+        data = _vehicle_or_404(s, access, vid, allow_deleted=True, children=False)
+        yield from iter_trips_csv(s, tenant, data, date_from, date_to, mask_private=access.masked)
+
+
 @app.get("/api/t/{tenant}/vehicles/{vid}/trips.csv", response_class=Response)
 def get_trips_csv(vid: VehicleId, access: TenantAccess, db: DB, date_from: DateFrom = None, date_to: DateTo = None):
     _report_rate(access)
     date_from, date_to = _period(date_from, date_to, max_days=LOGBOOK_MAX_DAYS)
-    _vehicle_or_404(db, access, vid, allow_deleted=True, children=False)
+    name = _vehicle_or_404(db, access, vid, allow_deleted=True, children=False).vehicle.name
     _release(db)
-    with snapshot_session() as s:
-        tenant = s.get(models.Tenant, access.tenant.id)
-        data = _vehicle_or_404(s, access, vid, allow_deleted=True, children=False)
-        body = trips_csv(s, tenant, data, date_from, date_to, mask_private=access.masked)
-    return Response(body, media_type="text/csv; charset=utf-8", headers={"Content-Disposition": content_disposition(
-        f"Fahrten_{data.vehicle.name}_{date_from}_{date_to}.csv")})
+    return StreamingResponse(_csv_rows(access, vid, date_from, date_to), media_type="text/csv; charset=utf-8",
+                             headers={"Content-Disposition": content_disposition(
+                                 f"Fahrten_{name}_{date_from}_{date_to}.csv")})
 
 
 YearQ = Annotated[int | None, Query(ge=2000, le=2100)]
@@ -522,7 +736,7 @@ def get_year_report_pdf(vid: VehicleId, access: TenantAccess, db: DB, year: Year
     year = year or today().year
     _vehicle_or_404(db, access, vid, allow_deleted=True, children=False)
     _anchor_and_release(db, access)
-    with snapshot_session() as s:
+    with pdf_slot(), snapshot_session() as s:
         tenant = s.get(models.Tenant, access.tenant.id)
         data = _vehicle_or_404(s, access, vid, allow_deleted=True)
         pdf = build_year_report(s, tenant, year_report(s, tenant, data, year), access.user.name)
@@ -550,6 +764,18 @@ def _attachment_or_404(db: Session, access: Access, aid: str) -> models.Attachme
     if att is None or att.tenant_id != access.tenant.id:   # fremder Mandant → wie nicht vorhanden
         raise _not_found("Beleg nicht gefunden")
     return att
+
+
+def _storage_unavailable() -> HTTPException:
+    return HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Belegspeicher nicht erreichbar",
+                         headers={"Retry-After": "30"})
+
+
+def _existing_blob(st, access: Access, att: models.Attachment):
+    if st.sha256(access.tenant.id, att.id) == att.sha256:
+        return JSONResponse({"stored": True, "existing": True}, status_code=status.HTTP_200_OK)
+    log.error("Beleg %s: gespeicherte Datei weicht von der Prüfsumme ab – nicht überschrieben", att.id)
+    raise _upload_rejected(status.HTTP_409_CONFLICT, "Datei existiert bereits mit anderem Inhalt", "exists")
 
 
 def _upload_rejected(code: int, detail: str, reason: str) -> HTTPException:
@@ -582,21 +808,21 @@ def put_attachment_blob(aid: AttachmentId, request: Request, background: Backgro
         raise _upload_rejected(status.HTTP_422_UNPROCESSABLE_CONTENT, "Grösse stimmt nicht", "size")
     if hashlib.sha256(body).hexdigest() != att.sha256:
         raise _upload_rejected(status.HTTP_422_UNPROCESSABLE_CONTENT, "Prüfsumme stimmt nicht", "sha256")
-    path = blob_path(access.tenant.id, att.id)
-    if path.is_file():
-        if file_sha256(path) == att.sha256:
-            return JSONResponse({"stored": True, "existing": True}, status_code=status.HTTP_200_OK)
-        log.error("Beleg %s: gespeicherte Datei weicht von der Prüfsumme ab – nicht überschrieben", att.id)
-        raise _upload_rejected(status.HTTP_409_CONFLICT, "Datei existiert bereits mit anderem Inhalt", "exists")
-    if att.deleted:
-        raise _upload_rejected(status.HTTP_409_CONFLICT, "Beleg storniert", "deleted")
-    quota = quota_bytes()
-    if tenant_usage(access.tenant.id) + len(body) > quota:
-        raise _upload_rejected(status.HTTP_507_INSUFFICIENT_STORAGE,
-                               f"Speicherkontingent für Belege erschöpft (max. {quota // (1024 * 1024)} MB je Mandant)",
-                               "quota")
     try:
-        store_blob(path, body)
+        st = storage()
+        if st.exists(access.tenant.id, att.id):
+            return _existing_blob(st, access, att)
+        if att.deleted:
+            raise _upload_rejected(status.HTTP_409_CONFLICT, "Beleg storniert", "deleted")
+        quota = quota_bytes()
+        if st.usage(access.tenant.id) + len(body) > quota:
+            raise _upload_rejected(status.HTTP_507_INSUFFICIENT_STORAGE,
+                                   f"Speicherkontingent für Belege erschöpft (max. {quota // (1024 * 1024)} MB je "
+                                   "Mandant)", "quota")
+        if not st.put(access.tenant.id, att.id, body, att.mime, att.sha256):   # parallel gespeichert
+            return _existing_blob(st, access, att)
+    except StorageError as e:
+        raise _storage_unavailable() from e
     except OSError as e:
         log.error("Beleg %s: Speichern fehlgeschlagen (%s)", att.id, type(e).__name__)
         raise HTTPException(status.HTTP_507_INSUFFICIENT_STORAGE, "Datei konnte nicht gespeichert werden") from e
@@ -614,17 +840,18 @@ def put_attachment_blob(aid: AttachmentId, request: Request, background: Backgro
 def get_attachment_blob(aid: AttachmentId, access: TenantAccess, db: DB):
     """Datei eines Belegs (auch stornierter Belege: revisionssicher abrufbar)."""
     att = _attachment_or_404(db, access, aid)
-    path = blob_path(access.tenant.id, att.id)
-    if not path.is_file():
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Datei nicht vorhanden")
     name = f"Beleg_{att.kind}_{att.id[:8]}.{EXTENSIONS.get(att.mime, 'bin')}"
-    return FileResponse(path, media_type=att.mime, headers={
-        "Content-Disposition": content_disposition(name, "inline"),
-        "X-Content-Type-Options": "nosniff",
-        "Content-Security-Policy": "default-src 'none'; sandbox",
-        "Cache-Control": "no-store",
-        "ETag": f'"{att.sha256}"',
-    })
+    _release(db)
+    try:
+        return storage().response(access.tenant.id, att.id, att.mime, {
+            "Content-Disposition": content_disposition(name, "inline"),
+            "X-Content-Type-Options": "nosniff",
+            "Content-Security-Policy": "default-src 'none'; sandbox",
+            "Cache-Control": "no-store",
+            "ETag": f'"{att.sha256}"',
+        })
+    except StorageError as e:
+        raise _storage_unavailable() from e
 
 
 # ---------- Revisionssicherheit ----------
@@ -657,7 +884,11 @@ def audit_verify(access: TenantAccess, db: DB, full: Annotated[bool, Query()] = 
     `full=1` erzwingt die Vollprüfung (Kette + alle Belegdateien)."""
     _rate(access, "verify", "RATE_VERIFY", 10)
     _release(db)
-    return verify_tenant(access.tenant.id, full)
+    try:
+        return verify_tenant(access.tenant.id, full)
+    except VerifyBusy:
+        raise HTTPException(status.HTTP_409_CONFLICT, "Vollprüfung dieses Mandanten läuft bereits",
+                            headers={"Retry-After": "30"}) from None
 
 
 @app.get("/api/t/{tenant}/audit/anchors", response_model=schemas.AnchorList)

@@ -139,6 +139,20 @@ Optionen:
 - **Anker extern archivieren** (empfohlen): täglich `GET /api/t/<mandant>/audit/anchors` z. B. per n8n nach Paperless-ngx – enthält Public Key, Signaturen und Nachrichtenformat
 - API-Doku: `DOCS_ENABLED=1` → `/docs`
 
+## Skalierung
+
+**Vertikal (Docker/Portainer)**: mehr Kerne/RAM für einen Host.
+- `WEB_CONCURRENCY` = Anzahl uvicorn-Worker (`auto` = min(2 × CPU-Quota, 16)); >1 nur mit `STATE_BACKEND=redis` und Valkey (`docker compose --profile scale up -d`, `VALKEY_PASSWORD` setzen). Rate-Limits, Brute-Force-Sperren und Circuit-Breaker sind dann worker-übergreifend.
+- Anker, Migration und Vollprüfung laufen per PostgreSQL-Advisory-Lock nur einmal.
+- DB-Pool je Worker (`DB_POOL_SIZE`, `DB_MAX_OVERFLOW`); Startprüfung: Worker × (Pool + Overflow) + Reserve ≤ `PG_MAX_CONNECTIONS`. PostgreSQL-Tuning (`PG_*`) mit Tabelle für 8/16/32 GB in `.env.example`.
+- Ressourcen je Dienst: `API_CPUS`, `API_MEMORY`, `DB_CPUS`, `DB_MEMORY`.
+- Metriken: `/metrics` (Prometheus, nur mit `METRICS_TOKEN` oder aus `METRICS_ALLOW`); Probes `/health/live`, `/health/ready`.
+- Lasttest: `server/loadtest/README.md` (4 vCPU, 1 Mio. Revisionen: 1 Worker 42 RPS → 4 Worker 87 RPS, p50 593 → 171 ms). Engpass: PDF (Integritätsabgleich aller Datensätze, begrenzt per `PDF_CONCURRENCY`) und Schreiben je Mandant (seriell).
+
+**Kubernetes**: Helm-Chart `deploy/helm/fahrzeugbuch` – vertikal per VPA (Worker folgen dem CPU-Limit), horizontal per HPA (dann Valkey + Belege in S3 oder RWX-Volume, `STORAGE_BACKEND=s3|fs`). Migration als Helm-Hook-Job, Geheimnisse als `*_FILE`. Details: [deploy/helm/fahrzeugbuch/README.md](deploy/helm/fahrzeugbuch/README.md).
+
+**Web-Frontend**: Lazy-Routen, vorkomprimierte Assets, virtuelles Scrollen, Web Worker; getestet mit 90k Fahrten (Details `web/README.md`).
+
 ## iOS-App
 
 Voraussetzung: Mac mit Xcode 16+, [XcodeGen](https://github.com/yonaskolb/XcodeGen).

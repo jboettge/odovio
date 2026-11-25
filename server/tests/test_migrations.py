@@ -11,7 +11,7 @@ from app.migrate import BASELINE, alembic_config, create_schema
 from .conftest import reset_db
 
 NEW_INDEXES = ("ix_trips_tenant_last_seq", "ix_vehicles_tenant_last_seq", "ix_trip_periods_tenant_last_seq",
-               "ix_revisions_tenant_entity", "ix_trips_vehicle_start")
+               "ix_revisions_tenant_entity", "ix_trips_vehicle_start", "ix_anchors_tenant_seq")
 
 
 def _head() -> str:
@@ -35,7 +35,7 @@ def test_fresh_database_upgrade_head():
         create_schema(engine)                                   # idempotent
         assert _version() == _head()
         assert _diff() == []
-        indexes = {i["name"] for t in ("trips", "vehicles", "trip_periods", "revisions")
+        indexes = {i["name"] for t in ("trips", "vehicles", "trip_periods", "revisions", "anchors")
                    for i in inspect(engine).get_indexes(t)}
         assert set(NEW_INDEXES) <= indexes
     finally:
@@ -63,7 +63,7 @@ def test_legacy_database_is_stamped_and_upgraded():
                                  "'2026-01-01T08:00:00+01:00', 'business', 'confirmed', 'manual', false)")
         assert "alembic_version" not in inspect(engine).get_table_names()
         create_schema(engine)
-        assert _version() == _head() == "0002" and BASELINE == "0001"
+        assert _version() == _head() == "0003" and BASELINE == "0001"
         assert _diff() == []
         with engine.connect() as conn:
             row = conn.execute(text("SELECT km_estimated, customer_name FROM trips WHERE id = 't1'")).one()
@@ -86,15 +86,62 @@ def test_upgrade_0001_to_0002_keeps_data():
             conn.exec_driver_sql("INSERT INTO vehicles (id, tenant_id, version, deleted, last_seq, name, fuel_type, "
                                  "initial_km) VALUES ('v1', 1, 1, false, 1, 'Golf', 'benzin', 0)")
         create_schema(engine)
-        assert _version() == _head() == "0002"
+        assert _version() == _head() == "0003"
         assert _diff() == []
         with engine.connect() as conn:
             row = conn.execute(text("SELECT name, created_by, updated_by FROM vehicles WHERE id = 'v1'")).one()
         assert tuple(row) == ("Golf", None, None)
-        with engine.begin() as conn:                            # Downgrade/erneutes Upgrade idempotent
+        with engine.connect() as conn:                          # Downgrade/erneutes Upgrade idempotent
             command.downgrade(alembic_config(conn), BASELINE)
+            conn.commit()
             assert "updated_by" not in {c["name"] for c in inspect(conn).get_columns("trips")}
         create_schema(engine)
         assert _diff() == []
     finally:
         reset_db()
+
+
+def test_migrate_with_non_superuser_owner(monkeypatch):
+    """Owner nur mit CREATEROLE (z. B. CloudNativePG): Rolle anlegen, erneuter Lauf (ALTER nur Passwort),
+    App-Rolle liest alembic_version (Readiness), darf aber Revisionen nicht löschen."""
+    import uuid
+
+    import pytest
+    from sqlalchemy import create_engine
+    from sqlalchemy.exc import ProgrammingError
+
+    from app import migrate
+    if engine.dialect.name != "postgresql":
+        pytest.skip("nur PostgreSQL")
+    sfx = uuid.uuid4().hex[:8]
+    owner, app_role, db = f"fzbo_{sfx}", f"fzba_{sfx}", f"fzbdb_{sfx}"
+    admin = engine.execution_options(isolation_level="AUTOCOMMIT")
+    url = engine.url
+    with admin.connect() as c:
+        c.exec_driver_sql(f"CREATE ROLE {owner} LOGIN CREATEROLE PASSWORD 'ownerpw'")
+        c.exec_driver_sql(f"CREATE DATABASE {db} OWNER {owner}")
+    try:
+        base = url.set(database=db)
+        monkeypatch.setenv("MIGRATION_DATABASE_URL",
+                           base.set(username=owner, password="ownerpw").render_as_string(hide_password=False))
+        monkeypatch.setenv("DATABASE_URL", base.set(username=app_role, password="apppw1")
+                           .render_as_string(hide_password=False))
+        assert migrate.main([]) == 0
+        monkeypatch.setenv("DATABASE_URL", base.set(username=app_role, password="apppw2")
+                           .render_as_string(hide_password=False))
+        assert migrate.main([]) == 0                               # bestehende Rolle: nur Passwort
+        assert migrate.main(["--check"]) == 0
+        app_engine = create_engine(base.set(username=app_role, password="apppw2"))
+        with app_engine.connect() as c:
+            assert c.exec_driver_sql("SELECT version_num FROM alembic_version").scalar() == migrate.head_revision()
+            roles = c.exec_driver_sql("SELECT rolsuper, rolcreatedb, rolcreaterole, rolreplication, rolbypassrls "
+                                      f"FROM pg_roles WHERE rolname = '{app_role}'").one()
+            assert not any(roles)
+            with pytest.raises(ProgrammingError):
+                c.exec_driver_sql("DELETE FROM revisions")
+        app_engine.dispose()
+    finally:
+        with admin.connect() as c:
+            c.exec_driver_sql(f"DROP DATABASE IF EXISTS {db} WITH (FORCE)")
+            c.exec_driver_sql(f"DROP ROLE IF EXISTS {app_role}")
+            c.exec_driver_sql(f"DROP ROLE IF EXISTS {owner}")

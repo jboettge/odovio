@@ -5,7 +5,8 @@ Einbinden in main.py:  from . import intel;  app.include_router(intel.router)
 Bewusst ohne Import aus main.py (kein Zirkelimport): Mandantenrecht wird direkt aus den
 Token-Gruppen gelesen (gleiche Logik wie main.tenant_access, aber ohne DB-Zugriff).
 
-Rate-Limits je Benutzer (In-Memory, je Prozess):
+Rate-Limits je Benutzer (gleitendes Fenster; STATE_BACKEND=redis → gemeinsam für alle Worker/Replikas,
+sonst je Prozess; Ausfall des gemeinsamen Zustands → fail-open):
   INTEL_RATE_SUGGEST  Anfragen/Minute für /trips/suggest, Default 60
   INTEL_RATE_GEO      Anfragen/Minute für /api/geo/*, Default 30
   INTEL_RATE_SCAN     Anfragen/Minute für /scan (Bildauswertung), Default 20 – geprüft bevor der Body
@@ -30,7 +31,7 @@ from fastapi.responses import JSONResponse
 from fastapi.routing import APIRoute
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
-from . import classify, geo, security, vision
+from . import classify, geo, security, state, vision
 from .auth import TENANT_SLUG, User, can_write, require_user
 from .classify import PrivateTrip, SuggestRequest
 from .geo import GeoNoResult, GeoUnavailable, InvalidTrack, UpstreamBusy, UpstreamError
@@ -69,6 +70,16 @@ class RateLimiter:
         self.lock = threading.Lock()
 
     def check(self, key: str, limit: int) -> None:
+        shared = state.shared()
+        if shared is not None:
+            try:
+                retry = shared.window(key, limit, self.window)
+            except state.StateUnavailable:
+                security.state_error("rate_limit")
+                return
+            if retry:
+                self._reject(key, retry)
+            return
         now = time.monotonic()
         with self.lock:
             if len(self.hits) > 10_000:   # Speicher begrenzen: leere/alte Einträge verwerfen
@@ -78,10 +89,16 @@ class RateLimiter:
                 q.popleft()
             if len(q) >= limit:
                 retry = max(1, int(self.window - (now - q[0])) + 1)
-                security.event("rate_limited", status=429, reason=key.split(":", 1)[0], throttle=10)
-                raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "Zu viele Anfragen",
-                                    headers={"Retry-After": str(retry)})
-            q.append(now)
+            else:
+                q.append(now)
+                return
+        self._reject(key, retry)
+
+    @staticmethod
+    def _reject(key: str, retry: int):
+        security.event("rate_limited", status=429, reason=key.split(":", 1)[0], throttle=10)
+        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "Zu viele Anfragen",
+                            headers={"Retry-After": str(retry)})
 
     def reset(self) -> None:
         with self.lock:

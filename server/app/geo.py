@@ -6,10 +6,13 @@ Env:
   OSRM_MAX_MATCHING_SIZE  max. Punkte je /match-Anfrage (osrm-routed --max-matching-size), Default 100
   PHOTON_URL     z. B. http://photon:2322 (leer → nicht konfiguriert)
   GEO_TIMEOUT_S  Timeout je HTTP-Anfrage in Sekunden, Default 5
-  UPSTREAM_CONCURRENCY       gleichzeitige Anfragen je Dienst (OSRM, Photon, LLM, Vision, Keycloak-Admin), Default 4;
-                             ist ein Dienst ausgelastet → sofort 503 (keine wartenden Threads)
+  UPSTREAM_CONCURRENCY       gleichzeitige Anfragen je Dienst (OSRM, Photon, LLM, Vision, Keycloak-Admin) INSGESAMT,
+                             Default 4; je Worker ceil(UPSTREAM_CONCURRENCY / WEB_CONCURRENCY) (lokal, ohne
+                             Netzwerk-Roundtrip und ohne verwaiste Leases nach Worker-Abbruch; bei mehreren
+                             Replikas gilt der Wert je Replika). Ausgelastet → sofort 503 (keine wartenden Threads)
   UPSTREAM_BREAKER_FAILURES  Fehler in Folge, nach denen ein Dienst gesperrt wird, Default 3
   UPSTREAM_BREAKER_OPEN_S    Sperrdauer in Sekunden (sofort 503), Default 30
+  Circuit-Breaker-Zustand mit STATE_BACKEND=redis gemeinsam für alle Worker/Replikas (Ausfall → lokal je Prozess).
 
 Nur stdlib (urllib); kein Proxy (Dienste liegen im LAN), keine Weiterleitungen, Antwortgrösse begrenzt.
 """
@@ -24,6 +27,8 @@ import urllib.request
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
+
+from . import config, security, state
 
 log = logging.getLogger("fahrzeugbuch.geo")
 
@@ -70,9 +75,12 @@ class Upstream:
 
     @contextmanager
     def guard(self) -> Iterator[None]:
-        limit = int(env_float("UPSTREAM_CONCURRENCY", 4))
+        limit = config.per_worker(int(env_float("UPSTREAM_CONCURRENCY", 4)))
         now = time.monotonic()
+        shared = self._shared_open()
         with self.lock:
+            if shared:
+                raise UpstreamBusy(f"{self.name} vorübergehend gesperrt", int(shared) + 1)
             if self.open_until > now:
                 raise UpstreamBusy(f"{self.name} vorübergehend gesperrt", int(self.open_until - now) + 1)
             if self.active >= limit:
@@ -81,19 +89,53 @@ class Upstream:
         try:
             yield
         except UpstreamError:
-            with self.lock:
-                self.failures += 1
-                if self.failures >= int(env_float("UPSTREAM_BREAKER_FAILURES", 3)):
-                    self.open_until = time.monotonic() + env_float("UPSTREAM_BREAKER_OPEN_S", 30)
-                    self.failures = 0
-                    log.warning("%s: nach wiederholten Fehlern vorübergehend gesperrt", self.name)
+            self._failure()
             raise
         else:
-            with self.lock:
-                self.failures = 0
+            self._success()
         finally:
             with self.lock:
                 self.active -= 1
+
+    def _shared_open(self) -> float:
+        if (shared := state.shared()) is None:
+            return 0.0
+        try:
+            return shared.breaker_open(self.name)
+        except state.StateUnavailable:
+            security.state_error("circuit_breaker")
+            return 0.0
+
+    def _failure(self) -> None:
+        threshold = int(env_float("UPSTREAM_BREAKER_FAILURES", 3))
+        open_s = env_float("UPSTREAM_BREAKER_OPEN_S", 30)
+        if (shared := state.shared()) is not None:
+            try:
+                if shared.breaker_failure(self.name, threshold, open_s):
+                    log.warning("%s: nach wiederholten Fehlern vorübergehend gesperrt (alle Worker)", self.name)
+                return
+            except state.StateUnavailable:
+                security.state_error("circuit_breaker")
+        with self.lock:
+            self.failures += 1
+            if self.failures >= threshold:
+                self.open_until = time.monotonic() + open_s
+                self.failures = 0
+                log.warning("%s: nach wiederholten Fehlern vorübergehend gesperrt", self.name)
+
+    def _success(self) -> None:
+        with self.lock:
+            self.failures = 0
+        if (shared := state.shared()) is not None:
+            try:
+                shared.breaker_success(self.name)
+            except state.StateUnavailable:
+                security.state_error("circuit_breaker")
+
+    def is_open(self) -> bool:
+        if self.open_until > time.monotonic():
+            return True
+        return self._shared_open() > 0
 
     def reset(self) -> None:
         with self.lock:

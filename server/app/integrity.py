@@ -29,7 +29,7 @@ from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 from sqlalchemy import and_, func, select
 from sqlalchemy.orm import Session
 
-from . import models, security
+from . import jobs, models, security
 from .attachments import persist_blob_checks, verify_blobs
 from .audit import canonical, verify_chain
 from .db import snapshot_session
@@ -96,6 +96,8 @@ def maybe_anchor(db: Session, tenant: models.Tenant, force: bool = False) -> mod
     key = signing_key()
     if key is None or tenant.seq == 0:
         return None
+    # mehrere Worker/Replikas: serialisieren VOR dem Lesen des letzten Ankers (frei beim Commit)
+    jobs.xact_lock(db, "anchor", tenant.id)
     last = db.scalar(select(models.Anchor).where(models.Anchor.tenant_id == tenant.id)
                      .order_by(models.Anchor.seq.desc()).limit(1))
     if last is not None and last.seq >= tenant.seq:
@@ -175,41 +177,58 @@ def _same(recorded: dict, current: dict, defaults: dict | None = None) -> bool:
     return recorded == {k: v for k, v in current.items() if k not in added}
 
 
-def _latest_revisions(db: Session, tenant_id: int, entity: str):
-    """Letzte Revision je Objekt per SQL (GROUP BY über den Index tenant_id, entity, entity_id)."""
+STATE_BATCH = 1000
+MAX_PROBLEMS = 1000
+
+
+def _latest_revisions(db: Session, tenant_id: int, entity: str, ids: list[str]):
+    """Letzte Revision je Objekt (nur für `ids`) per SQL (GROUP BY über den Index tenant_id, entity, entity_id)."""
     last = select(models.Revision.entity_id, func.max(models.Revision.seq).label("seq")).where(
-        models.Revision.tenant_id == tenant_id, models.Revision.entity == entity
-    ).group_by(models.Revision.entity_id).subquery()
+        models.Revision.tenant_id == tenant_id, models.Revision.entity == entity,
+        models.Revision.entity_id.in_(ids)).group_by(models.Revision.entity_id).subquery()
     q = select(models.Revision.entity_id, models.Revision.seq, models.Revision.version, models.Revision.data) \
         .join(last, and_(models.Revision.tenant_id == tenant_id, models.Revision.seq == last.c.seq))
-    return db.execute(q.execution_options(yield_per=2000))
+    return db.execute(q)
+
+
+def _orphan_revisions(db: Session, tenant_id: int, entity: str, model, limit: int):
+    """Objekt-IDs mit Revision, aber ohne Datensatz (Anti-Join in SQL, begrenzt)."""
+    exists = select(model.id).where(model.tenant_id == tenant_id, model.id == models.Revision.entity_id).exists()
+    return db.scalars(select(models.Revision.entity_id).distinct().where(
+        models.Revision.tenant_id == tenant_id, models.Revision.entity == entity, ~exists).limit(limit))
 
 
 def verify_state(db: Session, tenant: models.Tenant) -> list[str]:
-    """Jeder Datensatz muss exakt dem Stand seiner letzten Revision entsprechen."""
+    """Jeder Datensatz muss exakt dem Stand seiner letzten Revision entsprechen.
+    Konstanter Speicher: Datensätze werden gestreamt und in Blöcken von STATE_BATCH mit ihren letzten Revisionen
+    verglichen; Revisionen ohne Datensatz per Anti-Join. Höchstens MAX_PROBLEMS Befunde werden gesammelt."""
     problems: list[str] = []
     seen_entities = set()
     for entity, (model, schema, _) in ENTITIES.items():
         seen_entities.add(entity)
-        latest = {r.entity_id: r for r in _latest_revisions(db, tenant.id, entity)}
         defaults = {k: f.default for k, f in schema.model_fields.items()}
         cols = [model.id, model.version, model.deleted, *(getattr(model, k) for k in schema.model_fields)]
         q = select(*cols).where(model.tenant_id == tenant.id)
-        for row in db.execute(q.execution_options(yield_per=2000)):
-            rev = latest.pop(row.id, None)
-            if rev is None:
-                problems.append(f"{entity} {row.id}: Datensatz ohne Revision")
-            elif rev.version != row.version or not _same(json.loads(rev.data),
-                                                         json.loads(canonical(snapshot(row, schema))), defaults):
-                problems.append(f"{entity} {row.id}: weicht von Revision {rev.seq} ab")
-        problems += [f"{entity} {i}: Revision ohne Datensatz" for i in latest]
+        for part in db.execute(q.execution_options(yield_per=STATE_BATCH)).partitions():
+            latest = {r.entity_id: r for r in _latest_revisions(db, tenant.id, entity, [row.id for row in part])}
+            for row in part:
+                rev = latest.get(row.id)
+                if rev is None:
+                    problems.append(f"{entity} {row.id}: Datensatz ohne Revision")
+                elif rev.version != row.version or not _same(json.loads(rev.data),
+                                                             json.loads(canonical(snapshot(row, schema))), defaults):
+                    problems.append(f"{entity} {row.id}: weicht von Revision {rev.seq} ab")
+            if len(problems) >= MAX_PROBLEMS:
+                return problems[:MAX_PROBLEMS]
+        problems += [f"{entity} {i}: Revision ohne Datensatz"
+                     for i in _orphan_revisions(db, tenant.id, entity, model, MAX_PROBLEMS)]
     # Revisionen unbekannter Objekttypen (reine Journal-Einträge wie Mitgliederänderungen sind bekannt;
     # sie sind über die Hash-Kette geschützt, haben aber keinen Datensatz zum Abgleich)
     seen_entities |= JOURNAL_ONLY
     others = db.scalars(select(models.Revision.entity).distinct().where(
         models.Revision.tenant_id == tenant.id, models.Revision.entity.not_in(seen_entities)))
     problems += [f"{e}: unbekannter Objekttyp im Journal" for e in others]
-    return problems
+    return problems[:MAX_PROBLEMS]
 
 
 def verify_anchors(db: Session, tenant: models.Tenant) -> dict:
@@ -265,7 +284,14 @@ def verify_all(db: Session, tenant: models.Tenant, full: bool = False) -> dict:
     }
 
 
+class VerifyBusy(Exception):
+    """Vollprüfung dieses Mandanten läuft bereits (anderer Worker/Replika)."""
+
+
 def verify_tenant(tenant_id: int, full: bool = False) -> dict:
-    """Prüfung in einem eigenen, konsistenten Snapshot (ohne Sperren)."""
+    """Prüfung in einem eigenen, konsistenten Snapshot (ohne Zeilensperren). Vollprüfung je Mandant höchstens
+    einmal gleichzeitig (Advisory-Lock, PostgreSQL)."""
     with snapshot_session() as db:
+        if full and not jobs.xact_lock(db, "verify_full", tenant_id, wait=False):
+            raise VerifyBusy
         return verify_all(db, db.get(models.Tenant, tenant_id), full)

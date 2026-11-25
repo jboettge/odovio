@@ -24,25 +24,33 @@ RUN pip install --no-cache-dir --require-hashes --no-deps -r requirements.txt
 COPY server/alembic.ini ./
 COPY server/alembic ./alembic
 COPY server/app ./app
-# Web-Frontend (SPA) – app/web.py liefert es unter "/" aus (WEB_DIST)
+# Web-Frontend (SPA) – app/web.py liefert es unter "/" aus (WEB_DIST); vorkomprimierte <datei>.br/.gz aus dem
+# Web-Build werden bei passendem Accept-Encoding ausgeliefert
 COPY --from=web /web/dist /app/web
 ENV WEB_DIST=/app/web
-# /data/attachments: Mountpunkt des Beleg-Volumes; ein leeres benanntes Volume übernimmt beim ersten
-# Mount Besitzer/Rechte dieses Verzeichnisses → User app kann trotz read_only-Container schreiben.
-RUN useradd -r -u 10001 app && mkdir -p /app/data /data/attachments \
-    && chown app /app/data /data/attachments && chmod 750 /data/attachments
-ENV ATTACHMENT_DIR=/data/attachments
-USER app
+# Feste UID/GID 10001 (Kubernetes runAsUser/runAsGroup/fsGroup, runAsNonRoot). Root-Dateisystem read-only
+# betreibbar: beschreibbar sind nur /tmp (tmpfs/emptyDir) und – bei STORAGE_BACKEND=fs – FILES_DIR
+# (/data/attachments, Volume; ein leeres benanntes Volume übernimmt beim ersten Mount Besitzer/Rechte).
+# /app/data nur für den SQLite-Default (Entwicklung).
+RUN groupadd -g 10001 app && useradd -r -u 10001 -g 10001 -M -d /nonexistent -s /usr/sbin/nologin app \
+    && mkdir -p /app/data /data/attachments \
+    && chown 10001:10001 /app/data /data/attachments && chmod 750 /data/attachments
+ENV FILES_DIR=/data/attachments ATTACHMENT_DIR=/data/attachments
+USER 10001:10001
 
 EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
-  CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')" || exit 1
-# FORWARDED_ALLOW_IPS (Env) = IP des Reverse Proxy; uvicorn liest die Variable selbst.
-# Zugriffslog ohne Query-Strings: app.logfilter wird beim Import von app.main am Logger uvicorn.access
-# installiert (Koordinaten/Zeiträume gelangen nicht ins Log).
-# Genau 1 Worker: Rate-Limits, Brute-Force-Sperren und Caches sind In-Memory je Prozess (mehrere Worker
-# würden die Limits vervielfachen). Skalierung nur mit gemeinsamem Speicher (z. B. Redis) – nicht vorgesehen.
-#   --limit-concurrency  gleichzeitige Verbindungen/Tasks (Env UVICORN_LIMIT_CONCURRENCY, Default 200) → 503
-#   --timeout-keep-alive 5 s (Slowloris/Keep-Alive-Halden), --h11-max-incomplete-event-size 16 KiB (Header)
-ENV UVICORN_LIMIT_CONCURRENCY=200
-CMD ["sh", "-c", "exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --proxy-headers --no-server-header --workers 1 --limit-concurrency \"${UVICORN_LIMIT_CONCURRENCY:-200}\" --timeout-keep-alive 5 --h11-max-incomplete-event-size 16384"]
+  CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/live', timeout=4)" || exit 1
+# Start über app.serve (liest Env, prüft und ersetzt sich per exec durch uvicorn):
+#   WEB_CONCURRENCY      Worker (1 | N | auto = min(2 × CPU-Quota der cgroup, 16)); > 1 nur mit
+#                        STATE_BACKEND=redis + PostgreSQL, sonst Abbruch mit Meldung
+#   UVICORN_LIMIT_CONCURRENCY  gleichzeitige Verbindungen JE WORKER (→ 503), Default 200
+#   UVICORN_LIMIT_MAX_REQUESTS (+ _JITTER)  Worker-Recycling, nur bei > 1 Worker, Default aus
+#   GRACEFUL_TIMEOUT_S   SIGTERM: laufende Anfragen fertigstellen, Default 25
+#   fest: --proxy-headers (FORWARDED_ALLOW_IPS), --no-server-header, --timeout-keep-alive 5 (Slowloris),
+#         --h11-max-incomplete-event-size 16 KiB (Header)
+# Migration als eigener Befehl im selben Image: python -m app.migrate (Exit ≠ 0 bei Fehler; --check → 3 = nötig)
+# Zugriffslog ohne Query-Strings: app.logfilter (beim Import von app.main am Logger uvicorn.access).
+ENV WEB_CONCURRENCY=1 UVICORN_LIMIT_CONCURRENCY=200 GRACEFUL_TIMEOUT_S=25
+STOPSIGNAL SIGTERM
+CMD ["python", "-m", "app.serve"]

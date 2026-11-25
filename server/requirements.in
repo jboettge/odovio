@@ -12,3 +12,4 @@ pyjwt[crypto]==2.15.1
 cryptography==50.0.2
 reportlab==5.1.1
 tzdata==2026.6              # zoneinfo (Europe/Zurich) unabhängig vom Basis-Image
+redis==8.2.0                # gemeinsamer Zustand mehrerer Worker (STATE_BACKEND=redis, Valkey)

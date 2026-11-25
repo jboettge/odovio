@@ -1053,6 +1053,10 @@ pyyaml==6.0.4 \
     --hash=sha256:f5c410f9e2ffc9286279a46f2e8c107edaf3b1123510af59c828a9c15b23c9db \
     --hash=sha256:f617e4e5c619fef5284335b24e3af3a77ce08dc5c389ff4b25033bb2749032b7
     # via uvicorn
+redis==8.2.0 \
+    --hash=sha256:4ff649f10fae5e7e97798fb2a84e84a0a66e98310d75cad2b5a572ce0f9f15a7 \
+    --hash=sha256:58b1493d83ba8f0e3ffe6bd781194ca5c01c91267ae03d29c1087b0b3c7d79c9
+    # via -r requirements.in
 reportlab==5.1.1 \
     --hash=sha256:43af899b836179032807f68aa83b410182e8e6b1221e4339560c5ec44da843ab \
     --hash=sha256:4bc6d7e5a961cabd320850637fa469c81dd9d6e32d0fe4191446086c6ea9a8d3

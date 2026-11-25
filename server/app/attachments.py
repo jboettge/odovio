@@ -1,8 +1,11 @@
 """Belegdateien (Fotos/PDF) ausserhalb der Datenbank.
 
 Env:
-  ATTACHMENT_DIR    Ablage, Default ./data/attachments → <dir>/<tenant_id>/<attachment_id> (ohne Endung;
-                    der Inhaltstyp steht in den Metadaten)
+  STORAGE_BACKEND   fs (Default) | s3 (S3-kompatibel, siehe app/s3.py: S3_ENDPOINT, S3_BUCKET, S3_REGION,
+                    S3_ACCESS_KEY_ID, S3_SECRET_ACCESS_KEY, S3_PREFIX, S3_FORCE_PATH_STYLE)
+  FILES_DIR         fs: Ablage (Alias ATTACHMENT_DIR), Default ./data/attachments → <dir>/<tenant_id>/<attachment_id>
+                    (ohne Endung; der Inhaltstyp steht in den Metadaten). Mehrere Replikas: nur mit RWX-Volume.
+                    s3: Objekt <S3_PREFIX><tenant_id>/<attachment_id>, PUT mit If-None-Match: * (nie überschrieben)
   MAX_UPLOAD_BYTES  Body-Limit für …/blob (RequestGuard), Default 8 MiB
   ATTACHMENT_QUOTA_MB  Speicherkontingent je Mandant (Summe der Dateien), Default 2048
 
@@ -21,13 +24,16 @@ import os
 import tempfile
 import threading
 import uuid
+from functools import lru_cache
 from pathlib import Path
 
+from fastapi import HTTPException
+from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
-from . import models
+from . import models, s3
 from .db import SessionLocal
 from .schemas import MAX_ATTACHMENT_BYTES
 
@@ -48,7 +54,7 @@ def max_upload() -> int:
 
 
 def blob_dir() -> Path:
-    return Path(os.environ.get("ATTACHMENT_DIR") or "./data/attachments")
+    return Path(os.environ.get("FILES_DIR") or os.environ.get("ATTACHMENT_DIR") or "./data/attachments")
 
 
 def quota_bytes() -> int:
@@ -147,6 +153,168 @@ def store_blob(path: Path, data: bytes) -> None:
         raise
 
 
+# ---------- Speicher-Backends ----------
+class StorageError(Exception):
+    """Belegspeicher nicht erreichbar (→ 503)."""
+
+
+class FsStorage:
+    """Verzeichnis (FILES_DIR/ATTACHMENT_DIR); atomar geschrieben (tmp + rename)."""
+
+    name = "fs"
+
+    def exists(self, tenant_id: int, aid: str) -> bool:
+        return blob_path(tenant_id, aid).is_file()
+
+    def fingerprints(self, tenant_id: int) -> dict[str, str]:
+        d = blob_dir() / str(int(tenant_id))
+        out = {}
+        try:
+            with os.scandir(d) as it:
+                for e in it:
+                    if e.is_file() and not e.name.startswith(".tmp-"):
+                        try:
+                            out[e.name] = fingerprint(Path(e.path))
+                        except OSError:
+                            out[e.name] = "unreadable"
+        except FileNotFoundError:
+            pass
+        return out
+
+    def sha256(self, tenant_id: int, aid: str, fp: str | None = None, known: tuple[str, str] | None = None) -> str:
+        return file_sha256(blob_path(tenant_id, aid), known)
+
+    def put(self, tenant_id: int, aid: str, data: bytes, mime: str, sha256: str) -> bool:
+        store_blob(blob_path(tenant_id, aid), data)
+        return True
+
+    def usage(self, tenant_id: int) -> int:
+        return tenant_usage(tenant_id)
+
+    def response(self, tenant_id: int, aid: str, media_type: str, headers: dict):
+        path = blob_path(tenant_id, aid)
+        if not path.is_file():
+            raise HTTPException(404, "Datei nicht vorhanden")
+        return FileResponse(path, media_type=media_type, headers=headers)
+
+    def ping(self) -> None:
+        if not blob_dir().is_dir():
+            raise StorageError("Belegverzeichnis fehlt")
+
+
+class S3Storage:
+    """S3-kompatibel; Fingerabdruck = ETag + Grösse + Last-Modified (jede Änderung des Objekts ändert ihn)."""
+
+    name = "s3"
+
+    def __init__(self, cfg: s3.S3Config):
+        self.client = s3.S3Client(cfg)
+
+    @staticmethod
+    def _name(tenant_id: int, aid: str) -> str:
+        return f"{int(tenant_id)}/{uuid.UUID(aid)}"
+
+    def _call(self, fn, *args):
+        try:
+            return fn(*args)
+        except s3.S3Error as e:
+            log.warning("Belegspeicher (S3): %s", e)
+            raise StorageError(str(e)) from None
+
+    def exists(self, tenant_id: int, aid: str) -> bool:
+        return self._call(self.client.head, self._name(tenant_id, aid)) is not None
+
+    def fingerprints(self, tenant_id: int) -> dict[str, str]:
+        return {o.key.rsplit("/", 1)[-1]: o.fingerprint
+                for o in self._call(self.client.list, f"{int(tenant_id)}/")}
+
+    def sha256(self, tenant_id: int, aid: str, fp: str | None = None, known: tuple[str, str] | None = None) -> str:
+        name = self._name(tenant_id, aid)
+        if fp is None:
+            info = self._call(self.client.head, name)
+            if info is None:
+                raise StorageError("Objekt fehlt")
+            fp = info.fingerprint
+        key = ("s3", name, fp)
+        with _cache_lock:
+            hit = _hash_cache.get(key)
+        if hit is not None:
+            return hit
+        if known is not None and known[0] == fp:
+            digest = known[1]
+        else:
+            resp = self._call(self.client.get, name)
+            if resp is None:
+                raise StorageError("Objekt fehlt")
+            h = hashlib.sha256()
+            try:
+                with resp:
+                    while chunk := resp.read(_CHUNK):
+                        h.update(chunk)
+            except OSError as e:
+                raise StorageError(type(e).__name__) from None
+            digest = h.hexdigest()
+        with _cache_lock:
+            if len(_hash_cache) >= _CACHE_MAX:
+                _hash_cache.clear()
+            _hash_cache[key] = digest
+        return digest
+
+    def put(self, tenant_id: int, aid: str, data: bytes, mime: str, sha256: str) -> bool:
+        return self._call(self.client.put, self._name(tenant_id, aid), data, mime, sha256)
+
+    def usage(self, tenant_id: int) -> int:
+        return sum(o.size for o in self._call(self.client.list, f"{int(tenant_id)}/"))
+
+    def response(self, tenant_id: int, aid: str, media_type: str, headers: dict):
+        resp = self._call(self.client.get, self._name(tenant_id, aid))
+        if resp is None:
+            raise HTTPException(404, "Datei nicht vorhanden")
+        length = resp.headers.get("Content-Length")
+
+        def chunks():
+            with resp:
+                while chunk := resp.read(256 * 1024):
+                    yield chunk
+        return StreamingResponse(chunks(), media_type=media_type,
+                                 headers={**headers, **({"Content-Length": length} if length else {})})
+
+    def ping(self) -> None:
+        self._call(self.client.ping)
+
+
+@lru_cache(maxsize=4)
+def _s3_storage(cfg: s3.S3Config) -> S3Storage:
+    return S3Storage(cfg)
+
+
+def storage_backend() -> str:
+    return (os.environ.get("STORAGE_BACKEND") or "fs").strip().lower()
+
+
+def storage() -> FsStorage | S3Storage:
+    if storage_backend() == "s3":
+        try:
+            return _s3_storage(s3.S3Config.from_env())
+        except s3.S3Error as e:
+            raise StorageError(str(e)) from None
+    return FsStorage()
+
+
+def check_storage_config() -> list[str]:
+    name = storage_backend()
+    if name not in ("fs", "s3"):
+        return [f"STORAGE_BACKEND={name} unbekannt (fs | s3)"]
+    if name == "s3":
+        try:
+            cfg = s3.S3Config.from_env()
+        except s3.S3Error as e:
+            return [str(e)]
+        if not cfg.access_key or not cfg.secret_key:
+            return ["S3_ACCESS_KEY_ID/S3_SECRET_ACCESS_KEY fehlen"]
+    return []
+
+
 # ---------- Abfragen ----------
 def active_attachments(db: Session, tenant_id: int):
     return db.scalars(select(models.Attachment).where(models.Attachment.tenant_id == tenant_id,
@@ -172,15 +340,24 @@ def verify_blobs(db: Session, tenant: models.Tenant, use_cache: bool = True) -> 
     known = {c.attachment_id: (c.fingerprint, c.sha256) for c in db.scalars(
         select(models.BlobCheck).where(models.BlobCheck.tenant_id == tenant.id))} if use_cache else {}
     problems, checked, missing, updates = [], 0, 0, []
+    try:
+        st = storage()
+        present = st.fingerprints(tenant.id)
+    except StorageError:
+        return {"problems": ["Belegspeicher nicht erreichbar"], "checked": 0, "missing": 0, "updates": []}
     for att in active_attachments(db, tenant.id):
-        path = blob_path(tenant.id, att.id)
-        if not path.is_file():
+        try:
+            fp = present.get(str(uuid.UUID(att.id)))
+        except ValueError:
+            fp = None
+        if fp is None:
             missing += 1
             continue
         try:
-            fp = fingerprint(path)
-            digest = file_sha256(path, known.get(att.id))
-        except OSError:
+            digest = st.sha256(tenant.id, att.id, fp, known.get(att.id))
+            if st.name == "fs":
+                fp = fingerprint(blob_path(tenant.id, att.id))
+        except (OSError, StorageError):
             log.warning("Beleg %s: Datei nicht lesbar", att.id)
             problems.append(f"Beleg {att.id}: Datei nicht lesbar")
             continue

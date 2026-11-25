@@ -1,3 +1,14 @@
+"""Datenbank-Engine und Sitzungen.
+
+PostgreSQL-Pool je Worker (Env, Defaults in Klammern):
+  DB_POOL_SIZE (5), DB_MAX_OVERFLOW (10), DB_POOL_TIMEOUT (30 s), DB_POOL_RECYCLE (1800 s), pool_pre_ping immer
+  DB_STATEMENT_TIMEOUT_MS (30000)            statement_timeout je Verbindung (0 = aus)
+  DB_IDLE_IN_TRANSACTION_TIMEOUT_MS (60000)  idle_in_transaction_session_timeout (0 = aus)
+  DB_DISABLE_PREPARED=1                      psycopg prepare_threshold=None (PgBouncer im transaction mode
+                                             ohne max_prepared_statements)
+Verbindungsbedarf: WEB_CONCURRENCY × REPLICAS_HINT × (POOL + OVERFLOW) + Reserve ≤ PG_MAX_CONNECTIONS
+(Startprüfung in app.runtime).
+"""
 import os
 from contextlib import contextmanager
 from pathlib import Path
@@ -5,16 +16,37 @@ from pathlib import Path
 from sqlalchemy import create_engine, event
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
 
+from .config import env_int
+
 DATABASE_URL = os.environ.get("DATABASE_URL", "sqlite:///./data/fahrzeugbuch.db")
 
-connect_args = {}
-if DATABASE_URL.startswith("sqlite"):
-    connect_args = {"check_same_thread": False}
-    db_path = DATABASE_URL.split("///", 1)[-1]
-    if db_path and db_path != ":memory:":
-        Path(db_path).parent.mkdir(parents=True, exist_ok=True)
 
-engine = create_engine(DATABASE_URL, connect_args=connect_args, pool_pre_ping=True)
+def pool_settings() -> dict:
+    return {"pool_size": env_int("DB_POOL_SIZE", 5, minimum=1), "max_overflow": env_int("DB_MAX_OVERFLOW", 10),
+            "pool_timeout": env_int("DB_POOL_TIMEOUT", 30, minimum=1),
+            "pool_recycle": env_int("DB_POOL_RECYCLE", 1800, minimum=-1)}
+
+
+def engine_args(url: str) -> dict:
+    if url.startswith("sqlite"):
+        db_path = url.split("///", 1)[-1]
+        if db_path and db_path != ":memory:":
+            Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+        return {"connect_args": {"check_same_thread": False}, "pool_pre_ping": True}
+    options = []
+    if (st := env_int("DB_STATEMENT_TIMEOUT_MS", 30000)) > 0:
+        options.append(f"-c statement_timeout={st}")
+    if (it := env_int("DB_IDLE_IN_TRANSACTION_TIMEOUT_MS", 60000)) > 0:
+        options.append(f"-c idle_in_transaction_session_timeout={it}")
+    connect_args: dict = {"application_name": "fahrzeugbuch-api"}
+    if options:
+        connect_args["options"] = " ".join(options)
+    if os.environ.get("DB_DISABLE_PREPARED") == "1" and url.startswith("postgresql+psycopg"):
+        connect_args["prepare_threshold"] = None
+    return {"connect_args": connect_args, "pool_pre_ping": True, **pool_settings()}
+
+
+engine = create_engine(DATABASE_URL, **engine_args(DATABASE_URL))
 
 if engine.dialect.name == "sqlite":
     # SQLite kennt kein SELECT … FOR UPDATE: jede Transaktion sofort mit Schreibsperre beginnen,

@@ -254,14 +254,19 @@ def test_csrf_origin_check_for_state_changing_requests(client, monkeypatch, even
 # ---------- Host / Header / HSTS / Request-ID ----------
 def test_trusted_host(client, monkeypatch, events):
     monkeypatch.setenv("ALLOWED_HOSTS", "fahrzeugbuch.j-mb.net, *.intern.test")
-    r = client.get("/health")
+    r = client.get("/auth/config")
     assert r.status_code == 400 and r.json() == {"detail": "Ungültiger Host"}
-    assert client.get("/health", headers={"Host": "fahrzeugbuch.j-mb.net"}).status_code == 200
-    assert client.get("/health", headers={"Host": "fahrzeugbuch.j-mb.net:443"}).status_code == 200
-    assert client.get("/health", headers={"Host": "api.intern.test"}).status_code == 200
-    assert client.get("/health", headers={"Host": "127.0.0.1:8000"}).status_code == 200     # Healthcheck
-    assert client.get("/health", headers={"Host": "evil.example"}).status_code == 400
-    assert client.get("/health", headers={"Host": "fahrzeugbuch.j-mb.net.evil.example"}).status_code == 400
+    assert client.get("/auth/config", headers={"Host": "fahrzeugbuch.j-mb.net"}).status_code == 200
+    assert client.get("/auth/config", headers={"Host": "fahrzeugbuch.j-mb.net:443"}).status_code == 200
+    assert client.get("/auth/config", headers={"Host": "api.intern.test"}).status_code == 200
+    assert client.get("/auth/config", headers={"Host": "127.0.0.1:8000"}).status_code == 200     # Healthcheck
+    assert client.get("/auth/config", headers={"Host": "evil.example"}).status_code == 400
+    assert client.get("/auth/config", headers={"Host": "fahrzeugbuch.j-mb.net.evil.example"}).status_code == 400
+    # Probes/Prometheus (Host = Pod-IP): /health* und /metrics ohne Host-Prüfung
+    for path in ("/health", "/health/live", "/health/ready"):
+        assert client.get(path, headers={"Host": "10.42.0.17:8000"}).status_code == 200
+    assert client.get("/metrics", headers={"Host": "10.42.0.17:8000"}).status_code == 404     # ohne Token
+    assert client.get("/api/me", headers={"Host": "10.42.0.17:8000"}).status_code == 400
     assert "host_rejected" in names(events)
 
 
