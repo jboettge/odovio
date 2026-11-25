@@ -96,11 +96,11 @@ struct VehicleListView: View {
     }
 
     private func vehicleRow(_ v: Vehicle) -> some View {
-        HStack(spacing: 10) {
+        HStack(alignment: .center, spacing: 8) {
             Button { path.append(v.id) } label: {
                 HStack(spacing: 6) {
                     VehicleRow(vehicle: v, stats: statsCache[v.id] ?? store.stats(for: v))
-                    Spacer(minLength: 4)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                     Image(systemName: "chevron.right")
                         .font(.footnote.weight(.semibold))
                         .foregroundStyle(.tertiary)
@@ -111,13 +111,25 @@ struct VehicleListView: View {
             .buttonStyle(.plain)
             .accessibilityHint("Öffnet das Fahrzeug")
             if store.canWrite {
+                // Kompakt: rundes Symbol + kleine Beschriftung (Tippfläche ≥ 44 pt),
+                // damit Fahrzeugname, Kennzeichen und Hinweise die volle Breite behalten.
                 Button { quick = .fuel(v) } label: {
-                    Label("Tanken", systemImage: "fuelpump.fill")
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(Color(uiColor: .systemBackground))
+                    VStack(spacing: 2) {
+                        Image(systemName: "fuelpump.fill")
+                            .font(.system(size: 17, weight: .semibold))
+                            .foregroundStyle(Color(uiColor: .systemBackground))
+                            .frame(width: 36, height: 36)
+                            .background(Color.successText, in: Circle())
+                        Text("Tanken")
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(Color.successText)
+                            .lineLimit(1)
+                            .fixedSize()
+                    }
+                    .frame(minWidth: 44, minHeight: 44)
+                    .contentShape(Rectangle())
                 }
-                .buttonStyle(.borderedProminent)
-                .tint(Color.successText)
+                .buttonStyle(.borderless)
                 .accessibilityLabel("Tankvorgang für \(v.name) erfassen")
             }
         }
