@@ -19,6 +19,8 @@ final class TenantStore {
     private(set) var maintenance: [String: Maintenance] = [:]
     private(set) var items: [String: MaintenanceItem] = [:]
     private(set) var materials: [String: MaintenanceMaterial] = [:]
+    /// Materialstamm (mandantenweit)
+    private(set) var articles: [String: MaterialArticle] = [:]
     private(set) var outbox: [PendingOp] = []
     private(set) var cursor = 0
     private(set) var lastSync: Date?
@@ -76,6 +78,66 @@ final class TenantStore {
     }
 
     func maintenance(id: String) -> Maintenance? { maintenance[id] }
+    func article(id: String) -> MaterialArticle? { articles[id] }
+
+    /// Nicht stornierte Stammartikel, die für das Fahrzeug gelten (Artikel ohne Fahrzeug gelten für alle).
+    /// `vehicleId == nil` liefert den ganzen Stamm. Sortiert nach Kategorie, Name.
+    func articles(for vehicleId: String?) -> [MaterialArticle] {
+        articles.values.filter { a in
+            if a.deleted { return false }
+            guard let wanted = vehicleId, let own = a.vehicleId else { return true }
+            return own == wanted
+        }
+        .sorted(by: MaterialArticle.catalogOrder)
+    }
+
+    /// Verwendung je Stammartikel: nicht stornierte Positionen nicht stornierter Wartungen.
+    func articleUsage() -> [String: ArticleUsage] {
+        var result: [String: ArticleUsage] = [:]
+        for m in materials.values where !m.deleted {
+            guard let articleId = m.articleId, let parent = maintenance[m.maintenanceId], !parent.deleted else { continue }
+            var usage = result[articleId] ?? ArticleUsage()
+            usage.count += 1
+            if let last = usage.lastUsed {
+                if parent.date > last { usage.lastUsed = parent.date }
+            } else {
+                usage.lastUsed = parent.date
+            }
+            result[articleId] = usage
+        }
+        return result
+    }
+
+    /// Häufig verwendete Artikel (Anzahl, dann zuletzt verwendet) für die Materialauswahl.
+    func frequentArticles(for vehicleId: String?, limit: Int = 5) -> [MaterialArticle] {
+        let usage = articleUsage()
+        let used = articles(for: vehicleId).filter { (usage[$0.id]?.count ?? 0) > 0 }
+        let sorted = used.sorted { a, b in
+            let ua = usage[a.id] ?? ArticleUsage()
+            let ub = usage[b.id] ?? ArticleUsage()
+            if ua.count != ub.count { return ua.count > ub.count }
+            let da = ua.lastUsed ?? Date.distantPast
+            let db = ub.lastUsed ?? Date.distantPast
+            if da != db { return da > db }
+            return MaterialArticle.catalogOrder(a, b)
+        }
+        return Array(sorted.prefix(limit))
+    }
+
+    /// Kategorie-Vorschläge: Standardkategorien, danach weitere bereits verwendete.
+    var articleCategories: [String] {
+        var seen = Set<String>()
+        var result: [String] = []
+        let used = articles.values.filter { !$0.deleted }.compactMap { $0.category?.nilIfEmpty }
+            .sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+        for c in MaterialArticle.defaultCategories + used {
+            let key = c.lowercased()
+            if seen.contains(key) { continue }
+            seen.insert(key)
+            result.append(c)
+        }
+        return result
+    }
     func vehicle(id: String) -> Vehicle? { vehicles[id] }
 
     func stats(for v: Vehicle) -> VehicleStats {
@@ -113,6 +175,8 @@ final class TenantStore {
     func save(_ f: FuelEntry) { upsert(f, in: \.fuel) }
     func delete(_ f: FuelEntry) { remove(f, in: \.fuel) }
     func delete(_ m: Maintenance) { remove(m, in: \.maintenance) }
+    func save(_ a: MaterialArticle) { upsert(a, in: \.articles) }
+    func delete(_ a: MaterialArticle) { remove(a, in: \.articles) }
 
     /// Wartung inkl. Checkliste und Material speichern; entfernte Punkte/Positionen werden storniert,
     /// unveränderte nicht erneut gesendet.
@@ -258,6 +322,7 @@ final class TenantStore {
             maintenance = maintenance.filter { isPending($0.key) }
             items = items.filter { isPending($0.key) }
             materials = materials.filter { isPending($0.key) }
+            articles = articles.filter { isPending($0.key) }
         }
         merge(ch.vehicles, into: \.vehicles)
         merge(ch.odometer, into: \.odometer)
@@ -265,6 +330,7 @@ final class TenantStore {
         merge(ch.maintenance, into: \.maintenance)
         merge(ch.maintenanceItems, into: \.items)
         merge(ch.maintenanceMaterials, into: \.materials)
+        merge(ch.materialArticles ?? [], into: \.articles)
         cursor = ch.cursor
     }
 
@@ -284,6 +350,7 @@ final class TenantStore {
         case Maintenance.entityName: maintenance[id]?.version = v
         case MaintenanceItem.entityName: items[id]?.version = v
         case MaintenanceMaterial.entityName: materials[id]?.version = v
+        case MaterialArticle.entityName: articles[id]?.version = v
         default: break
         }
     }
@@ -291,13 +358,14 @@ final class TenantStore {
     #if DEBUG
     func demoSeed(vehicles v: [Vehicle], odometer o: [OdometerReading], fuel f: [FuelEntry],
                   maintenance m: [Maintenance], items i: [MaintenanceItem], materials mat: [MaintenanceMaterial],
-                  pending: [FuelEntry]) {
+                  articles art: [MaterialArticle] = [], pending: [FuelEntry]) {
         vehicles = Dictionary(uniqueKeysWithValues: v.map { ($0.id, $0) })
         odometer = Dictionary(uniqueKeysWithValues: o.map { ($0.id, $0) })
         fuel = Dictionary(uniqueKeysWithValues: f.map { ($0.id, $0) })
         maintenance = Dictionary(uniqueKeysWithValues: m.map { ($0.id, $0) })
         items = Dictionary(uniqueKeysWithValues: i.map { ($0.id, $0) })
         materials = Dictionary(uniqueKeysWithValues: mat.map { ($0.id, $0) })
+        articles = Dictionary(uniqueKeysWithValues: art.map { ($0.id, $0) })
         outbox = pending.map { PendingOp(entity: FuelEntry.entityName, entityId: $0.id, action: "upsert",
                                          baseVersion: nil, data: nil, clientTs: "") }
         lastSync = Date().addingTimeInterval(-600)
@@ -314,6 +382,8 @@ final class TenantStore {
         var items: [String: MaintenanceItem]
         /// Optional, damit Dateien älterer App-Versionen (ohne Material) weiter laden
         var materials: [String: MaintenanceMaterial]?
+        /// Optional, damit Dateien älterer App-Versionen (ohne Materialstamm) weiter laden
+        var articles: [String: MaterialArticle]?
         var outbox: [PendingOp]
         var cursor: Int
         var lastSync: Date?
@@ -333,7 +403,7 @@ final class TenantStore {
 
     private func persist() {
         let snap = Snapshot(vehicles: vehicles, odometer: odometer, fuel: fuel, maintenance: maintenance,
-                            items: items, materials: materials, outbox: outbox, cursor: cursor, lastSync: lastSync)
+                            items: items, materials: materials, articles: articles, outbox: outbox, cursor: cursor, lastSync: lastSync)
         do {
             let data = try Self.fileEncoder.encode(snap)
             try data.write(to: fileURL, options: [.atomic, .completeFileProtectionUnlessOpen])
@@ -351,9 +421,11 @@ final class TenantStore {
         maintenance = snap.maintenance
         items = snap.items
         materials = snap.materials ?? [:]
+        articles = snap.articles ?? [:]
         outbox = snap.outbox
-        // Datei ohne Material (ältere App-Version): ab 0 holen, damit bereits erfasste Positionen ankommen
-        cursor = snap.materials == nil ? 0 : snap.cursor
+        // Datei ohne Material bzw. Materialstamm (ältere App-Version): ab 0 holen,
+        // damit bereits erfasste Positionen/Artikel ankommen
+        cursor = (snap.materials == nil || snap.articles == nil) ? 0 : snap.cursor
         lastSync = snap.lastSync
     }
 
@@ -397,6 +469,7 @@ final class TenantStore {
         case Maintenance.entityName: "Wartung"
         case MaintenanceItem.entityName: "Checkpunkt"
         case MaintenanceMaterial.entityName: "Material"
+        case MaterialArticle.entityName: "Materialstamm"
         default: entity
         }
     }

@@ -124,6 +124,8 @@ struct MaintenanceMaterial: SyncEntity {
     var unit: String = "Stk"
     var unitPrice: Double?
     var position: Int = 0
+    /// Verknüpfter Stammartikel (optional). Name/Preis usw. bleiben eine Kopie zum Erfassungszeitpunkt.
+    var articleId: String?
 
     /// Menge × Einzelpreis; `nil` ohne Preis
     var lineTotal: Double? { unitPrice.map { $0 * quantity } }
@@ -132,6 +134,108 @@ struct MaintenanceMaterial: SyncEntity {
     static func total(_ list: [MaintenanceMaterial]) -> Double {
         list.reduce(0.0) { sum, m in m.deleted ? sum : sum + (m.lineTotal ?? 0) }
     }
+}
+
+/// Artikel im Materialstamm (mandantenweit) – Vorlage für Materialpositionen einer Wartung.
+struct MaterialArticle: SyncEntity {
+    static let entityName = "material_article"
+    /// Grenzen wie Server
+    static let maxName = 150
+    static let maxPartNumber = 60
+    static let maxUnit = 20
+    static let maxUnitPrice = 100_000.0
+    static let maxCategory = 50
+    static let maxNote = 500
+    static let defaultCategories = ["Öl", "Filter", "Reifen", "Bremsen", "Flüssigkeiten", "Elektrik", "Sonstiges"]
+    static let commonUnits = ["Stk", "l", "kg", "m", "Set", "Paar"]
+    static let uncategorized = "Ohne Kategorie"
+
+    var id = UUID().uuidString.lowercased()
+    var version = 0
+    var deleted = false
+    var name: String
+    var partNumber: String?
+    var unit: String = "Stk"
+    var unitPrice: Double?
+    var category: String?
+    /// `nil` = für alle Fahrzeuge
+    var vehicleId: String?
+    var note: String?
+
+    var categoryTitle: String { category?.nilIfEmpty ?? Self.uncategorized }
+
+    /// Suche in Name, Art.-Nr. (auch ohne Leerzeichen) und Kategorie; Gross/Klein und Akzente egal.
+    func matches(_ query: String) -> Bool {
+        let q = query.trimmed
+        if q.isEmpty { return true }
+        if name.localizedStandardContains(q) { return true }
+        if let c = category, c.localizedStandardContains(q) { return true }
+        if let p = partNumber {
+            if p.localizedStandardContains(q) { return true }
+            let compactQuery = q.replacingOccurrences(of: " ", with: "")
+            let compactPart = p.replacingOccurrences(of: " ", with: "")
+            if !compactQuery.isEmpty && compactPart.localizedStandardContains(compactQuery) { return true }
+        }
+        return false
+    }
+
+    /// Sortierung: Kategorie (ohne Kategorie zuletzt), dann Name.
+    static func catalogOrder(_ a: MaterialArticle, _ b: MaterialArticle) -> Bool {
+        let ca: String? = a.category?.nilIfEmpty
+        let cb: String? = b.category?.nilIfEmpty
+        switch (ca, cb) {
+        case (.some, .none):
+            return true
+        case (.none, .some):
+            return false
+        case let (.some(first), .some(second)):
+            let r = first.localizedStandardCompare(second)
+            if r != .orderedSame { return r == .orderedAscending }
+        case (.none, .none):
+            break
+        }
+        let n = a.name.localizedStandardCompare(b.name)
+        if n != .orderedSame { return n == .orderedAscending }
+        return a.id < b.id
+    }
+
+    /// Gruppiert eine (sortierte) Liste nach Kategorie; Reihenfolge des ersten Auftretens bleibt erhalten.
+    static func grouped(_ list: [MaterialArticle]) -> [ArticleGroup] {
+        var groups: [ArticleGroup] = []
+        var index: [String: Int] = [:]
+        for a in list {
+            let title = a.categoryTitle
+            if let i = index[title] {
+                groups[i].articles.append(a)
+            } else {
+                index[title] = groups.count
+                groups.append(ArticleGroup(title: title, articles: [a]))
+            }
+        }
+        return groups
+    }
+
+    /// Preise gleich (auf Rappen genau); beide `nil` gilt als gleich.
+    static func samePrice(_ a: Double?, _ b: Double?) -> Bool {
+        switch (a, b) {
+        case (.none, .none): return true
+        case let (.some(x), .some(y)): return abs(x - y) < 0.005
+        default: return false
+        }
+    }
+}
+
+/// Artikel einer Kategorie (Abschnitt in Listen).
+struct ArticleGroup: Identifiable {
+    var title: String
+    var articles: [MaterialArticle]
+    var id: String { title }
+}
+
+/// Verwendung eines Stammartikels in Materialpositionen.
+struct ArticleUsage: Hashable {
+    var count = 0
+    var lastUsed: Date?
 }
 
 // MARK: Server-Antworten
@@ -157,6 +261,8 @@ struct ChangesResponse: Decodable {
     var maintenance: [Maintenance]
     var maintenanceItems: [MaintenanceItem]
     var maintenanceMaterials: [MaintenanceMaterial]
+    /// Optional, damit ältere Server ohne Materialstamm weiter funktionieren
+    var materialArticles: [MaterialArticle]?
 }
 
 struct OpResult: Decodable {

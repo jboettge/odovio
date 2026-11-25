@@ -218,6 +218,13 @@ struct MaintenanceFormView: View {
         var quantity = "1"
         var unit = "Stk"
         var unitPrice = ""
+        /// Verknüpfter Stammartikel
+        var articleId: String?
+        /// Neuer Stammartikel („In Materialstamm speichern“) – wird erst beim Sichern der Wartung angelegt,
+        /// damit Abbrechen nichts im Stamm hinterlässt.
+        var pendingArticle: MaterialArticle?
+        /// Einzelpreis beim Sichern der Wartung in den verknüpften Stammartikel übernehmen
+        var updateCatalogPrice = false
 
         var lineTotal: Double? {
             guard let q = quantity.asDouble, let p = unitPrice.asDouble else { return nil }
@@ -227,11 +234,11 @@ struct MaintenanceFormView: View {
         static func from(_ m: MaintenanceMaterial) -> DraftMaterial {
             DraftMaterial(id: m.id, version: m.version, name: m.name, partNumber: m.partNumber ?? "",
                           quantity: Fmt.editQty(m.quantity), unit: m.unit,
-                          unitPrice: m.unitPrice.map { priceText($0) } ?? "")
+                          unitPrice: m.unitPrice.map { priceText($0) } ?? "", articleId: m.articleId)
         }
 
         /// Zwei Nachkommastellen, ausser der Preis hat mehr (sonst gälte er beim Sichern als geändert).
-        private static func priceText(_ p: Double) -> String {
+        static func priceText(_ p: Double) -> String {
             let twoDigits = Fmt.edit(p)
             return twoDigits.asDouble == p ? twoDigits : Fmt.editQty(p)
         }
@@ -327,7 +334,8 @@ struct MaintenanceFormView: View {
                 }
             }
             .sheet(item: $editingMaterial) { draft in
-                MaterialEditView(material: draft, isNew: !materials.contains { $0.id == draft.id }) { updated in
+                MaterialEditView(material: draft, isNew: !materials.contains { $0.id == draft.id },
+                                 vehicleId: vehicle.id) { updated in
                     commitMaterial(updated)
                 }
             }
@@ -454,9 +462,29 @@ struct MaintenanceFormView: View {
             guard let name = d.name.nilIfEmpty, let quantity = d.quantity.asDouble, quantity > 0 else { return nil }
             return MaintenanceMaterial(id: d.id, version: d.version, maintenanceId: m.id, name: name,
                                        partNumber: d.partNumber.nilIfEmpty, quantity: quantity,
-                                       unit: d.unit.nilIfEmpty ?? "Stk", unitPrice: d.unitPrice.asDouble)
+                                       unit: d.unit.nilIfEmpty ?? "Stk", unitPrice: d.unitPrice.asDouble,
+                                       articleId: d.articleId)
         }
+        // Stammartikel zuerst, damit die Positionen auf bereits angelegte Artikel verweisen
+        saveCatalogChanges()
         store.save(m, items: newItems, materials: newMaterials)
+    }
+
+    /// Neue Stammartikel anlegen bzw. Stammpreise aktualisieren (nur für Positionen, die gesichert werden).
+    private func saveCatalogChanges() {
+        guard store.canWrite else { return }
+        for d in materials {
+            guard d.name.nilIfEmpty != nil, let quantity = d.quantity.asDouble, quantity > 0,
+                  let articleId = d.articleId else { continue }
+            if let newArticle = d.pendingArticle, newArticle.id == articleId {
+                store.save(newArticle)
+            } else if d.updateCatalogPrice, let price = d.unitPrice.asDouble,
+                      var article = store.article(id: articleId), !article.deleted,
+                      !MaterialArticle.samePrice(article.unitPrice, price) {
+                article.unitPrice = price
+                store.save(article)
+            }
+        }
     }
 }
 
@@ -548,21 +576,110 @@ private struct MaterialDetailSection: View {
 }
 
 /// Kleines Sheet zum Erfassen/Bearbeiten einer Materialposition (wird erst mit der Wartung gesichert).
+/// Werte können aus dem Materialstamm übernommen werden; sie bleiben eine Kopie zum Erfassungszeitpunkt.
 private struct MaterialEditView: View {
     typealias Draft = MaintenanceFormView.DraftMaterial
 
     @Environment(\.dismiss) private var dismiss
+    @Environment(TenantStore.self) private var store
     @State private var draft: Draft
+    /// Neuen Stammartikel anlegen (nur ohne verknüpften Artikel)
+    @State private var saveToCatalog: Bool
+    @State private var newCategory: String
+    @State private var onlyThisVehicle: Bool
+    @State private var showPicker = false
     let isNew: Bool
+    let vehicleId: String?
     let onCommit: (Draft) -> Void
 
     private let units = ["Stk", "l", "kg", "m", "Set", "Paar"]
+    private static let maxSuggestions = 5
 
-    init(material: Draft, isNew: Bool, onCommit: @escaping (Draft) -> Void) {
+    init(material: Draft, isNew: Bool, vehicleId: String? = nil, onCommit: @escaping (Draft) -> Void) {
         _draft = State(initialValue: material)
+        _saveToCatalog = State(initialValue: material.pendingArticle != nil)
+        _newCategory = State(initialValue: material.pendingArticle?.category ?? "")
+        _onlyThisVehicle = State(initialValue: material.pendingArticle?.vehicleId != nil)
         self.isNew = isNew
+        self.vehicleId = vehicleId
         self.onCommit = onCommit
     }
+
+    // MARK: Materialstamm
+
+    /// Mit einem bestehenden Stammartikel verknüpft (nicht: neu anzulegender Artikel)
+    private var isLinked: Bool { draft.articleId != nil && draft.pendingArticle == nil }
+
+    private var linkedArticle: MaterialArticle? {
+        guard isLinked, let id = draft.articleId else { return nil }
+        return store.article(id: id)
+    }
+
+    private var linkedTitle: String {
+        guard let a = linkedArticle else { return "Artikel nicht verfügbar" }
+        if a.deleted { return a.name + " (storniert)" }
+        return a.name
+    }
+
+    private var pickerTitle: String {
+        isLinked ? "Anderen Artikel wählen" : "Aus Materialstamm wählen"
+    }
+
+    private var vehicleName: String? {
+        guard let id = vehicleId else { return nil }
+        return store.vehicle(id: id)?.name
+    }
+
+    /// Vorschläge beim Tippen der Bezeichnung (nur ohne Verknüpfung)
+    private var suggestions: [MaterialArticle] {
+        guard !isLinked else { return [] }
+        let query = draft.name.trimmed
+        guard query.count >= 2 else { return [] }
+        let matches = store.articles(for: vehicleId).filter { $0.matches(query) }
+        // Treffer am Wortanfang zuerst
+        let ranked = matches.sorted { a, b in
+            let pa = a.name.lowercased().hasPrefix(query.lowercased())
+            let pb = b.name.lowercased().hasPrefix(query.lowercased())
+            if pa != pb { return pa }
+            return MaterialArticle.catalogOrder(a, b)
+        }
+        return Array(ranked.prefix(Self.maxSuggestions))
+    }
+
+    /// Gleichnamiger Stammartikel (Hinweis beim Anlegen, um Doppelte zu vermeiden)
+    private var duplicateArticle: MaterialArticle? {
+        let n = draft.name.trimmed
+        guard !n.isEmpty else { return nil }
+        let part = draft.partNumber.trimmed
+        return store.articles(for: nil).first { a in
+            a.name.compare(n, options: [.caseInsensitive, .diacriticInsensitive]) == .orderedSame
+                && (a.partNumber ?? "").compare(part, options: [.caseInsensitive]) == .orderedSame
+        }
+    }
+
+    /// Einzelpreis weicht vom (gültigen) Stammpreis ab → Aktualisieren anbieten
+    private var canUpdatePrice: Bool {
+        guard store.canWrite, let a = linkedArticle, !a.deleted, priceValid,
+              let price = draft.unitPrice.asDouble else { return false }
+        return !MaterialArticle.samePrice(a.unitPrice, price)
+    }
+
+    private var priceFooter: String {
+        var oldText = "ohne Preis"
+        if let a = linkedArticle, let p = a.unitPrice { oldText = Fmt.chf(p) }
+        var newText = "–"
+        if let p = draft.unitPrice.asDouble { newText = Fmt.chf(p) }
+        return "Stammpreis \(oldText) → \(newText). Wird beim Sichern der Wartung übernommen."
+    }
+
+    private var catalogFooter: String {
+        if let d = duplicateArticle {
+            return "Im Materialstamm gibt es bereits «\(d.name)». Zum Verknüpfen den Vorschlag oben wählen."
+        }
+        return "Der Artikel wird beim Sichern der Wartung angelegt und steht danach zur Auswahl."
+    }
+
+    // MARK: Validierung
 
     private var nameValid: Bool {
         let n = draft.name.trimmed
@@ -582,8 +699,13 @@ private struct MaterialEditView: View {
 
     private var partNumberValid: Bool { draft.partNumber.trimmed.count <= MaintenanceMaterial.maxPartNumber }
     private var unitValid: Bool { draft.unit.trimmed.count <= MaintenanceMaterial.maxUnit }
+    private var categoryValid: Bool {
+        isLinked || !saveToCatalog || newCategory.trimmed.count <= MaterialArticle.maxCategory
+    }
 
-    private var canCommit: Bool { nameValid && quantityValid && priceValid && partNumberValid && unitValid }
+    private var canCommit: Bool {
+        nameValid && quantityValid && priceValid && partNumberValid && unitValid && categoryValid
+    }
 
     /// Hinweis nur für tatsächlich fehlerhafte Eingaben (leerer Name sperrt bloss den Button).
     private var validationMessage: String? {
@@ -594,14 +716,22 @@ private struct MaterialEditView: View {
         if !draft.quantity.trimmed.isEmpty && !quantityValid { return "Menge muss grösser als 0 sein." }
         if !unitValid { return "Einheit höchstens \(MaintenanceMaterial.maxUnit) Zeichen." }
         if !priceValid { return "Einzelpreis ungültig." }
+        if !categoryValid { return "Kategorie höchstens \(MaterialArticle.maxCategory) Zeichen." }
         return nil
     }
+
+    // MARK: Ansicht
 
     var body: some View {
         NavigationStack {
             Form {
+                catalogSection
+
                 Section {
                     TextField("Bezeichnung (z. B. Motoröl 5W-30)", text: $draft.name)
+                    ForEach(suggestions) { a in
+                        suggestionRow(a)
+                    }
                     TextField("Art.-Nr. (optional)", text: $draft.partNumber)
                         .autocorrectionDisabled()
                         .textInputAutocapitalization(.characters)
@@ -636,6 +766,8 @@ private struct MaterialEditView: View {
                         Text(message).foregroundStyle(.red)
                     }
                 }
+
+                catalogOptionsSection
             }
             .navigationTitle(isNew ? "Neues Material" : "Material bearbeiten")
             .navigationBarTitleDisplayMode(.inline)
@@ -652,8 +784,106 @@ private struct MaterialEditView: View {
                     .accessibilityLabel(isNew ? "Material hinzufügen" : "Änderungen übernehmen")
                 }
             }
+            .sheet(isPresented: $showPicker) {
+                MaterialPickerView(vehicleId: vehicleId) { article in
+                    apply(article)
+                }
+            }
         }
         .presentationDetents([.medium, .large])
+    }
+
+    private var catalogSection: some View {
+        Section {
+            if isLinked {
+                HStack(spacing: 12) {
+                    Image(systemName: "link")
+                        .foregroundStyle(.tint)
+                        .accessibilityHidden(true)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Aus Materialstamm").font(.caption).foregroundStyle(.secondary)
+                        Text(linkedTitle)
+                    }
+                    Spacer(minLength: 8)
+                    Button("Lösen") { unlink() }
+                        .buttonStyle(.borderless)
+                        .accessibilityLabel("Verknüpfung mit Materialstamm lösen")
+                }
+                .accessibilityElement(children: .contain)
+            }
+            Button { showPicker = true } label: {
+                Label(pickerTitle, systemImage: "magnifyingglass")
+            }
+            .accessibilityHint("Öffnet die Suche im Materialstamm")
+        } footer: {
+            if isLinked {
+                Text("Die Werte sind eine Kopie des Stammartikels und können hier angepasst werden.")
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var catalogOptionsSection: some View {
+        if !isLinked {
+            if store.canWrite {
+                Section {
+                    Toggle("In Materialstamm speichern", isOn: $saveToCatalog)
+                    if saveToCatalog {
+                        ArticleCategoryField(text: $newCategory)
+                        if let name = vehicleName {
+                            Toggle("Nur für \(name)", isOn: $onlyThisVehicle)
+                        }
+                    }
+                } footer: {
+                    if saveToCatalog {
+                        Text(catalogFooter)
+                    }
+                }
+            }
+        } else if canUpdatePrice {
+            Section {
+                Toggle("Preis im Stamm aktualisieren", isOn: $draft.updateCatalogPrice)
+            } footer: {
+                Text(priceFooter)
+            }
+        }
+    }
+
+    private func suggestionRow(_ article: MaterialArticle) -> some View {
+        Button { apply(article) } label: {
+            HStack(spacing: 10) {
+                Image(systemName: "arrow.up.left.circle")
+                    .foregroundStyle(.tint)
+                MaterialArticleRow(article: article)
+            }
+            .font(.subheadline)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Vorschlag übernehmen: \(article.name)")
+        .accessibilityAddTraits(.isButton)
+    }
+
+    // MARK: Aktionen
+
+    /// Übernimmt die Werte des Stammartikels; die Menge bleibt.
+    private func apply(_ article: MaterialArticle) {
+        draft.name = article.name
+        draft.partNumber = article.partNumber ?? ""
+        draft.unit = article.unit
+        draft.unitPrice = article.unitPrice.map { Draft.priceText($0) } ?? ""
+        if draft.quantity.trimmed.isEmpty { draft.quantity = "1" }
+        draft.articleId = article.id
+        draft.pendingArticle = nil
+        draft.updateCatalogPrice = false
+        saveToCatalog = false
+    }
+
+    private func unlink() {
+        draft.articleId = nil
+        draft.pendingArticle = nil
+        draft.updateCatalogPrice = false
     }
 
     private func commit() {
@@ -663,6 +893,26 @@ private struct MaterialEditView: View {
         d.quantity = d.quantity.trimmed
         d.unit = d.unit.nilIfEmpty ?? "Stk"
         d.unitPrice = d.unitPrice.trimmed
+        if isLinked {
+            d.pendingArticle = nil
+            if !canUpdatePrice { d.updateCatalogPrice = false }
+        } else if saveToCatalog && store.canWrite {
+            // Artikel vormerken; angelegt wird er erst beim Sichern der Wartung
+            var article = d.pendingArticle ?? MaterialArticle(name: d.name)
+            article.name = d.name
+            article.partNumber = d.partNumber.nilIfEmpty
+            article.unit = d.unit
+            article.unitPrice = d.unitPrice.asDouble
+            article.category = newCategory.nilIfEmpty
+            article.vehicleId = onlyThisVehicle && vehicleName != nil ? vehicleId : nil
+            d.pendingArticle = article
+            d.articleId = article.id
+            d.updateCatalogPrice = false
+        } else {
+            d.pendingArticle = nil
+            d.articleId = nil
+            d.updateCatalogPrice = false
+        }
         onCommit(d)
     }
 }

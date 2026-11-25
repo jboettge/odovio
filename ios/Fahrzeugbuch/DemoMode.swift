@@ -14,6 +14,9 @@ enum Demo {
 
     static let vehicleId = "11111111-1111-4111-8111-111111111111"
     static let serviceId = "22222222-2222-4222-8222-222222222222"
+    static let busId = "33333333-3333-4333-8333-333333333333"
+
+    static func articleId(_ n: Int) -> String { String(format: "dddddddd-dddd-4ddd-8ddd-%012ld", n) }
 
     @MainActor
     static func setUp(_ settings: AppSettings) {
@@ -35,7 +38,7 @@ enum Demo {
     static func seed(_ store: TenantStore) {
         let octavia = Vehicle(id: vehicleId, version: 3, name: "Skoda Octavia", make: "Skoda",
                               model: "Octavia Combi 2.0 TSI", plate: "ZH 123 456", initialKm: 48000)
-        let bus = Vehicle(id: "33333333-3333-4333-8333-333333333333", version: 1, name: "VW California",
+        let bus = Vehicle(id: busId, version: 1, name: "VW California",
                           make: "VW", model: "T6.1 Ocean", plate: "ZH 98 765", fuelType: "diesel", initialKm: 71200)
         let fuel: [(String, Int, Double, Double, Bool, String)] = [
             ("2026-01-05", 48520, 45.2, 79.50, true, "Migrol Zürich"),
@@ -82,10 +85,28 @@ enum Demo {
             ("Ölfilter", "W 712/95", 1, "Stk", 18.50),
             ("Luftfilter", nil, 1, "Stk", 32.00),
         ]
+        // Positionen 0–2 stammen aus den Stammartikeln 0–2 (Werte = Kopie zum Erfassungszeitpunkt)
         let materials = parts.enumerated().map { n, p in
             MaintenanceMaterial(id: String(format: "cccccccc-cccc-4ccc-8ccc-%012ld", n), version: 1,
                                 maintenanceId: serviceId, name: p.0, partNumber: p.1, quantity: p.2,
-                                unit: p.3, unitPrice: p.4, position: n)
+                                unit: p.3, unitPrice: p.4, position: n, articleId: articleId(n))
+        }
+        // Materialstamm: Name, Art.-Nr., Einheit, Preis, Kategorie, Fahrzeug (nil = alle)
+        let catalog: [(String, String?, String, Double?, String, String?)] = [
+            ("Motoröl 5W-30", nil, "l", 14.90, "Öl", nil),
+            ("Ölfilter", "W 712/95", "Stk", 18.50, "Filter", vehicleId),
+            ("Luftfilter", nil, "Stk", 32.00, "Filter", vehicleId),
+            ("Innenraumfilter", "CUK 2939", "Stk", 27.80, "Filter", nil),
+            ("Bremsflüssigkeit DOT 4", nil, "l", 12.50, "Flüssigkeiten", nil),
+            ("Kühlmittel G13", nil, "l", 9.90, "Flüssigkeiten", nil),
+            ("Scheibenwischer vorne", "A 297S", "Set", 39.90, "Sonstiges", nil),
+            ("Glühbirne H7", "H7 12V 55W", "Stk", 8.90, "Elektrik", nil),
+            ("Bremsbeläge vorne", nil, "Set", 89.00, "Bremsen", busId),
+            ("Winterreifen 205/55 R16", nil, "Stk", 145.00, "Reifen", nil),
+        ]
+        let articles = catalog.enumerated().map { n, a in
+            MaterialArticle(id: articleId(n), version: 1, name: a.0, partNumber: a.1, unit: a.2,
+                            unitPrice: a.3, category: a.4, vehicleId: a.5)
         }
         let odometer = [
             OdometerReading(id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", version: 1, vehicleId: vehicleId,
@@ -94,7 +115,8 @@ enum Demo {
                             date: day("2026-07-21"), km: 52010, note: "Ferienende"),
         ]
         store.demoSeed(vehicles: [octavia, bus], odometer: odometer, fuel: fuelEntries,
-                       maintenance: maintenance, items: items, materials: materials, pending: [pendingFuel])
+                       maintenance: maintenance, items: items, materials: materials, articles: articles,
+                       pending: [pendingFuel])
     }
 }
 
@@ -118,6 +140,8 @@ struct DemoScreen: View {
                     MaintenanceFormView(vehicle: v, maintenance: store.maintenance(id: Demo.serviceId))
                 case "report": ReportView(vehicle: v)
                 case "settings": NavigationStack { SettingsView() }
+                case "catalog": NavigationStack { MaterialCatalogView() }
+                case "material-picker": MaterialPickerView(vehicleId: v.id) { _ in }
                 case "login": LoginView()
                 default: VehicleListView()
                 }

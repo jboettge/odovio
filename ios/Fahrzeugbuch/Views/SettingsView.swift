@@ -45,6 +45,19 @@ struct SettingsView: View {
 
                 if let store = settings.store {
                     Section {
+                        NavigationLink {
+                            MaterialCatalogView()
+                                .environment(store)
+                        } label: {
+                            Label("Materialstamm (\(store.articles(for: nil).count))", systemImage: "shippingbox")
+                        }
+                    } header: {
+                        Text("Stammdaten")
+                    } footer: {
+                        Text(catalogFooter(store))
+                    }
+
+                    Section {
                         LabeledContent("Mandant", value: store.tenant.slug)
                         LabeledContent("Ausstehend", value: "\(store.outbox.count) Änderung(en)")
                         if let last = store.lastSync {
@@ -99,6 +112,12 @@ struct SettingsView: View {
             Text(pendingWarning)
         }
         .onAppear { url = settings.serverURL }
+    }
+
+    private func catalogFooter(_ store: TenantStore) -> String {
+        store.canWrite
+            ? "Artikel für die Materialerfassung bei Wartungen."
+            : "Nur ansehen – dein Zugang für diesen Mandanten ist schreibgeschützt."
     }
 
     private var pendingWarning: String {
