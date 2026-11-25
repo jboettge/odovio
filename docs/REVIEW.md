@@ -88,3 +88,28 @@ JWT: Algorithmus-Allowlist (kein `none`/HS), `iss` exakt, `exp/iat/sub` Pflicht,
 4. **D1, U1, U3, U10** – sichtbare UX-Verbesserungen · klein–mittel
 5. **S3, S7, S14** – Betriebshärtung (Proxy-Limits, Compose) · klein
 6. Rest nach Bedarf
+
+---
+
+## Umsetzungsstand (25.11.2026)
+
+| Befund | Status | Umsetzung |
+|---|---|---|
+| S2, S10 | ✅ | `allow_inf_nan=False`, Obergrenzen für Zahlen/Texte, DB-Fehler nur je Op `rejected` (Tests) |
+| S4 | ✅ | `Content-Disposition` nach RFC 6266 (ASCII + `filename*`), Tabellen mit `splitInRow`, Textlängen begrenzt (Tests) |
+| S1 | ✅ | Verify gleicht Fachtabellen gegen Journal ab; signierte Ed25519-Anker (`/audit/anchors`); App-Rolle `fahrzeugbuch_app` ohne Owner/Superuser/DELETE, Dienst `migrate` (Tests inkl. PostgreSQL-Rollentest) |
+| S5 | ✅ | Lokale Daten an `sub` gebunden, Benutzerwechsel → Reset vor Sync, Tenants nach jedem Login neu |
+| S6 | ✅ | App: nur HTTPS, Issuer-Pin, Discovery-Validierung · Server: `API_BIND` (Default 127.0.0.1), `FORWARDED_ALLOW_IPS` |
+| S12 | ✅ | Keychain `AfterFirstUnlockThisDeviceOnly`, Dateischutz `completeUnlessOpen`, PDF-Exporte aufgeräumt |
+| S13 | ✅ | Ephemere `WebAuthenticationSession` |
+| S3 | ✅ | ASGI-Guard: Bearer-Pflicht vor Body-Parse, Body-Limit (Header + Stream) (Tests) |
+| S7 | ✅ | Eigener JWKS-Cache: Refetch max. 1×/60 s, Timeout 5 s, unbekannte `kid` → 401, generische Fehler (Tests) |
+| S8, S9 | ✅ | Nur `typ=Bearer`, `azp`-Allowlist (`OIDC_ALLOWED_AZP`), Rollen nur Realm/eigener Client (Tests) |
+| S11 | ✅ | Duplikat-Antwort mandantengeprüft, Meldung „ID bereits vergeben“ |
+| S14 | ✅ (teilw.) | `read_only`, `cap_drop: ALL`, `no-new-privileges`, Speicher-/PID-Limits, `/docs` aus, Warnung bei `DEFAULT_TENANT` ohne Rolle · **offen:** Image-Digests pinnen |
+| S15 | ✅ | Screenshot-Workflow `branches-ignore: [main]` |
+| D1–D7 | ✅ | Checkliste neutral, Titel „Fahrzeuge“ + Mandantenmenü, Export-Symbol, „Ausstehend“-Etikett, Diagramm (Ø-Linie, Monatsachse), App-Icon, Einheiten |
+| U1 | ✅ (teilw.) | Wischen/Kontextmenü „Tanken“, Schnellerfassung in Übersicht · **offen:** Home-Screen-Quick-Action/Siri-Kurzbefehl |
+| U2, U4 | ✅ | Fokus auf Liter, Pflichtfeld-Hinweis, Plausibilitätswarnungen (km rückläufig, Verbrauch, Literpreis) |
+| U3 | ✅ | Badges „Überfällig“/„Bald fällig“ (Liste, Fahrzeug), lokale Erinnerungen für Datum-Fälligkeiten |
+| U5–U10 | ✅ | km-Zeitachse aller Quellen, Leserolle sichtbar, Login-Text, „Fertig“ statt „Sichern“, PDF-Vorlagen, Accessibility-Labels |
