@@ -9,18 +9,64 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 class AuthConfig(BaseModel):
     issuer: str
     client_id: str
+    web_client_id: str
     scopes: str
+
+
+Role = Literal["admin", "write", "read"]
 
 
 class TenantInfo(BaseModel):
     slug: str
-    role: Literal["write", "read"]
+    role: Role
 
 
 class Me(BaseModel):
     sub: str
     name: str | None
+    display_name: str | None
     tenants: list[TenantInfo]
+
+
+# ---------- Gemeinsames Bewirtschaften: Aktivität, Mitglieder ----------
+class ActivityItem(BaseModel):
+    seq: int
+    at: str                     # ISO-8601 (UTC)
+    actor_name: str | None
+    action: Literal["create", "update", "delete"]
+    entity: str
+    entity_id: str
+    vehicle_id: str | None = None
+    summary: str
+
+
+class ActivityList(BaseModel):
+    items: list[ActivityItem]
+    next_before_seq: int | None = None
+
+
+class Member(BaseModel):
+    id: str
+    username: str | None
+    name: str | None
+    email: str | None = None              # nur für Verwalter sichtbar
+    role: Role | None = None
+    source: Literal["keycloak", "activity"]
+    last_activity_at: str | None = None
+
+
+class MemberList(BaseModel):
+    members: list[Member]
+    manageable: bool
+
+
+class MemberCreate(BaseModel):
+    user: str = Field(min_length=1, max_length=255)     # Benutzername oder E-Mail
+    role: Role
+
+
+class MemberUpdate(BaseModel):
+    role: Role
 
 
 # ---------- Nutzdaten je Objekttyp (Sync) ----------

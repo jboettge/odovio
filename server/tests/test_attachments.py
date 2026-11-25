@@ -77,7 +77,8 @@ def test_sync_metadata_refs_and_normalisation(client):
     assert a["sha256"] == sha(JPEG) and a["taken_at"] == "2026-03-01T10:15:30+01:00"
     assert a == {"id": a1, "version": 1, "fuel_id": fid, "maintenance_id": None, "vehicle_id": vid,
                  "kind": "receipt", "sha256": sha(JPEG), "mime": "image/jpeg", "size": len(JPEG),
-                 "taken_at": "2026-03-01T10:15:30+01:00", "note": "Shell", "deleted": False}
+                 "taken_at": "2026-03-01T10:15:30+01:00", "note": "Shell", "deleted": False,
+                 "created_by": "jakob", "updated_by": "jakob"}
     hist = client.get(f"{T}/history/attachment/{a1}").json()
     assert hist[0]["action"] == "create" and hist[0]["data"]["sha256"] == sha(JPEG)
 

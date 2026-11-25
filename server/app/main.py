@@ -17,7 +17,8 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
-from . import intel, logfilter, models, privacy, schemas
+from . import intel, logfilter, members, models, privacy, schemas
+from .activity import ACTIVITY_LIMIT, ACTIVITY_MAX, activity
 from .attachments import (
     EXTENSIONS,
     blob_path,
@@ -28,8 +29,9 @@ from .attachments import (
     store_blob,
     tenant_usage,
 )
-from .auth import TENANT_SLUG, User, get_config, require_user
+from .auth import TENANT_SLUG, User, can_write, get_config, require_user
 from .db import engine, get_session, snapshot_session
+from .geo import UpstreamError
 from .integrity import key_id, maybe_anchor, public_key_b64, signing_key, verify_tenant
 from .logbook import build_logbook, build_year_report, trips_csv
 from .migrate import create_schema
@@ -130,7 +132,7 @@ def _no_store(send):
 
 
 _docs = os.environ.get("DOCS_ENABLED") == "1"
-app = FastAPI(title="Fahrzeugbuch", version="2.1.0", lifespan=lifespan,
+app = FastAPI(title="Fahrzeugbuch", version="2.2.0", lifespan=lifespan,
               docs_url="/docs" if _docs else None, redoc_url=None,
               openapi_url="/openapi.json" if _docs else None)
 app.add_middleware(RequestGuard, max_body=int(os.environ.get("MAX_BODY_BYTES", str(1024 * 1024))),
@@ -152,8 +154,17 @@ CurrentUser = Annotated[User, Depends(require_user)]
 @dataclass
 class Access:
     tenant: models.Tenant
-    role: str
+    role: str          # "admin" | "write" | "read"
     user: User
+
+    @property
+    def writable(self) -> bool:
+        return can_write(self.role)
+
+    @property
+    def masked(self) -> bool:
+        """Leserolle: Privatfahrten/private Orte maskiert."""
+        return not self.writable
 
 
 def _get_or_create_tenant(db: Session, slug: str) -> models.Tenant:
@@ -200,8 +211,16 @@ def _report_rate(access: "Access") -> None:
 
 
 def _require_write(access: Access) -> None:
-    if access.role != "write":
+    if not access.writable:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Nur Lesezugriff auf diesen Mandanten")
+
+
+def _require_admin_web(access: Access) -> None:
+    """Mitgliederverwaltung: Rolle admin UND Token des Web-Frontends (azp = OIDC_WEB_CLIENT_ID)."""
+    if access.role != "admin":
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Nur für Verwalter dieses Mandanten")
+    if not access.user.web:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Verwaltung nur im Webfrontend")
 
 
 def _locked_tenant(db: Session, access: Access) -> models.Tenant:
@@ -263,7 +282,8 @@ def health():
 def auth_config():
     """OIDC-Parameter für die App (nur die Server-URL muss konfiguriert werden)."""
     cfg = get_config()
-    return {"issuer": cfg.issuer, "client_id": cfg.client_id, "scopes": "openid profile offline_access"}
+    return {"issuer": cfg.issuer, "client_id": cfg.client_id, "web_client_id": cfg.web_client_id,
+            "scopes": "openid profile offline_access"}
 
 
 # ---------- Benutzer / Mandanten ----------
@@ -272,6 +292,7 @@ def me(user: CurrentUser):
     return {
         "sub": user.sub,
         "name": user.name,
+        "display_name": user.display_name,
         "tenants": [{"slug": s, "role": r} for s, r in sorted(user.tenants.items())],
     }
 
@@ -290,7 +311,7 @@ def get_changes(access: TenantAccess, db: DB, since: Annotated[int, Query(ge=0)]
     if since == 0:
         _rate(access, "changes0", "RATE_FULL_SYNC", 10)
     db.refresh(access.tenant)
-    return changes_since(db, access.tenant, since, limit, mask_private=access.role != "write")
+    return changes_since(db, access.tenant, since, limit, mask_private=access.masked)
 
 
 @app.post("/api/t/{tenant}/sync", response_model=schemas.SyncResponse,
@@ -399,7 +420,7 @@ def get_logbook(vid: str, access: TenantAccess, db: DB, month: MonthQ = None,
         tenant = s.get(models.Tenant, access.tenant.id)
         data = _vehicle_or_404(s, access, vid, allow_deleted=True, children=False)
         pdf = build_logbook(s, tenant, data, date_from, date_to, access.user.name,
-                            mask_private=access.role != "write")
+                            mask_private=access.masked)
     return Response(pdf, media_type="application/pdf", headers={"Content-Disposition": content_disposition(
         f"Fahrtenbuch_{data.vehicle.name}_{month or f'{date_from}_{date_to}'}.pdf")})
 
@@ -413,7 +434,7 @@ def get_trips_csv(vid: str, access: TenantAccess, db: DB, date_from: DateFrom = 
     with snapshot_session() as s:
         tenant = s.get(models.Tenant, access.tenant.id)
         data = _vehicle_or_404(s, access, vid, allow_deleted=True, children=False)
-        body = trips_csv(s, tenant, data, date_from, date_to, mask_private=access.role != "write")
+        body = trips_csv(s, tenant, data, date_from, date_to, mask_private=access.masked)
     return Response(body, media_type="text/csv; charset=utf-8", headers={"Content-Disposition": content_disposition(
         f"Fahrten_{data.vehicle.name}_{date_from}_{date_to}.csv")})
 
@@ -543,7 +564,7 @@ def get_history(entity: str, eid: str, access: TenantAccess, db: DB):
     ).order_by(models.Revision.seq)
     out = [{**{f: getattr(r, f) for f in schemas.RevisionOut.model_fields if f != "data"},
             "data": json.loads(r.data)} for r in db.scalars(q)]
-    if access.role != "write" and out:
+    if access.masked and out:
         # Leserolle: ist das Objekt heute privat, werden auch ältere Stände maskiert
         model, schema, _ = ENTITIES[entity]
         obj = db.get(model, out[0]["entity_id"])
@@ -575,3 +596,75 @@ def audit_anchors(access: TenantAccess, db: DB):
         "message_format": "fahrzeugbuch-anchor|<tenant>|<seq>|<head_hash>|<created_at>",
         "anchors": [{c: getattr(a, c) for c in schemas.AnchorOut.model_fields} for a in db.scalars(q)],
     }
+
+
+# ---------- Gemeinsames Bewirtschaften: Aktivität, Mitglieder ----------
+@app.get("/api/t/{tenant}/activity", response_model=schemas.ActivityList)
+def get_activity(access: TenantAccess, db: DB,
+                 limit: Annotated[int, Query(ge=1, le=ACTIVITY_MAX)] = ACTIVITY_LIMIT,
+                 before_seq: Annotated[int | None, Query(ge=1)] = None):
+    """Letzte Änderungen (neueste zuerst) als Kurztexte; weiter mit before_seq=next_before_seq.
+    Leserolle: Privatfahrten maskiert („Privatfahrt · 22 km“)."""
+    _rate(access, "activity", "RATE_ACTIVITY", 60)
+    return activity(db, access.tenant.id, limit, before_seq, mask=access.masked)
+
+
+def _manageable(access: Access) -> bool:
+    return access.role == "admin" and access.user.web and members.config() is not None
+
+
+@app.get("/api/t/{tenant}/members", response_model=schemas.MemberList)
+def get_members(access: TenantAccess, db: DB):
+    """Mitglieder aus Keycloak (Gruppen des Mandanten) bzw. ohne Keycloak-Admin-Konfiguration die Akteure
+    des Journals (role null, source "activity"). E-Mail nur für Verwalter."""
+    _rate(access, "members", "RATE_MEMBERS", 30)
+    return {"members": members.list_members(db, access.tenant, is_admin=access.role == "admin"),
+            "manageable": _manageable(access)}
+
+
+def _member_admin(access: Access, db: Session) -> tuple[members.KeycloakAdmin, models.Tenant]:
+    """Verwalter im Web-Frontend + Keycloak konfiguriert; Mandantenzeile sperren (Änderungen je Mandant
+    nacheinander → „letzter Verwalter“ sicher geprüft, Journal sequenziell)."""
+    _require_admin_web(access)
+    _rate(access, "members-write", "RATE_MEMBERS", 30)
+    kc = members.admin_client()
+    if kc is None:
+        raise HTTPException(status.HTTP_501_NOT_IMPLEMENTED, members.NOT_CONFIGURED)
+    return kc, _locked_tenant(db, access)
+
+
+def _member_change(db: Session, tenant: models.Tenant, fn):
+    """Keycloak ändern, dann Journal (Revision „membership“) committen; Fehler → nichts im Journal."""
+    try:
+        out = fn(tenant)
+    except (UpstreamError, members.KeycloakDenied) as e:
+        db.rollback()
+        raise members.upstream_error(e) from e
+    except HTTPException:
+        db.rollback()
+        raise
+    maybe_anchor(db, tenant)
+    db.commit()
+    return out
+
+
+@app.post("/api/t/{tenant}/members", response_model=schemas.Member, status_code=status.HTTP_201_CREATED)
+def add_member(req: schemas.MemberCreate, access: TenantAccess, db: DB):
+    """Benutzer (Benutzername oder E-Mail, muss in Keycloak existieren) mit genau einer Rolle aufnehmen."""
+    kc, tenant = _member_admin(access, db)
+    return _member_change(db, tenant, lambda t: members.add_member(db, t, access.user, kc, req.user, req.role,
+                                                                   is_admin=True))
+
+
+@app.patch("/api/t/{tenant}/members/{member_id}", response_model=schemas.Member)
+def patch_member(member_id: str, req: schemas.MemberUpdate, access: TenantAccess, db: DB):
+    kc, tenant = _member_admin(access, db)
+    return _member_change(db, tenant, lambda t: members.change_role(db, t, access.user, kc, member_id, req.role,
+                                                                    is_admin=True))
+
+
+@app.delete("/api/t/{tenant}/members/{member_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_member(member_id: str, access: TenantAccess, db: DB):
+    kc, tenant = _member_admin(access, db)
+    _member_change(db, tenant, lambda t: members.remove_member(db, t, access.user, kc, member_id))
+    return Response(status_code=status.HTTP_204_NO_CONTENT)

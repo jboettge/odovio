@@ -3,12 +3,16 @@
 Env:
   OIDC_ISSUER         https://id.j-mb.net/realms/<realm>   (Pflicht)
   OIDC_CLIENT_ID      Client der iOS-App (public, PKCE)    (Pflicht, wird der App via /auth/config mitgeteilt)
+  OIDC_WEB_CLIENT_ID  Client des Web-Frontends (public, PKCE), Default fahrzeugbuch-web – immer als azp
+                      zugelassen; nur dort: Mitgliederverwaltung und Steuerparameter
   OIDC_AUDIENCE       erwartete aud; leer → stattdessen azp == OIDC_CLIENT_ID
   OIDC_REQUIRED_ROLE  optional: Realm- oder Client-Rolle, die der Benutzer haben muss
 
 Mandanten (aus dem `groups`-Claim, Keycloak-Gruppen mit vollem Pfad):
-  TENANT_GROUP_PREFIX /fahrzeugbuch/  →  /fahrzeugbuch/<mandant>        = lesen + schreiben
-                                         /fahrzeugbuch/<mandant>/lesen  = nur lesen
+  TENANT_GROUP_PREFIX /fahrzeugbuch/  →  /fahrzeugbuch/<mandant>        = lesen + schreiben ("write")
+                                         /fahrzeugbuch/<mandant>/lesen  = nur lesen ("read")
+                                         /fahrzeugbuch/<mandant>/admin  = Verwalter ("admin", inkl. schreiben)
+  Rangfolge admin > write > read (mehrere Gruppen → höchste Rolle).
   DEFAULT_TENANT      optional: Mandant, auf den jeder berechtigte Benutzer schreibend zugreift
 """
 import json
@@ -37,6 +41,11 @@ class OIDCConfig:
     audience: str | None
     required_role: str | None
     allowed_azp: frozenset = frozenset()
+    web_client_id: str = "fahrzeugbuch-web"
+
+
+def web_client_id() -> str:
+    return (os.environ.get("OIDC_WEB_CLIENT_ID") or "").strip() or "fahrzeugbuch-web"
 
 
 def get_config() -> OIDCConfig:
@@ -44,13 +53,15 @@ def get_config() -> OIDCConfig:
     client_id = os.environ.get("OIDC_CLIENT_ID", "")
     if not issuer or not client_id:
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "OIDC_ISSUER/OIDC_CLIENT_ID nicht gesetzt")
+    web = web_client_id()
     return OIDCConfig(
         issuer=issuer,
         client_id=client_id,
         audience=os.environ.get("OIDC_AUDIENCE") or None,
         required_role=os.environ.get("OIDC_REQUIRED_ROLE") or None,
-        allowed_azp=frozenset([client_id, *filter(None, (x.strip() for x in
-                                                         os.environ.get("OIDC_ALLOWED_AZP", "").split(",")))]),
+        allowed_azp=frozenset([client_id, web, *filter(None, (x.strip() for x in
+                                                              os.environ.get("OIDC_ALLOWED_AZP", "").split(",")))]),
+        web_client_id=web,
     )
 
 
@@ -115,10 +126,11 @@ def jwks(issuer: str) -> JWKSCache:
     return JWKSCache(issuer)
 
 
-def _roles(claims: dict, client_id: str) -> set[str]:
-    """Nur Realm-Rollen, Rollen des eigenen Clients und Gruppen (keine fremden Client-Rollen)."""
+def _roles(claims: dict, *client_ids: str) -> set[str]:
+    """Nur Realm-Rollen, Rollen der eigenen Clients (iOS, Web) und Gruppen (keine fremden Client-Rollen)."""
     roles = set(claims.get("realm_access", {}).get("roles", []))
-    roles.update((claims.get("resource_access", {}).get(client_id) or {}).get("roles", []))
+    for client_id in client_ids:
+        roles.update((claims.get("resource_access", {}).get(client_id) or {}).get("roles", []))
     roles.update(g for g in claims.get("groups", []) or [] if isinstance(g, str))
     return roles
 
@@ -126,15 +138,41 @@ def _roles(claims: dict, client_id: str) -> set[str]:
 TENANT_SLUG = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 
 
+ROLE_RANK = {"read": 1, "write": 2, "admin": 3}
+READ_SUFFIXES = ("lesen", "read")
+ADMIN_SUFFIX = "admin"
+
+
+def can_write(role: str | None) -> bool:
+    """Schreibrecht: write und admin (admin impliziert write)."""
+    return role in ("write", "admin")
+
+
+def higher_role(a: str | None, b: str | None) -> str | None:
+    return max((r for r in (a, b) if r in ROLE_RANK), key=ROLE_RANK.__getitem__, default=None)
+
+
 @dataclass(frozen=True)
 class User:
     sub: str
     name: str | None
-    tenants: dict = field(default_factory=dict)  # slug -> "write" | "read"
+    tenants: dict = field(default_factory=dict)  # slug -> "admin" | "write" | "read"
+    display_name: str | None = None              # Claim name, sonst preferred_username
+    azp: str | None = None                       # Client, für den das Token ausgestellt wurde
+    web: bool = False                            # azp == OIDC_WEB_CLIENT_ID (Web-Frontend)
+
+    @property
+    def label(self) -> str | None:
+        """Kurzname für created_by/updated_by/driver_name (≤ 100 Zeichen)."""
+        return (self.name or None) and self.name[:100]
+
+
+def group_prefix() -> str:
+    return "/" + os.environ.get("TENANT_GROUP_PREFIX", "/fahrzeugbuch/").strip("/") + "/"
 
 
 def tenants_from_claims(claims: dict) -> dict[str, str]:
-    prefix = "/" + os.environ.get("TENANT_GROUP_PREFIX", "/fahrzeugbuch/").strip("/") + "/"
+    prefix = group_prefix()
     result: dict[str, str] = {}
     for group in claims.get("groups") or []:
         if not isinstance(group, str) or not group.startswith(prefix):
@@ -143,13 +181,18 @@ def tenants_from_claims(claims: dict) -> dict[str, str]:
         slug = parts[0].lower()
         if not TENANT_SLUG.match(slug):
             continue
+        role = None
         if len(parts) == 1:
-            result[slug] = "write"
-        elif len(parts) == 2 and parts[1].lower() in ("lesen", "read"):
-            result.setdefault(slug, "read")
+            role = "write"
+        elif len(parts) == 2 and parts[1].lower() in READ_SUFFIXES:
+            role = "read"
+        elif len(parts) == 2 and parts[1].lower() == ADMIN_SUFFIX:
+            role = "admin"
+        if role:
+            result[slug] = higher_role(result.get(slug), role)
     default = (os.environ.get("DEFAULT_TENANT") or "").lower()
     if default and TENANT_SLUG.match(default):
-        result[default] = "write"
+        result[default] = higher_role(result.get(default), "write")
     return result
 
 
@@ -181,12 +224,20 @@ def verify_token(token: str, cfg: OIDCConfig) -> User:
         raise _unauthorized()
     if claims.get("azp") not in cfg.allowed_azp:
         raise _unauthorized("Token wurde für einen anderen Client ausgestellt")
-    if cfg.required_role and cfg.required_role not in _roles(claims, cfg.client_id):
+    if cfg.required_role and cfg.required_role not in _roles(claims, cfg.client_id, cfg.web_client_id):
         raise HTTPException(status.HTTP_403_FORBIDDEN, f"Rolle {cfg.required_role} fehlt")
+
+    def text(key: str) -> str | None:
+        v = claims.get(key)
+        return (v.strip() or None) if isinstance(v, str) else None
+
     return User(
         sub=claims["sub"],
-        name=claims.get("preferred_username") or claims.get("name"),
+        name=text("preferred_username") or text("name"),
         tenants=tenants_from_claims(claims),
+        display_name=text("name") or text("preferred_username"),
+        azp=claims.get("azp"),
+        web=claims.get("azp") == cfg.web_client_id,
     )
 
 

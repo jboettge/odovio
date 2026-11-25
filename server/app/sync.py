@@ -12,7 +12,10 @@
 - Nur Integritäts-/Datenfehler verwerfen eine einzelne Op; andere DB-Fehler (Verbindung, Serialisierung)
   brechen den ganzen Sync ab (→ 503, der Client wiederholt später).
 - Entitätsspezifische Regeln (z. B. Monatsabschluss bei Fahrten) als Hook je Entität (`HOOKS`);
-  serverseitig geschriebene Entitäten (`SERVER_ONLY`) werden per Sync nur geliefert, nie angenommen.
+  serverseitig geschriebene Entitäten (`SERVER_ONLY`) werden per Sync nur geliefert, nie angenommen;
+  `WEB_ONLY`-Entitäten (Steuerparameter) nimmt der Server nur vom Web-Frontend an (azp = OIDC_WEB_CLIENT_ID).
+- `created_by`/`updated_by` (Anzeigename aus dem Token) setzt der Server; Client-Werte werden ignoriert.
+  Beide stehen nicht im Revisions-Snapshot (Urheber: revisions.actor_name), werden aber in /changes geliefert.
 """
 import datetime as dt
 import logging
@@ -69,6 +72,10 @@ ENTITIES: dict[str, tuple[type, type[BaseModel], tuple[Ref, ...]]] = {
                     ("vehicle_id", models.Vehicle, False))),
 }
 SERVER_ONLY = {"trip_period"}
+WEB_ONLY = {"tax_param": "Steuerparameter nur im Webfrontend bearbeitbar"}
+# Nur im Journal (keine Fachtabelle, nicht synchronisiert): Mitgliederänderungen
+JOURNAL_ONLY = {"membership"}
+AUTHOR_FIELDS = ("created_by", "updated_by")
 log = logging.getLogger("fahrzeugbuch.sync")
 
 CHANGE_KEYS = {
@@ -102,7 +109,15 @@ def snapshot(obj, schema: type[BaseModel]) -> dict:
 
 
 def entity_out(obj, schema: type[BaseModel]) -> dict:
-    return {"id": obj.id, "version": obj.version, **snapshot(obj, schema)}
+    return {"id": obj.id, "version": obj.version, **snapshot(obj, schema),
+            **{k: getattr(obj, k, None) for k in AUTHOR_FIELDS}}
+
+
+def stamp_author(obj, user: User, created: bool) -> None:
+    """created_by/updated_by aus dem Token (nie vom Client)."""
+    if created:
+        obj.created_by = user.label
+    obj.updated_by = user.label
 
 
 # ---------- entitätsspezifische Regeln ----------
@@ -197,7 +212,7 @@ def _trip_rules(ctx: OpContext, obj, data):
         for f in ("start_label", "end_label"):
             if len(getattr(data, f) or "") > PRIVATE_LABEL_MAX:
                 raise Rejected(f"Privatmodus: {f} max. {PRIVATE_LABEL_MAX} Zeichen (nur Gemeinde)")
-    name = (ctx.user.name or None) and ctx.user.name[:100]
+    name = ctx.user.label
     data = data.model_copy(update={
         "driver_sub": obj.driver_sub if obj is not None else ctx.user.sub,
         "driver_name": obj.driver_name if obj is not None else name,
@@ -271,6 +286,8 @@ def _apply(db: Session, tenant: models.Tenant, user: User, op: schemas.SyncOp) -
     base = {"op_id": op.op_id, "entity": op.entity, "id": op.id}
     if op.entity in SERVER_ONLY:
         raise Rejected(f"{op.entity} wird nur vom Server geschrieben")
+    if op.entity in WEB_ONLY and not user.web:
+        raise Rejected(WEB_ONLY[op.entity])
     hook = HOOKS.get(op.entity)
     ctx = OpContext(db, tenant, user, op)
 
@@ -322,6 +339,7 @@ def _apply(db: Session, tenant: models.Tenant, user: User, op: schemas.SyncOp) -
         for k, v in data.model_dump().items():
             setattr(obj, k, v)
 
+    stamp_author(obj, user, created=action == "create")
     obj.version += 1
     rev = append_revision(
         db, tenant,
@@ -390,6 +408,7 @@ def record(db: Session, tenant: models.Tenant, user: User, entity: str, obj, act
     """Serverseitige Änderung (z. B. Monatsabschluss) wie eine Sync-Op ins Journal schreiben.
     Aufrufer hält die Sperre auf der Mandantenzeile."""
     _, schema, _ = ENTITIES[entity]
+    stamp_author(obj, user, created=not obj.version)
     obj.version = (obj.version or 0) + 1
     rev = append_revision(db, tenant, entity=entity, entity_id=obj.id, version=obj.version, action=action,
                           data=snapshot(obj, schema), user=user)

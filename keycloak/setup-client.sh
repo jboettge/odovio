@@ -1,5 +1,6 @@
 #!/bin/bash
-# Richtet den Keycloak-Client für das Fahrzeugbuch ein – nur client-bezogen, idempotent.
+# Richtet die Keycloak-Clients für das Fahrzeugbuch ein (iOS-App, Web-Frontend, optional Admin-API) –
+# nur client-/gruppenbezogen, idempotent. Reines Bash (das Keycloak-Image hat weder awk noch jq).
 #
 # Direkt (kcadm.sh installiert):
 #   KC_URL=https://id.j-mb.net REALM=<realm> KC_ADMIN=admin ./setup-client.sh
@@ -10,10 +11,26 @@
 # Optional: KC_ADMIN_REALM (master), CLIENT (fahrzeugbuch-ios),
 #           REDIRECT (net.jmb.fahrzeugbuch:/oauth2redirect), ROLE (fahrzeugbuch-user),
 #           ASSIGN_USERS ("jakob anna" → erhalten die Rolle), KCADM
-# Mandanten (Gruppen /fahrzeugbuch/<mandant> = schreiben, /fahrzeugbuch/<mandant>/lesen = lesen):
-#           TENANTS ("privat b-re.ch")       → Gruppen anlegen
+# Web-Frontend (öffentlicher Client, PKCE S256, KEIN offline_access; nur dort: Mitgliederverwaltung und
+# Steuerparameter – der Server prüft azp = OIDC_WEB_CLIENT_ID):
+#           WEB_URL ("https://fahrzeugbuch.j-mb.net"; leer → Web-Client wird nicht angelegt/geändert),
+#           WEB_CLIENT (fahrzeugbuch-web)
+# Mandanten (Gruppen /fahrzeugbuch/<mandant> = schreiben, …/<mandant>/lesen = lesen,
+#           …/<mandant>/admin = verwalten inkl. schreiben):
+#           TENANTS ("privat b-re.ch")       → Gruppen anlegen (Mandant + lesen + admin)
 #           MEMBERS ("privat=jakob,anna b-re.ch=jakob") → Schreibzugriff
 #           READERS ("b-re.ch=treuhand")      → Lesezugriff
+#           ADMINS  ("privat=jakob")          → Verwalter
+#           Ein Benutzer sollte je Mandant in genau EINER der drei Gruppen sein (die App verwaltet das so);
+#           das Skript entfernt keine Zuordnungen.
+# Mitgliederverwaltung über die Admin-REST-API (optional):
+#           CREATE_ADMIN_API=1 → vertraulicher Client ADMIN_API_CLIENT (fahrzeugbuch-admin-api) mit Service-
+#           Account und den realm-management-Rollen view-users, query-users, query-groups, manage-users;
+#           das Secret wird am Ende ausgegeben (→ KC_ADMIN_CLIENT_ID/KC_ADMIN_CLIENT_SECRET der API).
+#           Hinweis: manage-users erlaubt dem Service-Account, ALLE Benutzer/Gruppen des Realms zu ändern.
+#           Restriktiver: Keycloak 26 Fine-Grained Admin Permissions (FGAP v2, Realm-Einstellung „Admin
+#           Permissions“) – statt manage-users nur Berechtigungen „manage-membership“/„view-members“ auf die
+#           Gruppe /fahrzeugbuch (inkl. Untergruppen) und „view“ auf Benutzer für den Service-Account vergeben.
 set -euo pipefail
 
 : "${KC_URL:?KC_URL setzen (z. B. https://id.j-mb.net)}"
@@ -27,6 +44,12 @@ ASSIGN_USERS=${ASSIGN_USERS:-}
 TENANTS=${TENANTS:-}
 MEMBERS=${MEMBERS:-}
 READERS=${READERS:-}
+ADMINS=${ADMINS:-}
+WEB_URL=${WEB_URL:-}
+WEB_URL=${WEB_URL%/}
+WEB_CLIENT=${WEB_CLIENT:-fahrzeugbuch-web}
+CREATE_ADMIN_API=${CREATE_ADMIN_API:-0}
+ADMIN_API_CLIENT=${ADMIN_API_CLIENT:-fahrzeugbuch-admin-api}
 GROUP_ROOT=fahrzeugbuch
 if [[ -z "${KCADM:-}" ]]; then
   KCADM=$(command -v kcadm.sh || echo /opt/keycloak/bin/kcadm.sh)
@@ -40,39 +63,58 @@ if [[ -n "${KC_ADMIN_PASSWORD:-}" ]]; then export KC_CLI_PASSWORD=$KC_ADMIN_PASS
 kc config credentials --server "$KC_URL" --realm "$KC_ADMIN_REALM" --user "$KC_ADMIN"
 kc get "realms/$REALM" --fields realm >/dev/null || { echo "Realm $REALM nicht gefunden" >&2; exit 1; }
 
-# --- Client (public, Authorization Code + PKCE S256) -------------------------
-ATTRS=(
-  -s clientId="$CLIENT"
-  -s name="Fahrzeugbuch iOS"
-  -s protocol=openid-connect
-  -s publicClient=true
-  -s standardFlowEnabled=true
-  -s directAccessGrantsEnabled=false
-  -s implicitFlowEnabled=false
-  -s serviceAccountsEnabled=false
-  -s frontchannelLogout=false
-  -s "redirectUris=[\"$REDIRECT\"]"
-  -s 'webOrigins=[]'
-  -s 'attributes."pkce.code.challenge.method"=S256'
-  -s "attributes.\"post.logout.redirect.uris\"=$REDIRECT"
-)
-client_id() { kc get clients -r "$REALM" -q clientId="$CLIENT" --fields id --format csv --noquotes | head -1; }
-ID=$(client_id)
-if [[ -z "$ID" ]]; then
-  kc create clients -r "$REALM" "${ATTRS[@]}" >/dev/null
-  ID=$(client_id)
-  echo "Client $CLIENT angelegt"
-else
-  kc update "clients/$ID" -r "$REALM" "${ATTRS[@]}"
-  echo "Client $CLIENT aktualisiert"
-fi
+# --- Hilfsfunktionen ------------------------------------------------------------
+client_uuid() { kc get clients -r "$REALM" -q clientId="$1" --fields id --format csv --noquotes | head -1; }
+upsert_client() {  # $1 = clientId, Rest = kcadm-Attribute; setzt CID
+  local name=$1; shift
+  CID=$(client_uuid "$name")
+  if [[ -z "$CID" ]]; then
+    kc create clients -r "$REALM" "$@" >/dev/null
+    CID=$(client_uuid "$name")
+    echo "Client $name angelegt"
+  else
+    kc update "clients/$CID" -r "$REALM" "$@"
+    echo "Client $name aktualisiert"
+  fi
+}
+scope_id() {  # $1 = Name des Client-Scopes
+  local sid sname
+  while IFS=, read -r sid sname; do
+    [[ "$sname" == "$1" ]] && { echo "$sid"; return; }
+  done < <(kc get client-scopes -r "$REALM" --fields id,name --format csv --noquotes)
+  return 0
+}
+ensure_groups_mapper() {  # $1 = Client-UUID: Gruppen-Claim mit vollen Pfaden → Mandanten
+  local mname
+  while IFS=, read -r mname; do [[ "$mname" == "groups" ]] && return; done \
+    < <(kc get "clients/$1/protocol-mappers/models" -r "$REALM" --fields name --format csv --noquotes)
+  kc create "clients/$1/protocol-mappers/models" -r "$REALM" \
+    -s name=groups -s protocol=openid-connect -s protocolMapper=oidc-group-membership-mapper \
+    -s 'config."full.path"=true' -s 'config."claim.name"=groups' \
+    -s 'config."access.token.claim"=true' -s 'config."id.token.claim"=false' \
+    -s 'config."userinfo.token.claim"=false' >/dev/null
+  echo "Mapper groups angelegt"
+}
 
-# --- offline_access (Refresh-Token übersteht SSO-Session-Timeout) ------------
-# Reines Bash (Keycloak-Image hat weder awk noch jq)
-SCOPE_ID=""
-while IFS=, read -r sid sname; do
-  [[ "$sname" == "offline_access" ]] && SCOPE_ID=$sid
-done < <(kc get client-scopes -r "$REALM" --fields id,name --format csv --noquotes)
+# --- iOS-Client (public, Authorization Code + PKCE S256) ----------------------
+upsert_client "$CLIENT" \
+  -s clientId="$CLIENT" \
+  -s name="Fahrzeugbuch iOS" \
+  -s protocol=openid-connect \
+  -s publicClient=true \
+  -s standardFlowEnabled=true \
+  -s directAccessGrantsEnabled=false \
+  -s implicitFlowEnabled=false \
+  -s serviceAccountsEnabled=false \
+  -s frontchannelLogout=false \
+  -s "redirectUris=[\"$REDIRECT\"]" \
+  -s 'webOrigins=[]' \
+  -s 'attributes."pkce.code.challenge.method"=S256' \
+  -s "attributes.\"post.logout.redirect.uris\"=$REDIRECT"
+ID=$CID
+
+# --- offline_access (Refresh-Token übersteht SSO-Session-Timeout) – nur iOS ----
+SCOPE_ID=$(scope_id offline_access)
 if [[ -n "$SCOPE_ID" ]]; then
   kc update "clients/$ID/optional-client-scopes/$SCOPE_ID" -r "$REALM"
 else
@@ -80,6 +122,7 @@ else
 fi
 
 # --- Client-Rolle -------------------------------------------------------------
+# (Web-Tokens enthalten sie ebenfalls: fullScopeAllowed ist Standard → resource_access.<ios-client>.roles)
 if ! kc get "clients/$ID/roles/$ROLE" -r "$REALM" >/dev/null 2>&1; then
   kc create "clients/$ID/roles" -r "$REALM" -s name="$ROLE" -s description="Zugriff auf das Fahrzeugbuch"
   echo "Rolle $ROLE angelegt"
@@ -87,18 +130,57 @@ fi
 for u in $ASSIGN_USERS; do
   kc add-roles -r "$REALM" --uusername "$u" --cclientid "$CLIENT" --rolename "$ROLE" && echo "Rolle → $u"
 done
+ensure_groups_mapper "$ID"
 
-# --- Gruppen-Claim (volle Pfade) → Mandanten ----------------------------------
-mapper_exists=0
-while IFS=, read -r mname; do [[ "$mname" == "groups" ]] && mapper_exists=1; done \
-  < <(kc get "clients/$ID/protocol-mappers/models" -r "$REALM" --fields name --format csv --noquotes)
-if [[ $mapper_exists == 0 ]]; then
-  kc create "clients/$ID/protocol-mappers/models" -r "$REALM" \
-    -s name=groups -s protocol=openid-connect -s protocolMapper=oidc-group-membership-mapper \
-    -s 'config."full.path"=true' -s 'config."claim.name"=groups' \
-    -s 'config."access.token.claim"=true' -s 'config."id.token.claim"=false' \
-    -s 'config."userinfo.token.claim"=false' >/dev/null
-  echo "Mapper groups angelegt"
+# --- Web-Frontend (public, PKCE S256, ohne offline_access) --------------------
+if [[ -n "$WEB_URL" ]]; then
+  upsert_client "$WEB_CLIENT" \
+    -s clientId="$WEB_CLIENT" \
+    -s name="Fahrzeugbuch Web" \
+    -s protocol=openid-connect \
+    -s publicClient=true \
+    -s standardFlowEnabled=true \
+    -s directAccessGrantsEnabled=false \
+    -s implicitFlowEnabled=false \
+    -s serviceAccountsEnabled=false \
+    -s frontchannelLogout=false \
+    -s "rootUrl=$WEB_URL" \
+    -s "redirectUris=[\"$WEB_URL/auth/callback\"]" \
+    -s "webOrigins=[\"$WEB_URL\"]" \
+    -s 'attributes."pkce.code.challenge.method"=S256' \
+    -s "attributes.\"post.logout.redirect.uris\"=$WEB_URL/"
+  WEB_ID=$CID
+  if [[ -n "$SCOPE_ID" ]]; then   # Browser: keine langlebigen Offline-Tokens
+    kc delete "clients/$WEB_ID/optional-client-scopes/$SCOPE_ID" -r "$REALM" >/dev/null 2>&1 || true
+    kc delete "clients/$WEB_ID/default-client-scopes/$SCOPE_ID" -r "$REALM" >/dev/null 2>&1 || true
+  fi
+  ensure_groups_mapper "$WEB_ID"
+else
+  warn "WEB_URL leer – Web-Client $WEB_CLIENT nicht angelegt (Verwaltung/Steuerparameter nur im Web-Frontend)"
+fi
+
+# --- Admin-API für die Mitgliederverwaltung (optional) ------------------------
+ADMIN_API_SECRET=""
+if [[ "$CREATE_ADMIN_API" == "1" ]]; then
+  upsert_client "$ADMIN_API_CLIENT" \
+    -s clientId="$ADMIN_API_CLIENT" \
+    -s name="Fahrzeugbuch Admin-API (Service-Account)" \
+    -s protocol=openid-connect \
+    -s publicClient=false \
+    -s clientAuthenticatorType=client-secret \
+    -s standardFlowEnabled=false \
+    -s directAccessGrantsEnabled=false \
+    -s implicitFlowEnabled=false \
+    -s serviceAccountsEnabled=true
+  API_ID=$CID
+  SA_USER=$(kc get "clients/$API_ID/service-account-user" -r "$REALM" --fields username --format csv --noquotes \
+    | head -1)
+  # minimale realm-management-Rollen (siehe Kopf: FGAP v2 als restriktivere Alternative)
+  kc add-roles -r "$REALM" --uusername "$SA_USER" --cclientid realm-management \
+    --rolename view-users --rolename query-users --rolename query-groups --rolename manage-users
+  echo "Service-Account $SA_USER: view-users, query-users, query-groups, manage-users"
+  ADMIN_API_SECRET=$(kc get "clients/$API_ID/client-secret" -r "$REALM" --fields value --format csv --noquotes \
+    | head -1)
 fi
 
 group_id() { kc get "group-by-path/$1" -r "$REALM" --fields id --format csv --noquotes 2>/dev/null | head -1 || true; }
@@ -130,6 +212,7 @@ join() {  # $1 = Gruppenpfad, $2 = Benutzer
 for t in $TENANTS; do
   ensure_group "$GROUP_ROOT/$t" >/dev/null
   ensure_group "$GROUP_ROOT/$t/lesen" >/dev/null
+  ensure_group "$GROUP_ROOT/$t/admin" >/dev/null
 done
 for pair in $MEMBERS; do
   t=${pair%%=*}
@@ -141,6 +224,11 @@ for pair in $READERS; do
   IFS=, read -ra users <<< "${pair#*=}"
   for u in "${users[@]}"; do join "$GROUP_ROOT/$t/lesen" "$u"; done
 done
+for pair in $ADMINS; do
+  t=${pair%%=*}
+  IFS=, read -ra users <<< "${pair#*=}"
+  for u in "${users[@]}"; do join "$GROUP_ROOT/$t/admin" "$u"; done
+done
 
 ISSUER="${KC_PUBLIC_URL:-$KC_URL}/realms/$REALM"
 cat <<INFO
@@ -148,5 +236,15 @@ cat <<INFO
 Fertig. Portainer-Stack-Variablen:
   OIDC_ISSUER=$ISSUER
   OIDC_CLIENT_ID=$CLIENT
+  OIDC_WEB_CLIENT_ID=$WEB_CLIENT
   OIDC_REQUIRED_ROLE=$ROLE
 INFO
+if [[ -n "$ADMIN_API_SECRET" ]]; then
+  cat <<INFO
+  KC_ADMIN_URL=${KC_PUBLIC_URL:-$KC_URL}
+  KC_ADMIN_REALM=$REALM
+  KC_ADMIN_CLIENT_ID=$ADMIN_API_CLIENT
+  KC_ADMIN_CLIENT_SECRET=$ADMIN_API_SECRET
+(Secret vertraulich behandeln – nur als Stack-Variable, nicht ins Repository)
+INFO
+fi

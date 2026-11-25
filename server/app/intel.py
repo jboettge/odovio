@@ -31,7 +31,7 @@ from fastapi.routing import APIRoute
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from . import classify, geo, vision
-from .auth import TENANT_SLUG, User, require_user
+from .auth import TENANT_SLUG, User, can_write, require_user
 from .classify import PrivateTrip, SuggestRequest
 from .geo import GeoNoResult, GeoUnavailable, InvalidTrack, UpstreamBusy, UpstreamError
 
@@ -117,7 +117,7 @@ def write_access(tenant: str, user: CurrentUser) -> User:
     role = user.tenants.get(slug) if TENANT_SLUG.match(slug) else None
     if role is None:
         raise HTTPException(status.HTTP_403_FORBIDDEN, f"Kein Zugriff auf Mandant {tenant}")
-    if role != "write":
+    if not can_write(role):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Nur Lesezugriff auf diesen Mandanten")
     return user
 

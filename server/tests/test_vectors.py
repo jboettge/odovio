@@ -14,7 +14,7 @@ import pytest
 from app.stats import consumption_points, summarize
 from app.trips import _sorted, km_gaps
 
-from .conftest import T, op, sync, uid
+from .conftest import T, op, sync, uid, web_headers
 
 VECTORS = Path(__file__).parent / "vectors"
 WRITE = os.environ.get("FZB_WRITE_VECTORS") == "1"
@@ -67,7 +67,7 @@ def test_year_report_vectors(client, monkeypatch, case_name):
     ops += [op("fuel", uid(), {"vehicle_id": vid, **f}) for f in case["fuel"]]
     ops += [op("maintenance", uid(), {"vehicle_id": vid, **m}) for m in case["maintenance"]]
     ops += [op("tax_param", uid(), p) for p in case["tax_params"]]
-    res = sync(client, *ops)
+    res = sync(client, *ops, headers=web_headers())
     assert all(r["status"] == "applied" for r in res["results"]), res
     rep = client.get(f"{T}/vehicles/{vid}/year-report?year={case['year']}").json()
     got = {k: rep[k] for k in ("trips_count", "unconfirmed", "months_used", "km", "shares_pct", "costs",

@@ -39,7 +39,8 @@ def test_create_update_storno_changes_history(client):
     assert [r["status"] for r in res["results"]] == ["applied", "applied"]
     ch = client.get(f"{T}/changes?since=0").json()
     arts = {a["id"]: a for a in ch["material_articles"]}
-    assert arts[a1] == {"id": a1, "version": 1, "deleted": False, **article()}
+    assert arts[a1] == {"id": a1, "version": 1, "deleted": False, **article(),
+                        "created_by": "jakob", "updated_by": "jakob"}
     assert arts[a2]["unit"] == "Stk" and arts[a2]["unit_price"] is None and arts[a2]["vehicle_id"] == vid
     assert arts[a2]["part_number"] is None and arts[a2]["category"] is None and arts[a2]["note"] is None
     cursor = ch["cursor"]

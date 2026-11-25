@@ -6,7 +6,7 @@ Env:
   OSRM_MAX_MATCHING_SIZE  max. Punkte je /match-Anfrage (osrm-routed --max-matching-size), Default 100
   PHOTON_URL     z. B. http://photon:2322 (leer → nicht konfiguriert)
   GEO_TIMEOUT_S  Timeout je HTTP-Anfrage in Sekunden, Default 5
-  UPSTREAM_CONCURRENCY       gleichzeitige Anfragen je Dienst (OSRM, Photon, LLM, Vision), Default 4;
+  UPSTREAM_CONCURRENCY       gleichzeitige Anfragen je Dienst (OSRM, Photon, LLM, Vision, Keycloak-Admin), Default 4;
                              ist ein Dienst ausgelastet → sofort 503 (keine wartenden Threads)
   UPSTREAM_BREAKER_FAILURES  Fehler in Folge, nach denen ein Dienst gesperrt wird, Default 3
   UPSTREAM_BREAKER_OPEN_S    Sperrdauer in Sekunden (sofort 503), Default 30
@@ -101,7 +101,7 @@ class Upstream:
             self.open_until = 0.0
 
 
-UPSTREAMS = {name: Upstream(name) for name in ("osrm", "photon", "llm", "vision")}
+UPSTREAMS = {name: Upstream(name) for name in ("osrm", "photon", "llm", "vision", "keycloak")}
 
 
 def reset_upstreams() -> None:

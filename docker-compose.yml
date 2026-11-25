@@ -54,10 +54,18 @@ services:
       AUTO_MIGRATE: "0"
       OIDC_ISSUER: ${OIDC_ISSUER:?OIDC_ISSUER fehlt}
       OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:-fahrzeugbuch-ios}
+      # Web-Frontend: immer als azp zugelassen; nur dort Mitgliederverwaltung und Steuerparameter
+      OIDC_WEB_CLIENT_ID: ${OIDC_WEB_CLIENT_ID:-fahrzeugbuch-web}
       OIDC_AUDIENCE: ${OIDC_AUDIENCE:-}
       OIDC_REQUIRED_ROLE: ${OIDC_REQUIRED_ROLE:-}
       TENANT_GROUP_PREFIX: ${TENANT_GROUP_PREFIX:-/fahrzeugbuch/}
       DEFAULT_TENANT: ${DEFAULT_TENANT:-}
+      # Mitgliederverwaltung über die Keycloak-Admin-API (optional; URL/Realm leer → aus OIDC_ISSUER)
+      KC_ADMIN_URL: ${KC_ADMIN_URL:-}
+      KC_ADMIN_REALM: ${KC_ADMIN_REALM:-}
+      KC_ADMIN_CLIENT_ID: ${KC_ADMIN_CLIENT_ID:-}
+      KC_ADMIN_CLIENT_SECRET: ${KC_ADMIN_CLIENT_SECRET:-}
+      KC_ADMIN_TIMEOUT_S: ${KC_ADMIN_TIMEOUT_S:-5}
       ANCHOR_SIGNING_KEY: ${ANCHOR_SIGNING_KEY:-}
       # alte Public Keys nach Schlüsselwechsel (Base64, kommagetrennt) – alte Anker bleiben prüfbar
       ANCHOR_PUBLIC_KEYS: ${ANCHOR_PUBLIC_KEYS:-}
@@ -94,6 +102,8 @@ services:
       RATE_REPORTS: ${RATE_REPORTS:-20}
       RATE_VERIFY: ${RATE_VERIFY:-10}
       RATE_FULL_SYNC: ${RATE_FULL_SYNC:-10}
+      RATE_ACTIVITY: ${RATE_ACTIVITY:-60}
+      RATE_MEMBERS: ${RATE_MEMBERS:-30}
       N8N_WEBHOOK_URL: ${N8N_WEBHOOK_URL:-}
       N8N_WEBHOOK_SECRET: ${N8N_WEBHOOK_SECRET:-}
       TAX_CANTON: ${TAX_CANTON:-}

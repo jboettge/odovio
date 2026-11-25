@@ -10,7 +10,7 @@ from app.db import engine
 from app.integrity import _same
 from app.migrate import DML_TABLES, create_schema
 
-from .conftest import T, bearer_token, new_vehicle, op, sync, uid
+from .conftest import T, bearer_token, new_vehicle, op, sync, uid, web_headers
 
 FIRMA = bearer_token(groups=["/fahrzeugbuch/firma"], sub="user-2")
 
@@ -62,7 +62,7 @@ def test_crud_all_entities_and_changes(client):
                                         "time_from": "07:00", "time_to": "09:30", "vehicle_id": vid,
                                         "result_category": "business", "result_customer_id": cid}),
                op("tax_param", xid, {"year": 2026, "scope": "tenant", "key": "km_rate", "value": 0.8,
-                                     "source_url": "https://example.test/spesen"}))
+                                     "source_url": "https://example.test/spesen"}), headers=web_headers())
     assert statuses(res) == ["applied"] * 5, res
     ch = client.get(f"{T}/changes?since=0").json()
     for key in ("trips", "places", "customers", "purpose_rules", "tax_params", "trip_periods"):
@@ -215,7 +215,8 @@ def test_customer_rule_taxparam_validation(client):
                op("tax_param", uid(), {"year": 2026, "scope": "tenant", "key": "zins", "value": 1}),
                op("tax_param", uid(), {"year": 1999, "scope": "tenant", "key": "km_rate", "value": 1}),
                op("tax_param", uid(), {"year": 2026, "scope": "tenant", "key": "km_rate", "value": -1}),
-               op("tax_param", uid(), {"year": 2026, "scope": "canton:ZH", "key": "cap_canton", "value": 6000}))
+               op("tax_param", uid(), {"year": 2026, "scope": "canton:ZH", "key": "cap_canton", "value": 6000}),
+               headers=web_headers())
     assert statuses(res) == (["rejected"] * 3 + ["applied"] + ["rejected"] * 7 + ["applied"]
                              + ["rejected"] * 5 + ["applied"]), list(zip(statuses(res), errors(res), strict=True))
     rule = client.get(f"{T}/changes").json()["purpose_rules"][0]

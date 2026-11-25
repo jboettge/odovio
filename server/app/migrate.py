@@ -8,7 +8,8 @@ PostgreSQL:
 Die App-Rolle ist weder Owner noch Superuser → kann Trigger nicht deaktivieren,
 Revisionen nicht ändern/löschen und keine Datensätze physisch löschen.
 
-Schema-Versionen: Alembic (server/alembic, Baseline-Revision 0001 = Schema inkl. Indizes).
+Schema-Versionen: Alembic (server/alembic, Baseline-Revision 0001 = Schema inkl. Indizes;
+  0002 = created_by/updated_by aller synchronisierten Tabellen, idempotent).
   neue DB                      → alembic upgrade head
   Bestand ohne alembic_version → fehlende Spalten/Tabellen/Indizes nachrüsten, auf Baseline stempeln,
                                  dann upgrade head

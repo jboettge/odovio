@@ -33,7 +33,7 @@ from . import models
 from .attachments import persist_blob_checks, verify_blobs
 from .audit import canonical, verify_chain
 from .db import snapshot_session
-from .sync import ENTITIES, REVISION_META, snapshot
+from .sync import ENTITIES, JOURNAL_ONLY, REVISION_META, snapshot
 
 log = logging.getLogger("fahrzeugbuch.integrity")
 MAX_LISTED = 20
@@ -203,7 +203,9 @@ def verify_state(db: Session, tenant: models.Tenant) -> list[str]:
                                                          json.loads(canonical(snapshot(row, schema))), defaults):
                 problems.append(f"{entity} {row.id}: weicht von Revision {rev.seq} ab")
         problems += [f"{entity} {i}: Revision ohne Datensatz" for i in latest]
-    # Revisionen unbekannter Objekttypen
+    # Revisionen unbekannter Objekttypen (reine Journal-Einträge wie Mitgliederänderungen sind bekannt;
+    # sie sind über die Hash-Kette geschützt, haben aber keinen Datensatz zum Abgleich)
+    seen_entities |= JOURNAL_ONLY
     others = db.scalars(select(models.Revision.entity).distinct().where(
         models.Revision.tenant_id == tenant.id, models.Revision.entity.not_in(seen_entities)))
     problems += [f"{e}: unbekannter Objekttyp im Journal" for e in others]

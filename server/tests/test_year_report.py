@@ -3,7 +3,7 @@ import pytest
 
 from app import tax
 
-from .conftest import T, op, sync, uid
+from .conftest import T, op, sync, uid, web_headers
 from .test_trips import pdf_text, statuses, trip
 
 
@@ -47,9 +47,10 @@ def test_business_vehicle_with_own_params(client, monkeypatch):
                param("cap_canton", 50, scope="canton:ZH"),
                param("cap_canton", 10, scope="canton:BE"),                    # anderer Kanton: ignoriert
                param("min_private_month", 999, year=2025),                    # anderes Jahr: ignoriert
-               op("tax_param", deleted, {"year": 2026, "scope": "tenant", "key": "cap_federal", "value": 1}))
+               op("tax_param", deleted, {"year": 2026, "scope": "tenant", "key": "cap_federal", "value": 1}),
+               headers=web_headers())
     assert all(s == "applied" for s in statuses(res))
-    sync(client, op("tax_param", deleted, action="delete"))                   # storniert: ignoriert
+    sync(client, op("tax_param", deleted, action="delete"), headers=web_headers())   # storniert: ignoriert
 
     r = client.get(f"{T}/vehicles/{vid}/year-report?year=2026").json()
     assert r["year"] == 2026 and r["canton"] == "ZH" and r["trips_count"] == 3 and r["unconfirmed"] == 0
@@ -88,7 +89,8 @@ def test_private_vehicle_km_compensation_and_priorities(client, monkeypatch):
     monkeypatch.setenv("TAX_CANTON", "ZH")
     vid = seed_year(client)                                           # ownership None → privat
     sync(client, param("km_rate", 0.8, scope="federal"), param("km_rate", 0.9),
-         param("commute_rate", 0.5, scope="canton:ZH"), param("commute_rate", 0.6, scope="federal"))
+         param("commute_rate", 0.5, scope="canton:ZH"), param("commute_rate", 0.6, scope="federal"),
+         headers=web_headers())
     r = client.get(f"{T}/vehicles/{vid}/year-report?year=2026").json()
     it = r["items"]
     assert it["km_compensation"]["value"] == 540.0                    # 600 × 0.9 (Mandant vor Bund)
@@ -99,7 +101,7 @@ def test_private_vehicle_km_compensation_and_priorities(client, monkeypatch):
     assert any("ownership" in w for w in r["warnings"])
     assert any("annual_fixed_costs" in w for w in r["warnings"])
     # Doppelter Mandanten-Parameter: neuster gilt
-    sync(client, param("km_rate", 1.0))
+    sync(client, param("km_rate", 1.0), headers=web_headers())
     assert client.get(f"{T}/vehicles/{vid}/year-report?year=2026").json()["items"]["km_compensation"]["value"] == 600
 
 

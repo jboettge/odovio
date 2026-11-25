@@ -33,6 +33,10 @@ class Synced:
     version: Mapped[int] = mapped_column(Integer, default=0)
     deleted: Mapped[bool] = mapped_column(Boolean, default=False)
     last_seq: Mapped[int] = mapped_column(Integer, default=0, index=True)
+    # Server setzt beide aus dem Token (Anzeigename, Client-Werte ignoriert); nicht Teil des Revisions-
+    # Snapshots (Hash-Kette/verify_state unverändert) – der Urheber steht ohnehin in revisions.actor_name.
+    created_by: Mapped[str | None] = mapped_column(String(100))
+    updated_by: Mapped[str | None] = mapped_column(String(100))
 
 
 class Vehicle(Synced, Base):

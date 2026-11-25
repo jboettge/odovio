@@ -8,7 +8,10 @@ os.environ["DATABASE_URL"] = os.environ.get("FZB_TEST_DATABASE_URL") or "sqlite:
 )
 ISSUER = "https://id.example.test/realms/test"
 CLIENT_ID = "fahrzeugbuch-ios"
+WEB_CLIENT_ID = "fahrzeugbuch-web"
 os.environ.update(OIDC_ISSUER=ISSUER, OIDC_CLIENT_ID=CLIENT_ID)
+for _k in ("OIDC_WEB_CLIENT_ID", "KC_ADMIN_URL", "KC_ADMIN_REALM", "KC_ADMIN_CLIENT_ID", "KC_ADMIN_CLIENT_SECRET"):
+    os.environ.pop(_k, None)
 os.environ.pop("OIDC_AUDIENCE", None)
 os.environ.pop("OIDC_REQUIRED_ROLE", None)
 os.environ.pop("DEFAULT_TENANT", None)
@@ -21,7 +24,7 @@ import pytest  # noqa: E402
 from cryptography.hazmat.primitives.asymmetric import rsa  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
-from app import attachments, auth, geo, integrity, intel  # noqa: E402
+from app import attachments, auth, geo, integrity, intel, members  # noqa: E402
 from app.db import Base, engine  # noqa: E402
 from app.main import app  # noqa: E402
 
@@ -59,7 +62,7 @@ def reset_db() -> None:
     with engine.begin() as conn:
         conn.exec_driver_sql("DROP TABLE IF EXISTS alembic_version")
     for reset in (intel.limiter.reset, geo.reset_upstreams, integrity.clear_verify_cache,
-                  attachments.clear_hash_cache):
+                  attachments.clear_hash_cache, members.reset_clients):
         reset()
 
 
@@ -88,8 +91,8 @@ def op(entity, id_, data=None, action="upsert", base=None, op_id=None, reason=No
     return out
 
 
-def sync(client, *ops, tenant="privat", expect=200):
-    r = client.post(f"/api/t/{tenant}/sync", json={"ops": list(ops)})
+def sync(client, *ops, tenant="privat", expect=200, headers=None):
+    r = client.post(f"/api/t/{tenant}/sync", json={"ops": list(ops)}, headers=headers)
     assert r.status_code == expect, r.text
     return r.json()
 
@@ -103,3 +106,8 @@ def new_vehicle(client, name="Golf", initial_km=10000):
 
 def bearer_token(**claims) -> dict:
     return {"Authorization": f"Bearer {make_token(**claims)}"}
+
+
+def web_headers(**claims) -> dict:
+    """Token des Web-Frontends (azp = OIDC_WEB_CLIENT_ID): Steuerparameter, Mitgliederverwaltung."""
+    return bearer_token(azp=WEB_CLIENT_ID, **claims)
