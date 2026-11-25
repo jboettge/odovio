@@ -62,6 +62,21 @@ services:
       MAX_BODY_BYTES: ${MAX_BODY_BYTES:-1048576}
       FORWARDED_ALLOW_IPS: ${FORWARDED_ALLOW_IPS:-127.0.0.1}
       DOCS_ENABLED: ${DOCS_ENABLED:-0}
+      # Intelligente Dienste (optional, leer = aus). OSRM/vLLM laufen beim Nutzer als eigene Container:
+      # erreichbar über das default-Netz per Host-IP bzw. host.docker.internal (siehe extra_hosts).
+      OSRM_URL: ${OSRM_URL:-}
+      OSRM_PROFILE: ${OSRM_PROFILE:-driving}
+      OSRM_MAX_MATCHING_SIZE: ${OSRM_MAX_MATCHING_SIZE:-100}
+      PHOTON_URL: ${PHOTON_URL:-}
+      VLLM_URL: ${VLLM_URL:-}
+      VLLM_MODEL: ${VLLM_MODEL:-qwen3.5-9b}
+      VLLM_API_KEY: ${VLLM_API_KEY:-}
+      GEO_TIMEOUT_S: ${GEO_TIMEOUT_S:-5}
+      LLM_TIMEOUT_S: ${LLM_TIMEOUT_S:-10}
+      INTEL_RATE_SUGGEST: ${INTEL_RATE_SUGGEST:-60}
+      INTEL_RATE_GEO: ${INTEL_RATE_GEO:-300}
+      N8N_WEBHOOK_URL: ${N8N_WEBHOOK_URL:-}
+      TAX_CANTON: ${TAX_CANTON:-}
       # CHECKLIST_FILE: /config/checklists.json
     # volumes:
     #   - ./checklists.json:/config/checklists.json:ro
@@ -73,10 +88,35 @@ services:
     depends_on:
       migrate:
         condition: service_completed_successfully
+    # Dienste auf dem Docker-Host (z. B. OSRM/vLLM mit veröffentlichtem Port): http://host.docker.internal:<port>
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     networks: [internal, default]
+
+  # OPTIONAL – Reverse-Geocoding (Photon, CH-Extrakt). Start nur mit Profil:
+  #   docker compose --profile geo up -d photon      →  PHOTON_URL=http://photon:2322
+  # Kein offizielles Image von komoot; Beispiel: rtuszik/photon-docker (lädt den Länderextrakt selbst).
+  # Variablennamen/Tag gemäss README des Images prüfen und Version pinnen.
+  # Nur internes Netz, keine Ports: für den Erst-Download/Updates braucht der Container Internet –
+  # dafür vorübergehend `default` bei networks ergänzen oder die Daten ins Volume kopieren.
+  photon:
+    image: rtuszik/photon-docker:latest
+    container_name: fahrzeugbuch-photon
+    profiles: ["geo"]
+    restart: unless-stopped
+    environment:
+      REGION: ch
+      UPDATE_STRATEGY: SEQUENTIAL
+      UPDATE_INTERVAL: 30d
+    volumes:
+      - fahrzeugbuch-photon:/photon/data
+    security_opt: [no-new-privileges:true]
+    mem_limit: 2g
+    networks: [internal]
 
 volumes:
   fahrzeugbuch-db:
+  fahrzeugbuch-photon:
 
 networks:
   internal:
