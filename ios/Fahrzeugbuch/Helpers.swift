@@ -16,7 +16,8 @@ enum Fmt {
         v.formatted(.number.precision(.fractionLength(digits)))
     }
     static func day(_ d: Date) -> String { d.formatted(date: .abbreviated, time: .omitted) }
-    static func edit(_ v: Double) -> String { num(v, 2) }
+    /// Für Eingabefelder: ohne Tausendertrenner, damit es wieder geparst werden kann
+    static func edit(_ v: Double) -> String { v.formatted(.number.grouping(.never).precision(.fractionLength(2))) }
 }
 
 /// Wrapper für `.sheet(item:)` – `value == nil` bedeutet "neu anlegen".
@@ -82,6 +83,7 @@ private struct FormToolbar: ViewModifier {
 
 /// Sync-Status als Toolbar-Symbol; Tippen synchronisiert.
 struct SyncStatusButton: View {
+    // Barrierefreiheit: beschreibt den Status für VoiceOver
     @Environment(TenantStore.self) private var store
     @State private var showInfo = false
 
@@ -100,6 +102,9 @@ struct SyncStatusButton: View {
                 Image(systemName: "checkmark.icloud")
             }
         }
+        .accessibilityLabel(store.isSyncing ? "Synchronisiert gerade"
+                            : store.syncError != nil ? "Synchronisation fehlgeschlagen"
+                            : store.outbox.isEmpty ? "Synchronisiert" : "\(store.outbox.count) Änderungen ausstehend")
         .popover(isPresented: $showInfo) {
             VStack(alignment: .leading, spacing: 8) {
                 Text("Synchronisation").font(.headline)
@@ -134,5 +139,52 @@ struct SyncNoticeModifier: ViewModifier {
         } message: {
             Text(store.notices.joined(separator: "\n\n"))
         }
+    }
+}
+
+/// Eingabefeld mit Einheit rechts (km, l, CHF).
+struct UnitField: View {
+    let title: String
+    @Binding var text: String
+    let unit: String
+    var keyboard: UIKeyboardType = .decimalPad
+    var placeholder = ""
+
+    init(_ title: String, text: Binding<String>, unit: String, keyboard: UIKeyboardType = .decimalPad,
+         placeholder: String = "") {
+        self.title = title
+        self._text = text
+        self.unit = unit
+        self.keyboard = keyboard
+        self.placeholder = placeholder
+    }
+
+    var body: some View {
+        LabeledContent(title) {
+            HStack(spacing: 4) {
+                TextField(placeholder.isEmpty ? title : placeholder, text: $text)
+                    .keyboardType(keyboard)
+                    .multilineTextAlignment(.trailing)
+                Text(unit).foregroundStyle(.secondary)
+            }
+        }
+    }
+}
+
+/// Kleines farbiges Etikett (Teilbetankung, Überfällig, Ausstehend …).
+struct StatusTag: View {
+    let text: String
+    var color: Color = .orange
+    var systemImage: String?
+
+    var body: some View {
+        HStack(spacing: 3) {
+            if let systemImage { Image(systemName: systemImage) }
+            Text(text)
+        }
+        .font(.caption2.weight(.semibold))
+        .padding(.horizontal, 6).padding(.vertical, 2)
+        .foregroundStyle(color)
+        .background(color.opacity(0.15), in: Capsule())
     }
 }

@@ -18,6 +18,7 @@ struct DueItem: Identifiable {
     var nextDueKm: Int?
     var nextDueDate: Date?
     var overdue: Bool
+    var dueSoon = false          // innerhalb 30 Tagen bzw. 1'000 km
     var id: String { maintenanceId }
 
     var dueText: String {
@@ -91,8 +92,11 @@ enum StatsCalculator {
             guard m.nextDueKm != nil || m.nextDueDate != nil else { return nil }
             let overdue = (m.nextDueKm.map { current >= $0 } ?? false)
                 || (m.nextDueDate.map { startOfToday >= Calendar.current.startOfDay(for: $0) } ?? false)
+            let soonDate = Calendar.current.date(byAdding: .day, value: 30, to: startOfToday) ?? startOfToday
+            let soon = !overdue && ((m.nextDueKm.map { current >= $0 - 1000 } ?? false)
+                                    || (m.nextDueDate.map { $0 <= soonDate } ?? false))
             return DueItem(maintenanceId: m.id, title: m.title, nextDueKm: m.nextDueKm,
-                           nextDueDate: m.nextDueDate, overdue: overdue)
+                           nextDueDate: m.nextDueDate, overdue: overdue, dueSoon: soon)
         }
         .sorted { a, b in
             if a.overdue != b.overdue { return a.overdue }

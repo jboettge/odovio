@@ -8,12 +8,15 @@ struct MaintenanceListView: View {
 
     var body: some View {
         let entries = store.maintenance(for: vehicle.id)
+        let due = Dictionary(store.stats(for: store.vehicle(id: vehicle.id) ?? vehicle).due.map { ($0.maintenanceId, $0) },
+                             uniquingKeysWith: { a, _ in a })
         List {
             ForEach(entries) { m in
                 NavigationLink {
                     MaintenanceDetailView(maintenanceId: m.id, vehicle: vehicle)
                 } label: {
-                    MaintenanceRow(maintenance: m, items: store.items(for: m.id), pending: store.isPending(m.id))
+                    MaintenanceRow(maintenance: m, items: store.items(for: m.id), pending: store.isPending(m.id),
+                                   due: due[m.id])
                 }
                 .swipeActions {
                     if store.canWrite {
@@ -32,6 +35,7 @@ struct MaintenanceListView: View {
             if store.canWrite {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button { showNew = true } label: { Image(systemName: "plus") }
+                        .accessibilityLabel("Wartung hinzufügen")
                 }
             }
         }
@@ -47,13 +51,21 @@ private struct MaintenanceRow: View {
     let maintenance: Maintenance
     let items: [MaintenanceItem]
     let pending: Bool
+    let due: DueItem?
 
     private var doneCount: Int { items.filter(\.done).count }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            HStack {
+            HStack(spacing: 6) {
                 Text(maintenance.title).font(.headline)
+                if let due {
+                    if due.overdue {
+                        StatusTag(text: "Überfällig", color: .red, systemImage: "exclamationmark.triangle.fill")
+                    } else if due.dueSoon {
+                        StatusTag(text: "Bald fällig", color: .orange, systemImage: "clock")
+                    }
+                }
                 if pending { PendingBadge() }
                 Spacer()
                 if let c = maintenance.cost { Text(Fmt.chf(c)) }
@@ -75,7 +87,11 @@ private struct MaintenanceRow: View {
                 ProgressView(value: Double(doneCount), total: Double(items.count))
                     .tint(doneCount == items.count ? .green : .accentColor)
             }
+            if let due {
+                Text(due.dueText).font(.caption).foregroundStyle(due.overdue ? .red : .secondary)
+            }
         }
+        .accessibilityElement(children: .combine)
     }
 }
 
@@ -102,17 +118,21 @@ struct MaintenanceDetailView: View {
                     Section {
                         ForEach(items) { item in
                             Button { store.toggle(item) } label: {
-                                Label {
-                                    Text(item.label)
-                                        .strikethrough(item.done)
-                                        .foregroundStyle(item.done ? .secondary : .primary)
-                                } icon: {
+                                HStack(spacing: 12) {
                                     Image(systemName: item.done ? "checkmark.circle.fill" : "circle")
-                                        .foregroundStyle(item.done ? .green : .secondary)
-                                        .imageScale(.large)
+                                        .font(.title3)
+                                        .foregroundStyle(item.done ? Color.green : Color.secondary)
+                                    Text(item.label)
+                                        .foregroundStyle(item.done ? Color.secondary : Color.primary)
+                                    Spacer()
                                 }
+                                .contentShape(Rectangle())
                             }
+                            .buttonStyle(.plain)
                             .disabled(!store.canWrite || m.deleted)
+                            .accessibilityLabel(item.label)
+                            .accessibilityValue(item.done ? "erledigt" : "offen")
+                            .accessibilityAddTraits(.isButton)
                         }
                     } header: {
                         Text("Checkliste")
@@ -188,20 +208,14 @@ struct MaintenanceFormView: View {
                 Section("Wartung") {
                     TextField("Titel (z. B. Service)", text: $title)
                     DatePicker("Datum", selection: $date, displayedComponents: .date)
-                    LabeledContent("Kilometerstand") {
-                        TextField("km", text: $km).keyboardType(.numberPad).multilineTextAlignment(.trailing)
-                    }
-                    LabeledContent("Kosten (CHF)") {
-                        TextField("optional", text: $cost).keyboardType(.decimalPad).multilineTextAlignment(.trailing)
-                    }
+                    UnitField("Kilometerstand", text: $km, unit: "km", keyboard: .numberPad)
+                    UnitField("Kosten", text: $cost, unit: "CHF", placeholder: "optional")
                 }
 
                 Section("Nächste Fälligkeit") {
                     Toggle("Nach Kilometerstand", isOn: $hasDueKm)
                     if hasDueKm {
-                        LabeledContent("Fällig bei") {
-                            TextField("km", text: $dueKm).keyboardType(.numberPad).multilineTextAlignment(.trailing)
-                        }
+                        UnitField("Fällig bei", text: $dueKm, unit: "km", keyboard: .numberPad)
                     }
                     Toggle("Nach Datum", isOn: $hasDueDate)
                     if hasDueDate {

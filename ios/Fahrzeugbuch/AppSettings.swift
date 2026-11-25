@@ -1,5 +1,7 @@
+import AuthenticationServices
 import Foundation
 import Network
+import SwiftUI
 import Observation
 import Security
 
@@ -31,6 +33,7 @@ final class AppSettings {
             Task { @MainActor in await self?.store?.sync() }
         }
         monitor.start(queue: DispatchQueue(label: "fahrzeugbuch.network"))
+        Self.cleanupExports(olderThan: 3600)
         #if DEBUG
         if Demo.isActive { Demo.setUp(self) }
         #endif
@@ -47,7 +50,25 @@ final class AppSettings {
     }
     #endif
 
-    var isConfigured: Bool { URL(string: serverURL)?.host != nil }
+    var isConfigured: Bool { URL(string: serverURL).map(AuthManager.isSecure) ?? false }
+
+    /// Hinweis nach dem Login (z. B. verworfene Daten eines anderen Benutzers)
+    var loginNotice: String?
+
+    /// Login inkl. Schutz geteilter Geräte: gehören die lokalen Daten einem anderen Benutzer,
+    /// werden sie verworfen, bevor irgendetwas unter der neuen Identität synchronisiert wird.
+    func login(session: WebAuthenticationSession) async throws {
+        let sub = try await auth.login(server: baseURL, session: session)
+        let owner = UserDefaults.standard.string(forKey: "dataOwnerSub")
+        if let owner, owner != sub {
+            let pending = TenantStore.pendingCountOnDisk()
+            resetLocalData()
+            loginNotice = "Lokale Daten des vorherigen Benutzers wurden vom Gerät entfernt"
+                + (pending > 0 ? " (\(pending) nicht synchronisierte Änderung(en) verworfen)." : ".")
+        }
+        UserDefaults.standard.set(sub, forKey: "dataOwnerSub")
+        await loadTenants()   // Rollen/Mandanten nach jedem Login neu laden
+    }
 
     var baseURL: URL { URL(string: serverURL) ?? URL(string: "http://localhost")! }
 
@@ -102,9 +123,24 @@ final class AppSettings {
         store = nil
         tenants = []
         tenantsLoaded = false
-        UserDefaults.standard.removeObject(forKey: "tenants")
-        UserDefaults.standard.removeObject(forKey: "tenant")
+        for key in ["tenants", "tenant", "dataOwnerSub", "checklistTemplates"] {
+            UserDefaults.standard.removeObject(forKey: key)
+        }
         TenantStore.deleteAll()
+        Self.cleanupExports(olderThan: 0)
+    }
+
+    /// Exportierte PDFs im temporären Verzeichnis entfernen.
+    static func cleanupExports(olderThan seconds: TimeInterval) {
+        let fm = FileManager.default
+        let dir = fm.temporaryDirectory
+        let files = (try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.contentModificationDateKey])) ?? []
+        for url in files where url.lastPathComponent.hasPrefix("Fahrzeugbuch_") && url.pathExtension == "pdf" {
+            let date = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
+            if seconds == 0 || (date.map { Date().timeIntervalSince($0) > seconds } ?? true) {
+                try? fm.removeItem(at: url)
+            }
+        }
     }
 }
 
@@ -120,7 +156,8 @@ enum Keychain {
         guard !value.isEmpty else { return }
         var add = query(key)
         add[kSecValueData as String] = Data(value.utf8)
-        add[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlock
+        // Nur dieses Gerät: Token wandert nicht in Backups/auf andere Geräte
+        add[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
         SecItemAdd(add as CFDictionary, nil)
     }
 

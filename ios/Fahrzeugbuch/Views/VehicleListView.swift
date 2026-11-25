@@ -1,30 +1,71 @@
 import SwiftUI
 
+/// Schnellerfassung direkt aus der Liste/Übersicht.
+enum QuickEntry: Identifiable {
+    case fuel(Vehicle), odometer(Vehicle), maintenance(Vehicle)
+    var id: String {
+        switch self {
+        case .fuel(let v): "fuel-\(v.id)"
+        case .odometer(let v): "odo-\(v.id)"
+        case .maintenance(let v): "maint-\(v.id)"
+        }
+    }
+
+    @ViewBuilder var form: some View {
+        switch self {
+        case .fuel(let v): FuelFormView(vehicle: v, entry: nil)
+        case .odometer(let v): OdometerFormView(vehicle: v, reading: nil)
+        case .maintenance(let v): MaintenanceFormView(vehicle: v, maintenance: nil)
+        }
+    }
+}
+
 struct VehicleListView: View {
     @Environment(AppSettings.self) private var settings
     @Environment(TenantStore.self) private var store
     @State private var form: EditTarget<Vehicle>?
+    @State private var quick: QuickEntry?
     @State private var toDelete: Vehicle?
     @State private var showSettings = false
 
     var body: some View {
         NavigationStack {
             List {
-                ForEach(store.vehicleList) { v in
-                    NavigationLink(value: v.id) {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(v.name).font(.headline)
-                            if !v.subtitle.isEmpty {
-                                Text(v.subtitle).font(.subheadline).foregroundStyle(.secondary)
+                Section {
+                    ForEach(store.vehicleList) { v in
+                        NavigationLink(value: v.id) { VehicleRow(vehicle: v) }
+                            .swipeActions(edge: .leading) {
+                                if store.canWrite {
+                                    Button { quick = .fuel(v) } label: { Label("Tanken", systemImage: "fuelpump") }
+                                        .tint(.green)
+                                }
                             }
-                            Text(Fmt.km(store.currentKm(v))).font(.caption).foregroundStyle(.secondary)
-                        }
+                            .swipeActions(edge: .trailing) {
+                                if store.canWrite {
+                                    Button("Stornieren", role: .destructive) { toDelete = v }
+                                    Button("Bearbeiten") { form = EditTarget(value: v) }.tint(.blue)
+                                }
+                            }
+                            .contextMenu {
+                                if store.canWrite {
+                                    Button { quick = .fuel(v) } label: { Label("Tanken", systemImage: "fuelpump") }
+                                    Button { quick = .odometer(v) } label: {
+                                        Label("Kilometerstand", systemImage: "gauge.with.dots.needle.67percent")
+                                    }
+                                    Button { quick = .maintenance(v) } label: {
+                                        Label("Wartung", systemImage: "wrench.and.screwdriver")
+                                    }
+                                }
+                            }
                     }
-                    .swipeActions {
-                        if store.canWrite {
-                            Button("Stornieren", role: .destructive) { toDelete = v }
-                            Button("Bearbeiten") { form = EditTarget(value: v) }.tint(.blue)
-                        }
+                } header: {
+                    if !store.canWrite {
+                        Label("Nur Lesezugriff auf \(store.tenant.slug)", systemImage: "eye")
+                            .textCase(nil)
+                    }
+                } footer: {
+                    if store.canWrite && !store.vehicleList.isEmpty {
+                        Text("Tipp: Fahrzeug nach rechts wischen oder lange drücken, um direkt zu tanken.")
                     }
                 }
             }
@@ -35,47 +76,90 @@ struct VehicleListView: View {
                                                              : "Nur Lesezugriff auf diesen Mandanten."))
                 }
             }
-            .navigationTitle(store.tenant.slug)
+            .navigationTitle("Fahrzeuge")
             .navigationDestination(for: String.self) { id in
                 if let v = store.vehicle(id: id) { VehicleDetailView(vehicle: v) }
             }
             .toolbar {
                 ToolbarItemGroup(placement: .topBarLeading) {
                     Button { showSettings = true } label: { Image(systemName: "gearshape") }
-                    if settings.tenants.count > 1 {
-                        Menu {
-                            Picker("Mandant", selection: Binding(
-                                get: { store.tenant.slug },
-                                set: { slug in
-                                    if let t = settings.tenants.first(where: { $0.slug == slug }) {
-                                        settings.selectTenant(t)
-                                    }
-                                })) {
-                                ForEach(settings.tenants) { t in
-                                    Label(t.slug, systemImage: t.canWrite ? "pencil" : "eye").tag(t.slug)
-                                }
-                            }
-                        } label: {
-                            Image(systemName: "building.2")
-                        }
-                    }
+                        .accessibilityLabel("Einstellungen")
+                    TenantMenu()
                 }
                 ToolbarItemGroup(placement: .topBarTrailing) {
                     SyncStatusButton()
                     if store.canWrite {
                         Button { form = EditTarget(value: nil) } label: { Image(systemName: "plus") }
+                            .accessibilityLabel("Fahrzeug hinzufügen")
                     }
                 }
             }
             .refreshable { await store.sync() }
-            .sheet(item: $form) { target in
-                VehicleFormView(vehicle: target.value)
-            }
-            .sheet(isPresented: $showSettings) {
-                NavigationStack { SettingsView() }
-            }
+            .sheet(item: $form) { target in VehicleFormView(vehicle: target.value) }
+            .sheet(item: $quick) { $0.form }
+            .sheet(isPresented: $showSettings) { NavigationStack { SettingsView() } }
             .stornoDialog($toDelete, title: "Fahrzeug stornieren?") { store.delete($0) }
             .modifier(SyncNoticeModifier())
+            .task(id: store.dueSignature) { await DueNotifications.reschedule(store) }
+        }
+    }
+}
+
+private struct VehicleRow: View {
+    @Environment(TenantStore.self) private var store
+    let vehicle: Vehicle
+
+    var body: some View {
+        let stats = store.stats(for: vehicle)
+        let overdue = stats.due.filter(\.overdue).count
+        VStack(alignment: .leading, spacing: 3) {
+            Text(vehicle.name).font(.headline)
+            if !vehicle.subtitle.isEmpty {
+                Text(vehicle.subtitle).font(.subheadline).foregroundStyle(.secondary)
+            }
+            HStack(spacing: 10) {
+                Label(Fmt.km(stats.currentKm), systemImage: "gauge.with.dots.needle.67percent")
+                if let c = stats.avgConsumption {
+                    Label("\(Fmt.num(c, 1)) l/100 km", systemImage: "fuelpump")
+                }
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            if overdue > 0 {
+                Label(overdue == 1 ? "1 Wartung überfällig" : "\(overdue) Wartungen überfällig",
+                      systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption.bold())
+                    .foregroundStyle(.red)
+            }
+        }
+        .accessibilityElement(children: .combine)
+    }
+}
+
+/// Mandantenwechsel als beschriftetes Menü (nur bei mehreren Mandanten).
+struct TenantMenu: View {
+    @Environment(AppSettings.self) private var settings
+    @Environment(TenantStore.self) private var store
+
+    var body: some View {
+        if settings.tenants.count > 1 {
+            Menu {
+                Picker("Mandant", selection: Binding(
+                    get: { store.tenant.slug },
+                    set: { slug in
+                        if let t = settings.tenants.first(where: { $0.slug == slug }) { settings.selectTenant(t) }
+                    })) {
+                    ForEach(settings.tenants) { t in
+                        Label(t.slug, systemImage: t.canWrite ? "pencil" : "eye").tag(t.slug)
+                    }
+                }
+            } label: {
+                HStack(spacing: 3) {
+                    Text(store.tenant.slug).font(.subheadline.weight(.semibold))
+                    Image(systemName: "chevron.down").font(.caption2.weight(.bold))
+                }
+            }
+            .accessibilityLabel("Mandant: \(store.tenant.slug), wechseln")
         }
     }
 }
@@ -105,8 +189,7 @@ struct VehicleFormView: View {
                     }
                 }
                 Section {
-                    TextField("Kilometerstand", text: $initialKm)
-                        .keyboardType(.numberPad)
+                    UnitField("Kilometerstand", text: $initialKm, unit: "km", keyboard: .numberPad)
                 } header: {
                     Text("Startkilometerstand")
                 } footer: {
@@ -114,7 +197,7 @@ struct VehicleFormView: View {
                 }
             }
             .navigationTitle(vehicle == nil ? "Neues Fahrzeug" : "Fahrzeug bearbeiten")
-            .formToolbar(canSave: !name.trimmed.isEmpty, save: save)
+            .formToolbar(canSave: store.canWrite && !name.trimmed.isEmpty, save: save)
             .onAppear {
                 guard let v = vehicle else { return }
                 name = v.name

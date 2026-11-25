@@ -10,6 +10,13 @@ struct FahrzeugbuchApp: App {
         WindowGroup {
             RootView()
                 .environment(settings)
+                .alert("Hinweis", isPresented: Binding(
+                    get: { settings.loginNotice != nil },
+                    set: { if !$0 { settings.loginNotice = nil } })) {
+                    Button("OK", role: .cancel) {}
+                } message: {
+                    Text(settings.loginNotice ?? "")
+                }
         }
         .onChange(of: scenePhase) { _, phase in
             if phase == .active { Task { await settings.store?.sync() } }

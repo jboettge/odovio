@@ -40,8 +40,8 @@ struct VehicleDetailView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
-                Button { showReport = true } label: { Image(systemName: "doc.richtext") }
-                    .accessibilityLabel("PDF-Export")
+                Button { showReport = true } label: { Image(systemName: "square.and.arrow.up") }
+                    .accessibilityLabel("PDF exportieren")
             }
         }
         .sheet(isPresented: $showReport) {

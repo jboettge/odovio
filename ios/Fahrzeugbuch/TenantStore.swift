@@ -79,6 +79,17 @@ final class TenantStore {
 
     func isPending(_ id: String) -> Bool { outbox.contains { $0.entityId == id } }
 
+    /// Fälligkeiten aller Fahrzeuge (für Benachrichtigungen)
+    var dueItems: [(vehicle: Vehicle, item: DueItem)] {
+        vehicleList.flatMap { v in stats(for: v).due.map { (vehicle: v, item: $0) } }
+    }
+
+    /// Ändert sich, sobald sich Fälligkeiten ändern → Benachrichtigungen neu planen
+    var dueSignature: String {
+        dueItems.map { "\($0.item.id)|\($0.item.nextDueDate?.timeIntervalSince1970 ?? 0)|\($0.item.overdue)" }
+            .joined(separator: ",")
+    }
+
     // MARK: Schreiben (offline)
 
     func save(_ v: Vehicle) { upsert(v, in: \.vehicles) }
@@ -288,7 +299,7 @@ final class TenantStore {
                             items: items, outbox: outbox, cursor: cursor, lastSync: lastSync)
         do {
             let data = try Self.fileEncoder.encode(snap)
-            try data.write(to: fileURL, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+            try data.write(to: fileURL, options: [.atomic, .completeFileProtectionUnlessOpen])
         } catch {
             syncError = "Lokales Speichern fehlgeschlagen: \(error.localizedDescription)"
         }

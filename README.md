@@ -48,14 +48,24 @@ Abmelden in der App widerruft das Offline-Token (`/revoke`).
 
 ## Server (Portainer)
 
-1. DB-Passwort erzeugen: `openssl rand -hex 32`
+Dienste: `db` (PostgreSQL), `migrate` (einmalig je Deploy: Schema, Trigger, App-Rolle), `api` (read-only Container, ohne Capabilities, Port nur an `API_BIND`).
+
+1. Geheimnisse erzeugen: `openssl rand -hex 32` (`DB_PASSWORD`, `APP_DB_PASSWORD`), `openssl rand -base64 32` (`ANCHOR_SIGNING_KEY`)
 2. Portainer → **Stacks → Add stack → Repository**
    - Compose path: `fahrzeugbuch/docker-compose.yml`
    - Environment variables:
 
 | Variable | Pflicht | Beispiel / Default |
 |---|---|---|
-| `DB_PASSWORD` | ja | – |
+| `DB_PASSWORD` | ja | Owner-Rolle (nur Migration/Backup) |
+| `APP_DB_PASSWORD` | ja | App-Rolle `fahrzeugbuch_app`: kein Owner/Superuser, kein DELETE, Journal nur SELECT/INSERT |
+| `ANCHOR_SIGNING_KEY` | empfohlen | Ed25519-Seed (Base64) für signierte Kettenanker – nicht in der DB, sichern! |
+| `ANCHOR_INTERVAL_MIN` | – | `60` (Anker nach Änderungen höchstens stündlich, zusätzlich bei jedem PDF) |
+| `API_BIND` | – | `127.0.0.1`; für Caddy auf OPNsense: IP der Docker-VM + Firewall nur OPNsense |
+| `FORWARDED_ALLOW_IPS` | – | IP des Reverse Proxy |
+| `OIDC_ALLOWED_AZP` | – | weitere Clients, z. B. für n8n-Skripte |
+| `MAX_BODY_BYTES` | – | `1048576` |
+| `DOCS_ENABLED` | – | `0` (API-Doku `/docs` nur bei Bedarf) |
 | `OIDC_ISSUER` | ja | `https://id.j-mb.net/realms/<realm>` |
 | `OIDC_CLIENT_ID` | – | `fahrzeugbuch-ios` (Token wird über `azp` geprüft) |
 | `OIDC_REQUIRED_ROLE` | – | `fahrzeugbuch-user` (Realm-/Client-Rolle oder Gruppe); leer = jeder Realm-Benutzer |
@@ -72,7 +82,8 @@ Optionen:
 - **Bestehende PostgreSQL** statt eigener DB: Service `db` entfernen, `DATABASE_URL=postgresql+psycopg://user:pw@host:5432/fahrzeugbuch` setzen.
 - **Eigene Checklisten-Vorlagen**: JSON (`[{"title": "...", "items": ["..."]}]`) mounten und `CHECKLIST_FILE` setzen (siehe Kommentar im Compose).
 - **Backup**: `docker exec fahrzeugbuch-db pg_dump -U fahrzeugbuch fahrzeugbuch > fzb.sql`
-- API-Doku: `http://<host>:8085/docs`
+- **Anker extern archivieren** (empfohlen): täglich `GET /api/t/<mandant>/audit/anchors` z. B. per n8n nach Paperless-ngx – enthält Public Key, Signaturen und Nachrichtenformat
+- API-Doku: `DOCS_ENABLED=1` → `/docs`
 
 ## iOS-App
 
@@ -89,8 +100,10 @@ In Xcode: Target → *Signing & Capabilities* → Team wählen (ggf. Bundle-ID a
 Mit kostenlosem Apple-Account läuft die Signatur 7 Tage; für Dauerbetrieb Developer-Account oder TestFlight.
 
 Erster Start: nur Server-URL eingeben → *Verbindung testen* (zeigt Issuer/Client) → *Sichern* → *Mit Keycloak anmelden*.
-Offline: Daten liegen je Mandant lokal (Application Support, Dateischutz). Neue Einträge erhalten sofort eine UUID, ausstehende Änderungen zeigt das Wolken-Symbol (Zahl = Outbox). Abmelden oder Serverwechsel löscht lokale Daten (mit Warnung bei ausstehenden Änderungen). PDF und Verlauf benötigen eine Verbindung.
-Mandantenwechsel über das Gebäude-Symbol (bei mehreren Mandanten); Lesezugriff blendet Erfassen/Bearbeiten aus.
+Sicherheit: nur HTTPS (Debug: zusätzlich `http://localhost`); Issuer/Client werden nach der ersten Anmeldung gepinnt und die Discovery geprüft (Issuer gleich, Endpoints HTTPS auf dem Issuer-Host). Anmeldung in ephemerer Browser-Sitzung (kein geteiltes SSO-Cookie). Refresh-Token in der Keychain „nur dieses Gerät“. Meldet sich ein anderer Benutzer an, werden lokale Daten des Vorgängers vorher entfernt.
+
+Offline: Daten liegen je Mandant lokal (Application Support, Dateischutz `completeUnlessOpen`). Neue Einträge erhalten sofort eine UUID, ausstehende Änderungen zeigt das Wolken-Symbol (Zahl = Outbox). Abmelden oder Serverwechsel löscht lokale Daten (mit Warnung bei ausstehenden Änderungen). PDF und Verlauf benötigen eine Verbindung.
+Bedienung: Fahrzeug nach rechts wischen oder lange drücken → direkt tanken; Übersicht mit Schnellerfassung (Tanken, km-Stand, Wartung); Plausibilitätswarnungen beim Tanken; Fälligkeiten als Badges und lokale Erinnerungen (14 Tage vorher, am Stichtag). Mandantenwechsel über das Menü oben links (bei mehreren Mandanten); Lesezugriff wird angezeigt und blendet Erfassen aus. Screenshots: `docs/screenshots/`, Review: `docs/REVIEW.md`.
 
 Login läuft über `ASWebAuthenticationSession` (Safari-Session → SSO mit bestehendem Keycloak-Login). Refresh-Token in der Keychain, Access-Token nur im Speicher; bei 401 einmal Refresh + Wiederholung, bei abgelaufener Sitzung zurück zum Login.
 Andere Bundle-ID → `AuthManager.callbackScheme/redirectURI` und `REDIRECT` im Keycloak-Skript anpassen.
@@ -110,7 +123,8 @@ Schreiben ausschliesslich über `/sync` → jede Änderung läuft durch das Revi
 | GET | `/api/t/{mandant}/vehicles` · `/vehicles/{id}/stats` | Übersicht, Verbrauch, Fälligkeiten |
 | GET | `/api/t/{mandant}/vehicles/{id}/report.pdf?from=&to=` | PDF-Export |
 | GET | `/api/t/{mandant}/history/{entity}/{id}` | Revisionen eines Eintrags |
-| GET | `/api/t/{mandant}/audit/verify` | Hash-Kette prüfen |
+| GET | `/api/t/{mandant}/audit/verify` | Kette + Abgleich Datenstand + signierte Anker prüfen |
+| GET | `/api/t/{mandant}/audit/anchors` | Signierte Anker zur externen Archivierung |
 
 ### Sync-Protokoll
 
@@ -129,10 +143,12 @@ POST /api/t/privat/sync
 ## Revisionssicherheit
 
 - Tabelle `revisions`: je Änderung Version, Aktion, vollständiger Datenstand, Benutzer (`sub`, Name), Serverzeit (UTC), Erfassungszeit auf dem Gerät, `op_id`, Konfliktflag
-- `hash = SHA256(prev_hash + kanonisches JSON)` je Mandant → Ändern, Löschen, Einfügen oder Umordnen bricht die Kette (`/audit/verify` meldet die Seq)
-- DB-Trigger verhindert `UPDATE`/`DELETE`/`TRUNCATE` auf `revisions` (PostgreSQL), Fachtabellen nur Soft-Delete
-- Kettenkopf-Hash steht in jedem PDF → externer Anker: ein späteres Verify muss denselben oder einen Nachfolger-Stand bestätigen
-- Grenzen: Ein DB-Superuser kann Trigger deaktivieren und die Kette komplett neu berechnen. Schutz dagegen: PDFs/Kettenkopf extern ablegen (z. B. Paperless-ngx), DB-Backups. Keine zertifizierte GeBüV-/GoBD-Lösung.
+- `hash = SHA256(prev_hash + kanonisches JSON)` je Mandant → Ändern, Löschen, Einfügen oder Umordnen bricht die Kette
+- **Abgleich Datenstand**: jeder Datensatz muss exakt seiner letzten Revision entsprechen – direkte DB-Änderungen an Fachtabellen werden erkannt
+- **Signierte Anker** (Ed25519, Schlüssel ausserhalb der DB): erkennen auch ein vollständiges Neuberechnen der Kette; externe Ablage der Anker schützt zusätzlich gegen Löschen
+- **DB-Rollen**: API läuft als `fahrzeugbuch_app` (kein Owner/Superuser): kann Trigger nicht deaktivieren, Journal/Anker nicht ändern, nichts löschen. Trigger sperren `UPDATE/DELETE/TRUNCATE` auf `revisions` und `anchors`
+- `/audit/verify` und jedes PDF zeigen: Kette, Datenstand, Anker; PDF enthält Kettenkopf und letzten signierten Anker
+- Grenzen: Wer Owner-Passwort **und** Signaturschlüssel besitzt, kann weiterhin manipulieren – erkennbar nur über extern archivierte Anker/PDFs. Keine zertifizierte GeBüV-/GoBD-Lösung.
 
 ## Verbrauchsberechnung
 

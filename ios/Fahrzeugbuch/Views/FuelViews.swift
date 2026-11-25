@@ -16,7 +16,7 @@ struct FuelListView: View {
                 Button { form = EditTarget(value: e) } label: {
                     FuelRow(entry: e, consumption: consumption[e.km], pending: store.isPending(e.id))
                 }
-                .foregroundStyle(.primary)
+                .buttonStyle(.plain)
                 .swipeActions {
                     if store.canWrite {
                         Button("Stornieren", role: .destructive) { toDelete = e }
@@ -34,6 +34,7 @@ struct FuelListView: View {
             if store.canWrite {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button { form = EditTarget(value: nil) } label: { Image(systemName: "plus") }
+                        .accessibilityLabel("Tankvorgang hinzufügen")
                 }
             }
         }
@@ -47,9 +48,7 @@ struct FuelListView: View {
 
 struct PendingBadge: View {
     var body: some View {
-        Image(systemName: "icloud.and.arrow.up")
-            .font(.caption2)
-            .foregroundStyle(.orange)
+        StatusTag(text: "Ausstehend", color: .orange, systemImage: "icloud.and.arrow.up")
             .accessibilityLabel("Noch nicht synchronisiert")
     }
 }
@@ -61,20 +60,15 @@ private struct FuelRow: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            HStack {
+            HStack(spacing: 6) {
                 Text(Fmt.day(entry.date)).font(.headline)
-                if !entry.fullTank {
-                    Text("Teilbetankung")
-                        .font(.caption2)
-                        .padding(.horizontal, 6).padding(.vertical, 2)
-                        .background(.orange.opacity(0.2), in: Capsule())
-                }
+                if !entry.fullTank { StatusTag(text: "Teilbetankung") }
                 if pending { PendingBadge() }
                 Spacer()
                 Text(Fmt.chf(entry.priceTotal)).font(.headline)
             }
             HStack {
-                Text("\(Fmt.km(entry.km)) · \(Fmt.num(entry.liters)) l · \(Fmt.num(entry.pricePerLiter, 3))/l")
+                Text("\(Fmt.km(entry.km)) · \(Fmt.num(entry.liters)) l · CHF \(Fmt.num(entry.pricePerLiter, 3))/l")
                 Spacer()
                 if let c = consumption {
                     Text("\(Fmt.num(c, 1)) l/100 km").bold()
@@ -86,6 +80,8 @@ private struct FuelRow: View {
                 Text(s).font(.caption).foregroundStyle(.secondary)
             }
         }
+        .contentShape(Rectangle())
+        .accessibilityElement(children: .combine)
     }
 }
 
@@ -94,6 +90,8 @@ struct FuelFormView: View {
     let vehicle: Vehicle
     let entry: FuelEntry?
 
+    enum Field { case km, liters, price }
+    @FocusState private var focus: Field?
     @State private var date = Date()
     @State private var km = ""
     @State private var liters = ""
@@ -107,8 +105,35 @@ struct FuelFormView: View {
         return p / l
     }
 
-    private var valid: Bool {
-        store.canWrite && km.asInt != nil && (liters.asDouble ?? 0) > 0 && price.asDouble != nil
+    private var missing: [String] {
+        var m: [String] = []
+        if km.asInt == nil { m.append("Kilometerstand") }
+        if (liters.asDouble ?? 0) <= 0 { m.append("Liter") }
+        if price.asDouble == nil { m.append("Betrag") }
+        return m
+    }
+
+    /// Plausibilitätsprüfung – warnt, blockiert nicht.
+    private var warnings: [String] {
+        var w: [String] = []
+        let others = store.fuel(for: vehicle.id).filter { $0.id != entry?.id }
+        if let k = km.asInt {
+            let earlier = others.filter { $0.date <= date }.map(\.km).max() ?? 0
+            if k < earlier { w.append("Kilometerstand kleiner als bei einer früheren Tankung (\(Fmt.km(earlier))).") }
+            if let l = liters.asDouble, l > 0, fullTank,
+               let prevFull = others.filter({ $0.fullTank && $0.km < k }).max(by: { $0.km < $1.km }) {
+                let partial = others.filter { !$0.fullTank && $0.km > prevFull.km && $0.km < k }.reduce(0) { $0 + $1.liters }
+                let dist = Double(k - prevFull.km)
+                let cons = (l + partial) / dist * 100
+                if cons > 25 || cons < 2 {
+                    w.append("Ergibt \(Fmt.num(cons, 1)) l/100 km – Eingaben prüfen (Teilbetankung?).")
+                }
+            }
+        }
+        if let ppl = pricePerLiter, ppl > 4 || ppl < 0.8 {
+            w.append("Literpreis CHF \(Fmt.num(ppl, 3)) ungewöhnlich.")
+        }
+        return w
     }
 
     var body: some View {
@@ -116,21 +141,26 @@ struct FuelFormView: View {
             Form {
                 Section {
                     DatePicker("Datum", selection: $date, displayedComponents: .date)
-                    LabeledContent("Kilometerstand") {
-                        TextField("km", text: $km).keyboardType(.numberPad).multilineTextAlignment(.trailing)
-                    }
-                    LabeledContent("Liter") {
-                        TextField("0.00", text: $liters).keyboardType(.decimalPad).multilineTextAlignment(.trailing)
-                    }
-                    LabeledContent("Betrag (CHF)") {
-                        TextField("0.00", text: $price).keyboardType(.decimalPad).multilineTextAlignment(.trailing)
-                    }
+                    UnitField("Kilometerstand", text: $km, unit: "km", keyboard: .numberPad).focused($focus, equals: .km)
+                    UnitField("Liter", text: $liters, unit: "l", placeholder: "0.00").focused($focus, equals: .liters)
+                    UnitField("Betrag", text: $price, unit: "CHF", placeholder: "0.00").focused($focus, equals: .price)
                     if let ppl = pricePerLiter {
                         LabeledContent("Preis pro Liter", value: "CHF \(Fmt.num(ppl, 3))")
                     }
                     Toggle("Vollgetankt", isOn: $fullTank)
                 } footer: {
-                    Text("Für die Verbrauchsberechnung immer voll tanken oder Teilbetankungen als solche markieren.")
+                    if !missing.isEmpty && (!liters.isEmpty || !price.isEmpty) {
+                        Text("Erforderlich: \(missing.joined(separator: ", "))").foregroundStyle(.orange)
+                    } else {
+                        Text("Für die Verbrauchsberechnung immer voll tanken oder Teilbetankungen als solche markieren.")
+                    }
+                }
+                if !warnings.isEmpty {
+                    Section {
+                        ForEach(warnings, id: \.self) { w in
+                            Label(w, systemImage: "exclamationmark.triangle").foregroundStyle(.orange)
+                        }
+                    }
                 }
                 Section("Optional") {
                     TextField("Tankstelle", text: $station)
@@ -139,9 +169,12 @@ struct FuelFormView: View {
                 if let e = entry {
                     HistorySection(entity: FuelEntry.entityName, id: e.id)
                 }
+                if !store.canWrite {
+                    Section { Label("Nur Lesezugriff", systemImage: "eye").foregroundStyle(.secondary) }
+                }
             }
             .navigationTitle(entry == nil ? "Tankvorgang" : "Tankvorgang bearbeiten")
-            .formToolbar(canSave: valid, save: save)
+            .formToolbar(canSave: store.canWrite && missing.isEmpty, save: save)
             .onAppear(perform: prefill)
         }
     }
@@ -150,6 +183,7 @@ struct FuelFormView: View {
         guard let e = entry else {
             let current = store.currentKm(store.vehicle(id: vehicle.id) ?? vehicle)
             if current > 0 { km = String(current) }
+            focus = .liters   // an der Säule: zuerst Liter, dann Betrag
             return
         }
         date = e.date

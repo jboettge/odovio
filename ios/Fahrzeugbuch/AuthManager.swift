@@ -12,6 +12,7 @@ struct AuthConfig: Decodable {
 }
 
 private struct OIDCDiscovery: Decodable {
+    let issuer: String
     let authorizationEndpoint: URL
     let tokenEndpoint: URL
     let revocationEndpoint: URL?
@@ -70,7 +71,9 @@ final class AuthManager {
 
     // MARK: Öffentliche API
 
-    func login(server: URL, session: WebAuthenticationSession) async throws {
+    /// Meldet an und liefert die `sub` des Benutzers.
+    @discardableResult
+    func login(server: URL, session: WebAuthenticationSession) async throws -> String {
         let (cfg, disc) = try await loadConfig(server)
         let verifier = Self.random(32)
         let challenge = Data(SHA256.hash(data: Data(verifier.utf8))).base64URL
@@ -86,7 +89,9 @@ final class AuthManager {
             URLQueryItem(name: "code_challenge", value: challenge),
             URLQueryItem(name: "code_challenge_method", value: "S256"),
         ]
-        let callback = try await session.authenticate(using: comps.url!, callbackURLScheme: Self.callbackScheme)
+        // Ephemer: kein geteiltes Safari-SSO-Cookie → auf geteilten Geräten kein Login ohne Passwort
+        let callback = try await session.authenticate(using: comps.url!, callbackURLScheme: Self.callbackScheme,
+                                                      preferredBrowserSession: .ephemeral)
 
         let items = URLComponents(url: callback, resolvingAgainstBaseURL: false)?.queryItems ?? []
         func item(_ name: String) -> String? { items.first { $0.name == name }?.value }
@@ -104,6 +109,10 @@ final class AuthManager {
             "code_verifier": verifier,
         ])
         store(tokens)
+        UserDefaults.standard.set(cfg.issuer, forKey: Self.pinnedIssuerKey)
+        UserDefaults.standard.set(cfg.clientId, forKey: Self.pinnedClientKey)
+        guard let sub = Self.claim(tokens.accessToken, "sub") else { throw AuthError.callback("Token ohne sub") }
+        return sub
     }
 
     /// Gültiges Access-Token; erneuert bei Bedarf (parallele Aufrufe teilen sich einen Refresh).
@@ -116,6 +125,7 @@ final class AuthManager {
         return try await task.value
     }
 
+    /// Explizites Abmelden: Tokens widerrufen, Issuer-Pin lösen.
     func logout(server: URL?) async {
         if let server, let rt = refreshToken,
            let loaded = try? await loadConfig(server),
@@ -125,6 +135,8 @@ final class AuthManager {
             ])
         }
         clearSession()
+        UserDefaults.standard.removeObject(forKey: Self.pinnedIssuerKey)
+        UserDefaults.standard.removeObject(forKey: Self.pinnedClientKey)
     }
 
     func clearSession() {
@@ -176,19 +188,47 @@ final class AuthManager {
         isLoggedIn = true
     }
 
+    /// Lädt Issuer/Client vom Server und die Discovery vom Issuer – mit Prüfungen gegen
+    /// manipulierte Antworten: nur HTTPS, Issuer gepinnt (nach erstem Login), Endpoints auf dem Issuer-Host.
     private func loadConfig(_ server: URL) async throws -> (AuthConfig, OIDCDiscovery) {
         if let c = cache, c.server == server { return (c.config, c.discovery) }
+        guard Self.isSecure(server) else { throw AuthError.server("Server muss per HTTPS erreichbar sein") }
         let (cfgData, cfgResp) = try await URLSession.shared.data(from: server.appending(path: "auth/config"))
         guard (cfgResp as? HTTPURLResponse)?.statusCode == 200 else {
             throw AuthError.server("Server liefert keine OIDC-Konfiguration (/auth/config)")
         }
         let cfg = try Self.decoder.decode(AuthConfig.self, from: cfgData)
-        guard let issuer = URL(string: cfg.issuer) else { throw AuthError.server("Ungültiger Issuer") }
+        guard let issuer = URL(string: cfg.issuer), Self.isSecure(issuer), let issuerHost = issuer.host else {
+            throw AuthError.server("Ungültiger oder unsicherer Issuer")
+        }
+        let defaults = UserDefaults.standard
+        if let pinned = defaults.string(forKey: Self.pinnedIssuerKey),
+           pinned != cfg.issuer || defaults.string(forKey: Self.pinnedClientKey) != cfg.clientId {
+            throw AuthError.server("Anmeldeserver hat sich geändert (\(cfg.issuer)). Bitte abmelden und neu anmelden.")
+        }
         let (discData, _) = try await URLSession.shared.data(
             from: issuer.appending(path: ".well-known/openid-configuration"))
         let disc = try Self.decoder.decode(OIDCDiscovery.self, from: discData)
+        let endpoints = [disc.authorizationEndpoint, disc.tokenEndpoint] + [disc.revocationEndpoint].compactMap { $0 }
+        guard disc.issuer == cfg.issuer,
+              endpoints.allSatisfy({ Self.isSecure($0) && $0.host == issuerHost }) else {
+            throw AuthError.server("OIDC-Discovery passt nicht zum Issuer")
+        }
         cache = (server, cfg, disc)
         return (cfg, disc)
+    }
+
+    static let pinnedIssuerKey = "pinnedIssuer"
+    static let pinnedClientKey = "pinnedClientId"
+
+    /// HTTPS Pflicht; Debug-Builds erlauben zusätzlich http://localhost (Simulator/Entwicklung).
+    nonisolated static func isSecure(_ url: URL) -> Bool {
+        if url.scheme?.lowercased() == "https" { return url.host != nil }
+        #if DEBUG
+        return url.scheme?.lowercased() == "http" && ["localhost", "127.0.0.1"].contains(url.host ?? "")
+        #else
+        return false
+        #endif
     }
 
     private func tokenRequest(_ url: URL, _ form: [String: String]) async throws -> TokenResponse {

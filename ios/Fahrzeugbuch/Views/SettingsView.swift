@@ -11,7 +11,7 @@ struct SettingsView: View {
     @State private var confirmServerChange = false
 
     private var parsedURL: URL? {
-        guard let u = URL(string: url.trimmed), u.host != nil else { return nil }
+        guard let u = URL(string: url.trimmed), AuthManager.isSecure(u) else { return nil }
         return u
     }
 
@@ -30,7 +30,8 @@ struct SettingsView: View {
             } header: {
                 Text("Server")
             } footer: {
-                Text("Anmeldung über Keycloak (OIDC). Issuer und Client-ID liefert der Server.")
+                Text("Nur HTTPS. Anmeldung über Keycloak (OIDC); Issuer und Client-ID liefert der Server "
+                     + "und werden nach der ersten Anmeldung fest hinterlegt.")
             }
 
             if settings.auth.isLoggedIn {
@@ -65,7 +66,7 @@ struct SettingsView: View {
         .navigationTitle("Einstellungen")
         .toolbar {
             ToolbarItem(placement: .confirmationAction) {
-                Button("Sichern") {
+                Button(settings.isConfigured ? "Fertig" : "Weiter") {
                     let new = url.trimmed
                     if new != settings.serverURL && !settings.serverURL.isEmpty {
                         confirmServerChange = true

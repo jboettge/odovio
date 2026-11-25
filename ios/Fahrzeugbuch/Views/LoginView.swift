@@ -17,12 +17,14 @@ struct LoginView: View {
                     .foregroundStyle(.tint)
                 Text("Fahrzeugbuch").font(.largeTitle.bold())
                 Text(settings.serverURL).font(.footnote).foregroundStyle(.secondary)
+                Text("Anmeldung über dein j-mb.net-Konto. Danach funktioniert die App auch offline.")
+                    .font(.footnote).foregroundStyle(.secondary).multilineTextAlignment(.center)
                 Spacer()
                 Button {
                     Task { await login() }
                 } label: {
                     Group {
-                        if busy { ProgressView() } else { Text("Mit Keycloak anmelden") }
+                        if busy { ProgressView() } else { Text("Anmelden") }
                     }
                     .frame(maxWidth: .infinity)
                 }
@@ -34,6 +36,7 @@ struct LoginView: View {
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button { showSettings = true } label: { Image(systemName: "gearshape") }
+                        .accessibilityLabel("Einstellungen")
                 }
             }
             .sheet(isPresented: $showSettings) {
@@ -47,7 +50,7 @@ struct LoginView: View {
         busy = true
         defer { busy = false }
         do {
-            try await settings.auth.login(server: settings.baseURL, session: webAuth)
+            try await settings.login(session: webAuth)
         } catch let e as ASWebAuthenticationSessionError where e.code == .canceledLogin {
             // Benutzer hat abgebrochen
         } catch {

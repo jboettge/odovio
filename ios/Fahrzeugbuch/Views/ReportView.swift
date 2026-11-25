@@ -19,6 +19,11 @@ struct ReportView: View {
         NavigationStack {
             Form {
                 Section {
+                    Picker("Vorlage", selection: Binding(get: { Preset.matching(from, to) }, set: { p in
+                        if let r = p.range { from = r.0; to = r.1 }
+                    })) {
+                        ForEach(Preset.allCases) { Text($0.rawValue).tag($0) }
+                    }
                     DatePicker("Von", selection: $from, in: ...to, displayedComponents: .date)
                     DatePicker("Bis", selection: $to, in: from..., displayedComponents: .date)
                 } header: {
@@ -52,6 +57,41 @@ struct ReportView: View {
             }
             .quickLookPreview($previewURL)
             .errorAlert($error)
+        }
+    }
+
+    enum Preset: String, CaseIterable, Identifiable {
+        case thisYear = "Dieses Jahr", lastYear = "Vorjahr", last12 = "Letzte 12 Monate"
+        case lastMonth = "Letzter Monat", custom = "Benutzerdefiniert"
+        var id: Self { self }
+
+        var range: (Date, Date)? {
+            let cal = Calendar.current
+            let today = cal.startOfDay(for: Date())
+            let year = cal.component(.year, from: today)
+            switch self {
+            case .thisYear:
+                return (cal.date(from: DateComponents(year: year, month: 1, day: 1))!, today)
+            case .lastYear:
+                return (cal.date(from: DateComponents(year: year - 1, month: 1, day: 1))!,
+                        cal.date(from: DateComponents(year: year - 1, month: 12, day: 31))!)
+            case .last12:
+                return (cal.date(byAdding: .month, value: -12, to: today)!, today)
+            case .lastMonth:
+                let startThis = cal.date(from: cal.dateComponents([.year, .month], from: today))!
+                return (cal.date(byAdding: .month, value: -1, to: startThis)!,
+                        cal.date(byAdding: .day, value: -1, to: startThis)!)
+            case .custom:
+                return nil
+            }
+        }
+
+        static func matching(_ from: Date, _ to: Date) -> Preset {
+            let cal = Calendar.current
+            return allCases.first { p in
+                guard let r = p.range else { return false }
+                return cal.isDate(r.0, inSameDayAs: from) && cal.isDate(r.1, inSameDayAs: to)
+            } ?? .custom
         }
     }
 
