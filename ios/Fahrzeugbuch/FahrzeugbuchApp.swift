@@ -21,6 +21,19 @@ struct RootView: View {
     @Environment(AppSettings.self) private var settings
 
     var body: some View {
+        #if DEBUG
+        if Demo.isActive {
+            DemoScreen()
+        } else {
+            content
+        }
+        #else
+        content
+        #endif
+    }
+
+    @ViewBuilder
+    private var content: some View {
         if !settings.isConfigured {
             NavigationStack { SettingsView() }
         } else if !settings.auth.isLoggedIn {

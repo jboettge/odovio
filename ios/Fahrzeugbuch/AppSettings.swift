@@ -31,7 +31,21 @@ final class AppSettings {
             Task { @MainActor in await self?.store?.sync() }
         }
         monitor.start(queue: DispatchQueue(label: "fahrzeugbuch.network"))
+        #if DEBUG
+        if Demo.isActive { Demo.setUp(self) }
+        #endif
     }
+
+    #if DEBUG
+    func demoTenants(_ list: [TenantInfo]) {
+        tenants = list
+        tenantsLoaded = true
+        let s = TenantStore(tenant: list[0], api: { APIClient(baseURL: URL(string: "http://localhost")!) { _ in
+            throw AuthError.notLoggedIn } })
+        Demo.seed(s)
+        store = s
+    }
+    #endif
 
     var isConfigured: Bool { URL(string: serverURL)?.host != nil }
 
@@ -72,6 +86,9 @@ final class AppSettings {
             self?.api ?? APIClient(baseURL: URL(string: "http://localhost")!) { _ in throw AuthError.notLoggedIn }
         }
         store = TenantStore(tenant: t, api: provider)
+        #if DEBUG
+        if Demo.isActive { Demo.seed(store!); return }
+        #endif
         Task { await store?.sync() }
     }
 

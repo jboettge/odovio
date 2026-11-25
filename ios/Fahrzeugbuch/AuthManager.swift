@@ -138,6 +138,13 @@ final class AuthManager {
         isLoggedIn = false
     }
 
+    #if DEBUG
+    func demoLogin(name: String) {
+        userName = name
+        isLoggedIn = true
+    }
+    #endif
+
     // MARK: Intern
 
     private func refresh(server: URL) async throws -> String {

@@ -144,6 +144,9 @@ final class TenantStore {
     // MARK: Sync
 
     func sync() async {
+        #if DEBUG
+        if Demo.isActive { return }
+        #endif
         if isSyncing { rerunRequested = true; return }
         isSyncing = true
         defer { isSyncing = false }
@@ -240,6 +243,20 @@ final class TenantStore {
         default: break
         }
     }
+
+    #if DEBUG
+    func demoSeed(vehicles v: [Vehicle], odometer o: [OdometerReading], fuel f: [FuelEntry],
+                  maintenance m: [Maintenance], items i: [MaintenanceItem], pending: [FuelEntry]) {
+        vehicles = Dictionary(uniqueKeysWithValues: v.map { ($0.id, $0) })
+        odometer = Dictionary(uniqueKeysWithValues: o.map { ($0.id, $0) })
+        fuel = Dictionary(uniqueKeysWithValues: f.map { ($0.id, $0) })
+        maintenance = Dictionary(uniqueKeysWithValues: m.map { ($0.id, $0) })
+        items = Dictionary(uniqueKeysWithValues: i.map { ($0.id, $0) })
+        outbox = pending.map { PendingOp(entity: FuelEntry.entityName, entityId: $0.id, action: "upsert",
+                                         baseVersion: nil, data: nil, clientTs: "") }
+        lastSync = Date().addingTimeInterval(-600)
+    }
+    #endif
 
     // MARK: Persistenz
 

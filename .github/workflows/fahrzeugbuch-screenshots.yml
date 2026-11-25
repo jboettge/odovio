@@ -1,0 +1,69 @@
+name: fahrzeugbuch-screenshots
+on:
+  workflow_dispatch:
+  push:
+    paths: ["fahrzeugbuch/ios/**", ".github/workflows/fahrzeugbuch-screenshots.yml"]
+
+permissions:
+  contents: read
+
+jobs:
+  screenshots:
+    runs-on: macos-15
+    defaults:
+      run:
+        working-directory: fahrzeugbuch/ios
+    steps:
+      - uses: actions/checkout@v4
+      - run: brew install xcodegen
+      - run: xcodegen generate
+      - name: Build (Debug, Simulator)
+        run: |
+          xcodebuild -project Fahrzeugbuch.xcodeproj -target Fahrzeugbuch -sdk iphonesimulator \
+            -configuration Debug CODE_SIGNING_ALLOWED=NO build | tail -5
+          exit ${PIPESTATUS[0]}
+      - name: Simulator starten
+        run: |
+          UDID=$(xcrun simctl list devices available -j | python3 -c '
+          import json, sys
+          devs = [d for rt, ds in json.load(sys.stdin)["devices"].items() if "iOS" in rt for d in ds]
+          pick = next((d for d in devs if d["name"] == "iPhone 16 Pro"), None) or next(d for d in devs if d["name"].startswith("iPhone"))
+          print(pick["udid"])')
+          echo "UDID=$UDID" >> $GITHUB_ENV
+          xcrun simctl boot "$UDID"
+          xcrun simctl bootstatus "$UDID" -b
+          xcrun simctl status_bar "$UDID" override --time 9:41 --batteryState charged --batteryLevel 100 \
+            --cellularMode active --cellularBars 4 --wifiBars 3
+          xcrun simctl install "$UDID" build/Debug-iphonesimulator/Fahrzeugbuch.app
+      - name: Screenshots
+        run: |
+          mkdir -p shots
+          shoot() {  # $1 = Screen, $2 = Dateiname
+            xcrun simctl launch --terminate-running-process "$UDID" net.jmb.fahrzeugbuch \
+              -demo -screen "$1" -AppleLanguages "(de-CH)" -AppleLocale de_CH >/dev/null
+            sleep 4
+            xcrun simctl io "$UDID" screenshot --type=png "shots/$2.png" >/dev/null
+          }
+          for s in list overview fuel maintenance maintenance-detail odometer fuel-form maintenance-form report settings login; do
+            shoot "$s" "$s"
+          done
+          xcrun simctl ui "$UDID" appearance dark
+          for s in list overview maintenance-detail; do shoot "$s" "dark-$s"; done
+          ls -la shots
+      - name: Kontaktbogen
+        run: |
+          pip3 install --quiet --break-system-packages pillow
+          python3 - <<'PY'
+          from PIL import Image
+          import glob, os
+          files = sorted(glob.glob("shots/*.png"))
+          imgs = [Image.open(f).convert("RGB") for f in files]
+          w = 390; h = int(imgs[0].height * w / imgs[0].width)
+          for f, im in zip(files, imgs):
+              im.resize((w, h)).save(f.replace(".png", ".jpg").replace("shots/", "shots/small-"), quality=80)
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fahrzeugbuch-screenshots
+          path: fahrzeugbuch/ios/shots/
+          retention-days: 14

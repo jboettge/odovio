@@ -12,8 +12,13 @@ struct VehicleDetailView: View {
         var id: Self { self }
     }
 
-    @State private var pane: Pane = .overview
+    @State private var pane: Pane
     @State private var showReport = false
+
+    init(vehicle: Vehicle, pane: Pane = .overview) {
+        self.vehicle = vehicle
+        _pane = State(initialValue: pane)
+    }
 
     var body: some View {
         VStack(spacing: 0) {
