@@ -31,7 +31,7 @@ struct ReportView: View {
                 } footer: {
                     if !store.outbox.isEmpty {
                         Text("\(store.outbox.count) Änderung(en) noch nicht synchronisiert – sie fehlen im PDF.")
-                            .foregroundStyle(.orange)
+                            .foregroundStyle(Color.warningText)
                     }
                 }
                 Section {
@@ -39,18 +39,21 @@ struct ReportView: View {
                         Task { await generate() }
                     } label: {
                         HStack {
-                            Label("PDF erstellen", systemImage: "doc.badge.arrow.up")
+                            Label("Fahrzeug-PDF erstellen", systemImage: "doc.badge.arrow.up")
                             if loading { Spacer(); ProgressView() }
                         }
                     }
-                    .disabled(loading)
+                    .disabled(loading || AppMode.isDemo)
                     if let fileURL {
                         Button { previewURL = fileURL } label: { Label("Vorschau", systemImage: "eye") }
                         ShareLink(item: fileURL) { Label("Teilen / Sichern", systemImage: "square.and.arrow.up") }
                     }
+                } footer: {
+                    Text("Tankvorgänge, Wartungen, Kilometerstände und Kosten des Fahrzeugs mit Änderungsprotokoll. "
+                         + "Das Fahrtenbuch exportierst du im Bereich Fahrten.")
                 }
             }
-            .navigationTitle("PDF-Export")
+            .navigationTitle("Fahrzeug-PDF")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Schliessen") { dismiss() } }
@@ -105,15 +108,12 @@ struct ReportView: View {
                 "api/t/\(store.tenant.slug)/vehicles/\(vehicle.id)/report.pdf",
                 query: [URLQueryItem(name: "from", value: f.string(from: from)),
                         URLQueryItem(name: "to", value: f.string(from: to))])
-            let name = "Fahrzeugbuch_\(vehicle.name)_\(f.string(from: from))_\(f.string(from: to)).pdf"
-                .replacingOccurrences(of: "/", with: "-")
-                .replacingOccurrences(of: " ", with: "_")
-            let url = FileManager.default.temporaryDirectory.appending(path: name)
-            try data.write(to: url, options: .atomic)
+            let url = try ExportFile.write(
+                data, name: "Fahrzeugbuch_\(vehicle.name)_\(f.string(from: from))_\(f.string(from: to)).pdf")
             fileURL = url
             previewURL = url
         } catch {
-            self.error = "PDF nur online verfügbar: \(error.localizedDescription)"
+            self.error = "Fahrzeug-PDF nicht erstellt: \(error.userMessage)"
         }
     }
 }

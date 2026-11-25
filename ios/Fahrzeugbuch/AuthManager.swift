@@ -29,13 +29,19 @@ enum AuthError: LocalizedError {
     case sessionExpired
     case callback(String)
     case server(String)
+    /// Der Server meldet einen anderen Anmeldeserver als beim ersten Login (Pin). Ausweg:
+    /// `AuthManager.resetIssuerPin()` („Anmeldeserver zurücksetzen“) und neu anmelden.
+    case issuerChanged(String)
 
     var errorDescription: String? {
         switch self {
         case .notLoggedIn: "Nicht angemeldet."
         case .sessionExpired: "Sitzung abgelaufen – bitte neu anmelden."
         case .callback(let m): "Anmeldung fehlgeschlagen: \(m)"
-        case .server(let m): "Keycloak-Fehler: \(m)"
+        case .server(let m): "Anmeldeserver-Fehler: \(m)"
+        case .issuerChanged(let issuer):
+            "Der Anmeldeserver hat sich geändert (\(issuer)). Wenn das beabsichtigt ist: "
+                + "„Anmeldeserver zurücksetzen“ wählen und neu anmelden."
         }
     }
 }
@@ -135,9 +141,19 @@ final class AuthManager {
             ])
         }
         clearSession()
+        resetIssuerPin()
+    }
+
+    /// Issuer-Pin lösen (z. B. „Anmeldeserver zurücksetzen“ im Login nach einem Realm-/Serverwechsel).
+    /// Danach akzeptiert die nächste Anmeldung den Issuer, den der Server meldet.
+    func resetIssuerPin() {
         UserDefaults.standard.removeObject(forKey: Self.pinnedIssuerKey)
         UserDefaults.standard.removeObject(forKey: Self.pinnedClientKey)
+        cache = nil
     }
+
+    /// Ein Issuer ist gepinnt (für den Hinweis „Anmeldeserver zurücksetzen“).
+    var hasPinnedIssuer: Bool { UserDefaults.standard.string(forKey: Self.pinnedIssuerKey) != nil }
 
     func clearSession() {
         accessToken = nil
@@ -193,7 +209,7 @@ final class AuthManager {
     private func loadConfig(_ server: URL) async throws -> (AuthConfig, OIDCDiscovery) {
         if let c = cache, c.server == server { return (c.config, c.discovery) }
         guard Self.isSecure(server) else { throw AuthError.server("Server muss per HTTPS erreichbar sein") }
-        let (cfgData, cfgResp) = try await URLSession.shared.data(from: server.appending(path: "auth/config"))
+        let (cfgData, cfgResp) = try await APIClient.session.data(from: server.appending(path: "auth/config"))
         guard (cfgResp as? HTTPURLResponse)?.statusCode == 200 else {
             throw AuthError.server("Server liefert keine OIDC-Konfiguration (/auth/config)")
         }
@@ -204,9 +220,9 @@ final class AuthManager {
         let defaults = UserDefaults.standard
         if let pinned = defaults.string(forKey: Self.pinnedIssuerKey),
            pinned != cfg.issuer || defaults.string(forKey: Self.pinnedClientKey) != cfg.clientId {
-            throw AuthError.server("Anmeldeserver hat sich geändert (\(cfg.issuer)). Bitte abmelden und neu anmelden.")
+            throw AuthError.issuerChanged(cfg.issuer)
         }
-        let (discData, _) = try await URLSession.shared.data(
+        let (discData, _) = try await APIClient.session.data(
             from: issuer.appending(path: ".well-known/openid-configuration"))
         let disc = try Self.decoder.decode(OIDCDiscovery.self, from: discData)
         let endpoints = [disc.authorizationEndpoint, disc.tokenEndpoint] + [disc.revocationEndpoint].compactMap { $0 }
@@ -238,7 +254,7 @@ final class AuthManager {
         req.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
         req.httpBody = form.map { "\($0.key)=\(Self.formEncode($0.value))" }
             .joined(separator: "&").data(using: .utf8)
-        let (data, resp) = try await URLSession.shared.data(for: req)
+        let (data, resp) = try await APIClient.session.data(for: req)
         let status = (resp as? HTTPURLResponse)?.statusCode ?? 0
         guard (200..<300).contains(status) else {
             let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]

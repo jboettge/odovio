@@ -11,9 +11,11 @@ import UIKit
 /// Mandantenwechsel erneut. Beim Abmelden `resetLocalData()` aufrufen.
 ///
 /// Datenschutz: GPS-Rohdaten bleiben auf dem Gerät (`TrackStore`, 30 Tage nach Bestätigung);
-/// der Server erhält Start/Ziel als Ortsbezeichnung (Reverse-Geocoding mit auf ~50 m gerundeten
+/// der Server erhält Start/Ziel als Ortsbezeichnung (Reverse-Geocoding per POST mit auf ~50 m gerundeten
 /// Koordinaten auf dem eigenen Server), die Distanzen und den SHA-256 des Tracks. Für die Strassendistanz
-/// geht der reduzierte Track an den eigenen Server (`/api/geo/match`, dort nicht gespeichert).
+/// geht der reduzierte Track an den eigenen Server (`/api/geo/match`, dort nicht gespeichert) – ohne Punkte
+/// im Wohnort-Radius und ohne die ersten/letzten 200 m. Start/Ziel im Wohnort-Radius heissen „Wohnort“
+/// (keine Adresse); solange kein Wohnort erfasst ist, nur die Gemeinde (`needsHomePlace`).
 /// Das LLM erhält nie Koordinaten. Privatmodus: kein Track, keine Adressen, keine Orte, kein LLM –
 /// nur km, Zeit und optional die Gemeinde.
 @MainActor
@@ -31,13 +33,19 @@ final class TripCoordinator {
     private(set) var recordingSource: String?
     /// Fahrt gestoppt, Entwurf wird gerade erstellt (Geodienste, Vorschlag)
     private(set) var isFinishing = false
+    /// Manuelle Fahrt steht seit 10 min still → UI zeigt „Fahrt beenden?“ (zusätzlich Mitteilung)
+    private(set) var stopSuggested = false
 
-    /// Automatische Fahrterkennung (Default aus)
+    /// Automatische Fahrterkennung (Default aus). Einschalten fragt fehlende Berechtigungen selbst an
+    /// (Standort „Beim Verwenden“ → „Immer“, Bewegung & Fitness, Mitteilungen).
     var autoDetectEnabled: Bool {
         didSet {
             guard oldValue != autoDetectEnabled else { return }
             UserDefaults.standard.set(autoDetectEnabled, forKey: Keys.autoDetect)
             refreshDetector()
+            if autoDetectEnabled && configured {
+                Task { await self.ensureAutomationPermissions() }
+            }
         }
     }
 
@@ -68,6 +76,8 @@ final class TripCoordinator {
     static let minAutoDuration: TimeInterval = 90
     /// Laufende Aufzeichnung, die älter ist, wird nach einem Neustart abgeschlossen statt fortgesetzt
     static let maxResumeAge: TimeInterval = 12 * 3600
+    /// Begründung für automatisch erfasste Fahrten in bereits abgeschlossenen Monaten (Server verlangt ≥ 10 Zeichen)
+    static let lateEntryReason = "Nachtrag nach Monatsabschluss (automatisch aufgezeichnet)"
 
     @ObservationIgnored private weak var settings: AppSettings?
     @ObservationIgnored private let recorder = TripRecorder()
@@ -78,6 +88,8 @@ final class TripCoordinator {
     @ObservationIgnored private var active: TrackStore.ActiveRecording?
     @ObservationIgnored private var recordingStore: TenantStore?
     @ObservationIgnored private var lastCheckpoint = Date.distantPast
+    /// Anzahl Punkte, die bereits als Segment gesichert sind (anhängendes Log)
+    @ObservationIgnored private var checkpointedPoints = 0
     @ObservationIgnored private var configured = false
     @ObservationIgnored private var lastHousekeeping: (slug: String, at: Date)?
     @ObservationIgnored private var isSuggesting = false
@@ -95,6 +107,9 @@ final class TripCoordinator {
         detector.onStopDetected = { [weak self] in
             Task { await self?.autoStop() }
         }
+        detector.onIdleDetected = { [weak self] in
+            Task { await self?.handleIdle() }
+        }
     }
 
     // MARK: Öffentliche API
@@ -111,9 +126,11 @@ final class TripCoordinator {
             tracks.deleteAll()   // keine Rohdaten ohne angemeldeten Benutzer
         }
         configured = true
+        TripNotifications.shared.register()
         resumeIfNeeded()
         housekeeping(force: true)
         refreshDetector()
+        refreshReminders()
     }
 
     func start(vehicle: Vehicle, privateMode: Bool) async {
@@ -137,6 +154,8 @@ final class TripCoordinator {
         recordingPrivate = false
         recordingSource = nil
         liveDistanceKm = 0
+        stopSuggested = false
+        TripNotifications.shared.clearIdle()
         isFinishing = true
         beginBackgroundWork()
         let trip = await finalize(a, track: track)
@@ -168,12 +187,96 @@ final class TripCoordinator {
                                            allowLLM: llmBudget > 0) else { continue }
             if s.source == "llm" { llmBudget -= 1 }
             guard var current = store.trip(id: trip.id), !current.deleted, current.status == "draft" else { continue }
-            apply(s, to: &current)
+            RuleEngine.apply(s, to: &current)
             store.save(current)
         }
+        refreshReminders()
     }
 
-    /// Standort (zuerst „Beim Verwenden“, dann „Immer“), Bewegung & Fitness, Kalender.
+    // MARK: Berechtigungen (einzeln, mit Status – U8)
+
+    /// Aktueller Stand aller Berechtigungen (für Einrichtung/Einstellungen).
+    func permissionStatus() async -> PermissionStatus {
+        await PermissionStatus.current(location: authorizer.status)
+    }
+
+    /// Standort „Beim Verwenden der App“ (nur wenn noch nicht entschieden).
+    @discardableResult
+    func requestLocationWhenInUse() async -> PermissionStatus {
+        _ = await authorizer.requestWhenInUse()
+        refreshDetector()
+        return await permissionStatus()
+    }
+
+    /// Standort „Immer“ (iOS zeigt den Dialog höchstens einmal; danach nur über die Einstellungen).
+    @discardableResult
+    func requestLocationAlways() async -> PermissionStatus {
+        if authorizer.status == .notDetermined { _ = await authorizer.requestWhenInUse() }
+        UserDefaults.standard.set(true, forKey: Keys.askedAlways)
+        _ = await authorizer.requestAlways()
+        refreshDetector()
+        return await permissionStatus()
+    }
+
+    /// Bewegung & Fitness (Fahrterkennung).
+    @discardableResult
+    func requestMotion() async -> PermissionStatus {
+        await MotionPermission.request()
+        refreshDetector()
+        return await permissionStatus()
+    }
+
+    /// Kalender (Zweckvorschläge aus Terminen) – erst bei Nutzung anfragen.
+    @discardableResult
+    func requestCalendar() async -> PermissionStatus {
+        await calendarMatcher.requestAccess()
+        return await permissionStatus()
+    }
+
+    /// Mitteilungen (Fahrt beenden?, erkannte Fahrten, Wochenerinnerung, Fälligkeiten).
+    @discardableResult
+    func requestNotifications() async -> PermissionStatus {
+        await NotificationPermission.request()
+        refreshReminders()
+        return await permissionStatus()
+    }
+
+    /// Kamera (Scan von Zapfsäule/Quittung/Tacho).
+    @discardableResult
+    func requestCamera() async -> PermissionStatus {
+        _ = await CameraPermission.request()
+        return await permissionStatus()
+    }
+
+    /// Beim Einschalten der Automatik: fehlende Berechtigungen der Reihe nach anfragen.
+    private func ensureAutomationPermissions() async {
+        #if DEBUG
+        if Demo.isActive { return }
+        #endif
+        var status = authorizer.status
+        if status == .notDetermined { status = await authorizer.requestWhenInUse() }
+        if status == .authorizedWhenInUse && !UserDefaults.standard.bool(forKey: Keys.askedAlways) {
+            UserDefaults.standard.set(true, forKey: Keys.askedAlways)
+            status = await authorizer.requestAlways()
+        }
+        await MotionPermission.request()
+        await NotificationPermission.request()
+        switch status {
+        case .authorizedAlways:
+            if !MotionPermission.isAuthorized {
+                lastError = "Für die automatische Erkennung „Bewegung & Fitness“ erlauben (Einstellungen › Fahrzeugbuch)."
+            }
+        case .denied, .restricted:
+            lastError = "Standortzugriff ist nicht erlaubt – Einstellungen › Fahrzeugbuch › Standort."
+        default:
+            lastError = "Für die automatische Erkennung „Standort: Immer“ erlauben (Einstellungen › Fahrzeugbuch › Standort)."
+        }
+        refreshDetector()
+        refreshReminders()
+    }
+
+    /// Standort (zuerst „Beim Verwenden“, dann „Immer“), Bewegung & Fitness, Mitteilungen.
+    /// Der Kalender wird erst bei Nutzung angefragt (`requestCalendar()`).
     func requestPermissions() async {
         var status = authorizer.status
         if status == .notDetermined {
@@ -184,7 +287,7 @@ final class TripCoordinator {
             status = await authorizer.requestAlways()
         }
         await MotionPermission.request()
-        await calendarMatcher.requestAccess()
+        await NotificationPermission.request()
         switch status {
         case .denied, .restricted:
             lastError = "Standortzugriff ist nicht erlaubt – Einstellungen › Fahrzeugbuch › Standort."
@@ -196,6 +299,56 @@ final class TripCoordinator {
             break
         }
         refreshDetector()
+        refreshReminders()
+    }
+
+    // MARK: Mitteilungen, Hinweise
+
+    /// Wöchentliche Erinnerung an offene Bestätigungen neu planen (nach Review/Sync aufrufen).
+    func refreshReminders() {
+        #if DEBUG
+        if Demo.isActive { return }
+        #endif
+        guard let store = settings?.store else { return }
+        let open = store.reviewCount
+        let slug = store.tenant.slug
+        Task { await TripNotifications.shared.refreshWeeklyReminder(openCount: open, tenant: slug) }
+    }
+
+    /// Aktion „Geschäftlich“/„Privat“ aus der Mitteilung einer erkannten Fahrt: bestätigt mit der Kategorie
+    /// (Zweck/Kunde aus dem Vorschlag, falls er dieselbe Kategorie hat); sonst Review öffnen.
+    func classifyFromNotification(tripId: String, tenant: String?, as category: TripCategory) async {
+        guard let store = await currentStore(), store.canWrite,
+              tenant == nil || store.tenant.slug == tenant,
+              let trip = store.trip(id: tripId), !trip.deleted, !trip.isLocked else {
+            AppRouter.shared.pending = .review(vehicleId: nil)
+            return
+        }
+        var purpose: String?
+        var customerId: String?
+        if trip.suggestionCategory == category.rawValue {
+            purpose = trip.suggestionPurpose
+            customerId = trip.suggestionCustomerId
+        }
+        let reason = store.requiresReason(for: trip) ? "Bestätigt über Mitteilung (Nachtrag nach Monatsabschluss)" : nil
+        store.confirm(trip, as: category, purpose: purpose, customerId: customerId, reason: reason)
+        store.flush()
+        refreshReminders()
+    }
+
+    /// Kein Wohnort erfasst → Bezeichnungen nur als Gemeinde; UI fordert zur Erfassung des Wohnorts auf.
+    var needsHomePlace: Bool { settings?.store?.needsHomePlace ?? false }
+
+    /// Tachostand abfragen (letzte Fahrt des Fahrzeugs nur mit geschätzten km).
+    func odometerPromptNeeded(vehicleId: String) -> Bool {
+        settings?.store?.odometerPromptNeeded(vehicleId: vehicleId) ?? false
+    }
+
+    private func handleIdle() async {
+        guard isRecording, recordingSource != "auto", !stopSuggested else { return }
+        stopSuggested = true
+        let name = recordingVehicleId.flatMap { settings?.store?.vehicle(id: $0)?.name }
+        await TripNotifications.shared.notifyIdle(vehicleName: name)
     }
 
     /// Häufige Endpunkte ohne Ort (≥ 3 Besuche, 150 m).
@@ -238,6 +391,8 @@ final class TripCoordinator {
         recordingPrivate = false
         recordingSource = nil
         liveDistanceKm = 0
+        stopSuggested = false
+        checkpointedPoints = 0
         tracks.deleteAll()
         lastHousekeeping = nil
         refreshDetector()
@@ -265,7 +420,7 @@ final class TripCoordinator {
             return lastError ?? "Fahrt beendet – zu kurz, nichts gespeichert."
         }
         let km = trip.distanceGps.map { $0.formatted(.number.precision(.fractionLength(1))) } ?? "0"
-        return "Fahrt beendet (\(km) km). Bitte im Fahrtenbuch prüfen und bestätigen."
+        return "Fahrt beendet (ca. \(km) km). Bitte im Fahrtenbuch prüfen, Tachostand eintragen und bestätigen."
     }
 
     #if DEBUG
@@ -316,7 +471,10 @@ final class TripCoordinator {
                                            points: [], first: nil, last: nil, finished: nil)
         active = a
         recordingStore = store
+        tracks.clearActive()   // alte Segmente entfernen
         tracks.saveActive(a)
+        checkpointedPoints = 0
+        stopSuggested = false
         lastCheckpoint = now
         isRecording = true
         recordingVehicleId = vehicle.id
@@ -331,10 +489,15 @@ final class TripCoordinator {
         guard isRecording else { return }
         liveDistanceKm = (recorder.distanceMeters / 10).rounded() / 100
         detector.noteLocation(location)
+        if stopSuggested && location.speed >= 3 {
+            stopSuggested = false   // fährt wieder
+            TripNotifications.shared.clearIdle()
+        }
         checkpoint()
     }
 
     /// Zwischenstand sichern (alle 30 s), damit ein Beenden der App nichts verliert.
+    /// Nur neue Punkte werden als Segment angehängt (kein Neuschreiben des ganzen Tracks).
     private func checkpoint() {
         guard var a = active else { return }
         let now = Date()
@@ -342,7 +505,12 @@ final class TripCoordinator {
         lastCheckpoint = now
         a.distanceMeters = recorder.distanceMeters
         if !a.privateMode {
-            a.points = recorder.points
+            let points = recorder.points
+            if points.count > checkpointedPoints {
+                tracks.appendActivePoints(Array(points[checkpointedPoints...]))
+                checkpointedPoints = points.count
+            }
+            a.points = []
             a.first = recorder.firstPoint
             a.last = recorder.lastPoint
         }
@@ -381,7 +549,10 @@ final class TripCoordinator {
             return
         }
         recorder.resume(a)
-        active = a
+        checkpointedPoints = a.privateMode ? 0 : a.points.count
+        var resumed = a
+        resumed.points = []
+        active = resumed
         lastCheckpoint = now
         isRecording = true
         recordingVehicleId = a.vehicleId
@@ -455,21 +626,40 @@ final class TripCoordinator {
         trip.distanceGps = track.distanceKm
         trip.trackHash = track.hash
 
-        // Tacho bleibt massgebend: Vorschlag ab letztem bekannten Stand, Nutzer bestätigt/ändert
+        // Tacho bleibt massgebend: Vorschlag ab letztem bekannten Stand, als Schätzung gekennzeichnet (U3);
+        // Auto-Bestätigung greift dann nicht, der Abschluss verlangt den abgelesenen Stand.
         if let store, store.vehicle(id: a.vehicleId) != nil {
             let km = store.lastKnownKm(for: a.vehicleId)
             trip.kmStart = km
             trip.kmEnd = km + Int(track.distanceKm.rounded())
+            trip.kmEstimated = true
         }
 
+        let zones = GeoPrivacy.zones(places)
+        let homes = places.filter { $0.isHome && $0.hasCoordinate }
+        let hasHome = !(store?.needsHomePlace ?? true)
         if !a.privateMode {
-            if let s = track.start, let p = PlaceLearner.match(lat: s.lat, lon: s.lon, places: places) {
-                trip.startPlaceId = p.id
-                trip.startLabel = p.name
+            trip.startPlaceId = nil
+            if let s = track.start {
+                if let p = PlaceLearner.match(lat: s.lat, lon: s.lon, places: places) {
+                    trip.startPlaceId = p.id
+                    trip.startLabel = p.name
+                } else if GeoPrivacy.isProtected(s, zones: zones) {
+                    // Wohnort-Radius: nie eine Adresse, sondern der Ort selbst
+                    let home = PlaceLearner.match(lat: s.lat, lon: s.lon, places: homes, slack: GeoPrivacy.minHomeRadius)
+                    trip.startPlaceId = home?.id
+                    trip.startLabel = home?.name ?? GeoPrivacy.homeLabel
+                }
             }
-            if let e = track.end, let p = PlaceLearner.match(lat: e.lat, lon: e.lon, places: places) {
-                trip.endPlaceId = p.id
-                trip.endLabel = p.name
+            if let e = track.end {
+                if let p = PlaceLearner.match(lat: e.lat, lon: e.lon, places: places) {
+                    trip.endPlaceId = p.id
+                    trip.endLabel = p.name
+                } else if GeoPrivacy.isProtected(e, zones: zones) {
+                    let home = PlaceLearner.match(lat: e.lat, lon: e.lon, places: homes, slack: GeoPrivacy.minHomeRadius)
+                    trip.endPlaceId = home?.id
+                    trip.endLabel = home?.name ?? GeoPrivacy.homeLabel
+                }
             }
         }
 
@@ -486,30 +676,45 @@ final class TripCoordinator {
                 trip.endLabel = revEnd?.municipality
             }
         } else {
-            let points = track.points
+            // Wohnort-Radius und erste/letzte 200 m verlassen das Gerät nicht
+            let points = GeoPrivacy.trimmed(track.points, zones: zones)
             let startPoint = trip.startLabel == nil ? track.start : nil
             let endPoint = trip.endLabel == nil ? track.end : nil
+            // Ohne erfassten Wohnort: nur Gemeinde (Start könnte zu Hause sein)
+            let rounding: Double = hasHome ? 50 : 1000
             async let m = geo.match(points)
-            async let rs = geo.reverse(startPoint, roundingMeters: 50)
-            async let re = geo.reverse(endPoint, roundingMeters: 50)
+            async let rs = geo.reverse(startPoint, roundingMeters: rounding)
+            async let re = geo.reverse(endPoint, roundingMeters: rounding)
             let (match, revStart, revEnd) = await (m, rs, re)
             if let match { trip.distanceRoute = (match.distanceKm * 100).rounded() / 100 }
-            if let r = revStart { trip.startLabel = Self.label(r) }
-            if let r = revEnd { trip.endLabel = Self.label(r) }
+            if let r = revStart { trip.startLabel = Self.label(r, municipalityOnly: !hasHome) }
+            if let r = revEnd { trip.endLabel = Self.label(r, municipalityOnly: !hasHome) }
         }
 
+        var reason: String?
         if let store, store.isMonthClosed(vehicleId: a.vehicleId, month: TripTime.month(track.startAt)) {
             trip.note = "Nachtrag nach Monatsabschluss"
+            reason = Self.lateEntryReason
         }
 
         if let store, let s = await suggestion(for: trip, store: store, endPoint: track.end, allowLLM: true) {
-            apply(s, to: &trip)
+            RuleEngine.apply(s, to: &trip)
         }
 
         if let store, store.canWrite {
-            store.save(trip)
+            store.save(trip, reason: reason)
+            store.flush()   // vor dem Ende der Hintergrundzeit sicher auf die Platte
+            if store.isPersistenceBlocked {
+                // Mandantendatei gesperrt (Gerät gesperrt) → Fahrt zusätzlich als ausstehend ablegen,
+                // damit sie ein Beenden der App vor dem Entsperren übersteht
+                tracks.addPending(trip, tenant: a.tenant)
+            }
             tracks.save(track, tripId: trip.id, tenant: a.tenant, vehicleId: a.vehicleId,
                         confirmed: trip.status == "confirmed")
+            if a.source == "auto", let saved = store.trip(id: trip.id) {
+                await TripNotifications.shared.notifyDetected(saved, tenant: a.tenant, route: store.routeText(saved))
+            }
+            refreshReminders()
             return trip
         }
         if settings.auth.isLoggedIn && settings.tenants.contains(where: { $0.slug == a.tenant }) {
@@ -524,27 +729,9 @@ final class TripCoordinator {
         return nil
     }
 
-    private static func label(_ r: GeoClient.ReverseResult) -> String? {
-        let text = r.label?.nilIfEmpty ?? r.municipality?.nilIfEmpty
+    private static func label(_ r: GeoClient.ReverseResult, municipalityOnly: Bool = false) -> String? {
+        let text = municipalityOnly ? r.municipality?.nilIfEmpty : (r.label?.nilIfEmpty ?? r.municipality?.nilIfEmpty)
         return text.map { String($0.prefix(200)) }
-    }
-
-    private func apply(_ s: TripSuggestion, to trip: inout Trip) {
-        trip.suggestionCategory = s.category
-        trip.suggestionPurpose = s.purpose.map { String($0.prefix(300)) }
-        trip.suggestionCustomerId = s.customerId
-        trip.suggestionConfidence = (min(1, max(0, s.confidence)) * 100).rounded() / 100
-        trip.suggestionReason = String(s.reason.prefix(300))
-        trip.suggestionSource = s.source
-        if s.source == "rule" && s.autoConfirm {
-            // Regel mit Auto-Bestätigung (pro Regel aktivierbar, im Review sichtbar)
-            trip.category = s.category
-            trip.purpose = s.purpose
-            trip.customerId = s.customerId
-            trip.status = "confirmed"
-        } else {
-            trip.status = "suggested"
-        }
     }
 
     // MARK: Vorschläge
@@ -608,18 +795,8 @@ final class TripCoordinator {
             startPlaceName: cut(startPlace?.name), endPlaceName: cut(endPlace?.name),
             distanceKm: trip.distanceRoute ?? trip.distanceGps,
             weekday: TripTime.isoWeekday(facts.start), privateMode: false)
-        let recent = history
-            .filter { t in
-                t.id != trip.id && !t.deleted && !t.privateMode
-                    && (t.status == "confirmed" || t.status == "locked")
-                    && TripCategoryText.all.contains(t.category)
-            }
-            .sorted { (TripTime.parse($0.startAt) ?? .distantPast) > (TripTime.parse($1.startAt) ?? .distantPast) }
-            .prefix(20)
-            .map { t in
-                GeoClient.SuggestRequest.Recent(startLabel: cut(t.startLabel), endLabel: cut(t.endLabel),
-                                                category: t.category, purpose: cut(t.purpose))
-            }
+        // Nie Privatfahrten (Privatmodus oder Kategorie „privat“) als Kontext
+        let recent = GeoClient.SuggestRequest.recentContext(history: history, excluding: trip.id)
         let customerRefs = customers.prefix(200).map {
             GeoClient.SuggestRequest.CustomerRef(id: String($0.id.prefix(64)), name: String($0.name.prefix(120)))
         }
@@ -664,7 +841,7 @@ final class TripCoordinator {
         lastHousekeeping = (store.tenant.slug, now)
         if store.canWrite {
             for trip in tracks.takePending(tenant: store.tenant.slug) where store.trip(id: trip.id) == nil {
-                store.save(trip)
+                store.save(trip, reason: store.requiresReason(for: trip) ? Self.lateEntryReason : nil)
             }
         }
         tracks.purge(store: store, now: now)

@@ -166,7 +166,7 @@ struct ScannerView: View {
             if cameraDenied {
                 Section {
                     Label("Kein Zugriff auf die Kamera", systemImage: "camera.badge.ellipsis")
-                        .foregroundStyle(.orange)
+                        .foregroundStyle(Color.warningText)
                     Button("Einstellungen öffnen") {
                         if let url = URL(string: UIApplication.openSettingsURLString) {
                             UIApplication.shared.open(url)

@@ -14,9 +14,13 @@ struct OverviewView: View {
             if store.canWrite {
                 Section {
                     HStack(spacing: 10) {
-                        quickButton("Tanken", "fuelpump.fill", .green) { quick = .fuel(vehicle) }
-                        quickButton("km-Stand", "gauge.with.dots.needle.67percent", .blue) { quick = .odometer(vehicle) }
-                        quickButton("Wartung", "wrench.and.screwdriver.fill", .orange) { quick = .maintenance(vehicle) }
+                        quickButton("Tanken", "fuelpump.fill", .successText) { quick = .fuel(vehicle) }
+                        quickButton("Kilometerstand", "gauge.with.dots.needle.67percent", .infoText) {
+                            quick = .odometer(vehicle)
+                        }
+                        quickButton("Wartung", "wrench.and.screwdriver.fill", .warningText) {
+                            quick = .maintenance(vehicle)
+                        }
                     }
                     .listRowInsets(EdgeInsets())
                     .listRowBackground(Color.clear)
@@ -29,7 +33,7 @@ struct OverviewView: View {
                             TripReviewView(vehicle: vehicle)
                         } label: {
                             Label(TripOverviewText.review(reviewCount), systemImage: "checklist")
-                                .foregroundStyle(.orange)
+                                .foregroundStyle(Color.warningText)
                         }
                     }
                     if !gaps.isEmpty {
@@ -37,15 +41,22 @@ struct OverviewView: View {
                             GapListView(vehicle: vehicle)
                         } label: {
                             Label(TripOverviewText.gaps(gaps), systemImage: "exclamationmark.triangle.fill")
-                                .foregroundStyle(.red)
+                                .foregroundStyle(Color.dangerText)
                         }
                     }
                 }
             }
 
             Section("Kilometer") {
-                LabeledContent("Aktueller Stand", value: Fmt.km(s.currentKm))
+                LabeledContent("Aktueller Kilometerstand", value: Fmt.km(s.currentKm))
                 LabeledContent("Seit Erfassung", value: Fmt.km(s.drivenKm))
+                NavigationLink {
+                    OdometerListView(vehicle: vehicle)
+                        .navigationTitle("Kilometerstände")
+                        .navigationBarTitleDisplayMode(.inline)
+                } label: {
+                    Label("Alle Kilometerstände", systemImage: "list.bullet")
+                }
             }
 
             Section {
@@ -57,7 +68,7 @@ struct OverviewView: View {
                         consumptionChart(s.points, average: s.avgConsumption)
                         if let avg = s.avgConsumption {
                             Text("- - -  Durchschnitt \(Fmt.num(avg, 2)) l/100 km")
-                                .font(.caption2).foregroundStyle(.secondary)
+                                .font(.footnote).foregroundStyle(Color.neutralText)
                                 .padding(.bottom, 6)
                         }
                     }
@@ -76,11 +87,13 @@ struct OverviewView: View {
                         Label {
                             VStack(alignment: .leading) {
                                 Text(d.title)
-                                Text(d.dueText).font(.caption).foregroundStyle(.secondary)
+                                Text(d.overdue ? "Überfällig · \(d.dueText)" : d.dueText)
+                                    .font(.footnote)
+                                    .foregroundStyle(d.overdue ? Color.dangerText : Color.neutralText)
                             }
                         } icon: {
                             Image(systemName: d.overdue ? "exclamationmark.triangle.fill" : "clock")
-                                .foregroundStyle(d.overdue ? .red : .orange)
+                                .foregroundStyle(d.overdue ? Color.dangerText : Color.warningText)
                         }
                     }
                 }
@@ -101,8 +114,12 @@ struct OverviewView: View {
         Button(action: action) {
             VStack(spacing: 6) {
                 Image(systemName: icon).font(.title2)
-                Text(title).font(.caption.weight(.semibold))
+                Text(title)
+                    .font(.footnote.weight(.semibold))
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
             }
+            .padding(.vertical, 8)
             .frame(maxWidth: .infinity, minHeight: 64)
             .foregroundStyle(color)
             .background(color.opacity(0.12), in: RoundedRectangle(cornerRadius: 12))
@@ -145,6 +162,6 @@ enum TripOverviewText {
 
     static func gaps(_ gaps: [TripGap]) -> String {
         let km = gaps.reduce(0) { $0 + abs($1.km) }
-        return gaps.count == 1 ? "Lücke von \(Fmt.km(km)) in der km-Kette" : "\(gaps.count) Lücken · \(Fmt.km(km))"
+        return gaps.count == 1 ? "Lücke von \(Fmt.km(km)) in der Kilometerkette" : "\(gaps.count) Lücken · \(Fmt.km(km))"
     }
 }

@@ -94,6 +94,8 @@ struct MaterialArticleFormView: View {
     @State private var vehicleId: String?
     @State private var note = ""
     @State private var didPrefill = false
+    @State private var initial = ""
+    @State private var askDiscard = false
 
     init(article: MaterialArticle?) {
         self.article = article
@@ -105,6 +107,10 @@ struct MaterialArticleFormView: View {
     }
 
     private var cancelTitle: String { store.canWrite ? "Abbrechen" : "Fertig" }
+
+    private var snapshot: String { FormSnapshot.make([name, partNumber, unit, unitPrice, category, vehicleId ?? "", note]) }
+
+    private var hasChanges: Bool { store.canWrite && didPrefill && snapshot != initial }
 
     // MARK: Validierung (Grenzen wie Server)
 
@@ -175,7 +181,7 @@ struct MaterialArticleFormView: View {
                     Text("Artikel")
                 } footer: {
                     if let hint = duplicateHint {
-                        Text(hint).foregroundStyle(.orange)
+                        Text(hint).foregroundStyle(Color.warningText)
                     }
                 }
                 .disabled(!store.canWrite)
@@ -206,7 +212,7 @@ struct MaterialArticleFormView: View {
 
                 if let message = validationMessage {
                     Section {
-                        Text(message).foregroundStyle(.red)
+                        Text(message).foregroundStyle(Color.dangerText)
                     }
                 }
 
@@ -215,7 +221,7 @@ struct MaterialArticleFormView: View {
                         LabeledContent("Verwendet in", value: usageText)
                         if store.isPending(a.id) {
                             Label("Noch nicht synchronisiert", systemImage: "icloud.and.arrow.up")
-                                .foregroundStyle(.orange)
+                                .foregroundStyle(Color.warningText)
                         }
                     }
                     HistorySection(entity: MaterialArticle.entityName, id: a.id)
@@ -225,7 +231,13 @@ struct MaterialArticleFormView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button(cancelTitle) { dismiss() }
+                    Button(cancelTitle) {
+                        if hasChanges {
+                            askDiscard = true
+                        } else {
+                            dismiss()
+                        }
+                    }
                 }
                 if store.canWrite {
                     ToolbarItem(placement: .confirmationAction) {
@@ -237,6 +249,7 @@ struct MaterialArticleFormView: View {
                     }
                 }
             }
+            .discardGuard(hasChanges: hasChanges, isAsking: $askDiscard)
             .onAppear(perform: prefill)
         }
     }
@@ -276,6 +289,7 @@ struct MaterialArticleFormView: View {
     private func prefill() {
         guard !didPrefill else { return }
         didPrefill = true
+        defer { initial = snapshot }
         guard let a = article else { return }
         name = a.name
         partNumber = a.partNumber ?? ""

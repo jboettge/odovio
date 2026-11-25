@@ -35,8 +35,10 @@ struct MotionSample {
 ///
 /// - Start: CoreMotion „automotive“ (Konfidenz ≥ mittel) seit ≥ 60 s. Bei Rotlicht meldet iOS oft
 ///   automotive + stationary gleichzeitig → das zählt weiter als Fahrt; nur Gehen/Laufen/Velo setzt zurück.
-/// - Stopp (nur automatisch gestartete Fahrten): > 3 min kein automotive und keine Bewegung im GPS
+/// - Stopp (automatisch gestartete Fahrten): > 3 min kein automotive und keine Bewegung im GPS
 ///   (stillstehend/gehend), bzw. > 10 min ohne GPS-Bewegung.
+/// - Manuell gestartete Fahrten (Knopf/Kurzbefehl): nach 10 min Stillstand nur ein Vorschlag
+///   (`onIdleDetected` → Mitteilung „Fahrt beenden?“), kein automatisches Beenden.
 /// - Weck-Trigger, wenn die App suspendiert oder beendet ist: wesentliche Standortänderungen,
 ///   `CLVisit`-Abfahrt und `CLMonitor`-Regionen (max. 20) um bekannte Orte. Danach wird die
 ///   Motion-Historie der letzten Minuten abgefragt; ist man im Auto, startet die Aufzeichnung sofort
@@ -53,6 +55,8 @@ final class TripDetector: NSObject, CLLocationManagerDelegate {
 
     var onStartDetected: (() -> Void)?
     var onStopDetected: (() -> Void)?
+    /// Manuelle Fahrt steht seit `stopWithoutMovement` still (einmal je Stillstand)
+    var onIdleDetected: (() -> Void)?
 
     private(set) var isEnabled = false
 
@@ -69,6 +73,9 @@ final class TripDetector: NSObject, CLLocationManagerDelegate {
     private var lastAutomotiveAt: Date?
     private var lastMovingAt: Date?
     private var watchingStop = false
+    /// Stopp-Erkennung beendet die Fahrt selbst (nur automatisch gestartete Fahrten)
+    private var stopsAutomatically = false
+    private var idleNotified = false
     private var watchStartedAt: Date?
     private var cooldownUntil = Date.distantPast
     private var lastKnownLocation: CLLocation?
@@ -108,21 +115,25 @@ final class TripDetector: NSObject, CLLocationManagerDelegate {
         Task { await self.syncRegions() }
     }
 
-    /// Aufzeichnung läuft; `auto == true` → Stopp-Erkennung aktiv.
+    /// Aufzeichnung läuft; `auto == true` → automatischer Stopp, sonst nur Stillstands-Vorschlag.
     func recordingStarted(auto: Bool) {
         automotiveSince = nil
-        watchingStop = auto
+        watchingStop = true
+        stopsAutomatically = auto
+        idleNotified = false
         let now = Date()
         watchStartedAt = now
         lastMovingAt = now
-        if auto {
-            startMotionUpdates()
-            ensureTicking()
+        if auto || CMMotionActivityManager.authorizationStatus() == .authorized {
+            startMotionUpdates()   // manuell: keine unvermittelte Abfrage „Bewegung & Fitness“
         }
+        ensureTicking()
     }
 
     func recordingEnded() {
         watchingStop = false
+        stopsAutomatically = false
+        idleNotified = false
         automotiveSince = nil
         cooldownUntil = Date().addingTimeInterval(Self.cooldown)
         if !isEnabled { stopMotionUpdates() }
@@ -131,7 +142,10 @@ final class TripDetector: NSObject, CLLocationManagerDelegate {
     /// GPS-Fix während der Aufzeichnung (Bewegung zählt als „fährt noch“).
     func noteLocation(_ location: CLLocation) {
         lastKnownLocation = location
-        if location.speed >= 3 { lastMovingAt = Date() }
+        if location.speed >= 3 {
+            lastMovingAt = Date()
+            idleNotified = false   // fährt wieder → nächster Stillstand meldet erneut
+        }
     }
 
     // MARK: Motion
@@ -173,11 +187,20 @@ final class TripDetector: NSObject, CLLocationManagerDelegate {
         let now = Date()
         if watchingStop {
             let lastActive = [lastAutomotiveAt, lastMovingAt, watchStartedAt].compactMap { $0 }.max() ?? now
-            let stillInCar = lastActivity?.automotive ?? false
             let idle = now.timeIntervalSince(lastActive)
+            guard stopsAutomatically else {
+                // Manuelle Fahrt: 10 min Stillstand (kein GPS-Fortschritt, kein „im Auto“) → Vorschlag
+                if idle > Self.stopWithoutMovement && !idleNotified {
+                    idleNotified = true
+                    onIdleDetected?()
+                }
+                return true
+            }
+            let stillInCar = lastActivity?.automotive ?? false
             let noMovement = now.timeIntervalSince(lastMovingAt ?? watchStartedAt ?? now)
             if (!stillInCar && idle > Self.stopAfter) || noMovement > Self.stopWithoutMovement {
                 watchingStop = false
+                stopsAutomatically = false
                 onStopDetected?()
                 return false
             }

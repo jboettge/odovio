@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// Review Karte für Karte (Kap. 7): Vorschlag prüfen, Kategorie wählen, bestätigen.
+/// Bestätigen Karte für Karte (Kap. 7): Vorschlag prüfen, Kategorie wählen, Kilometerstand ablesen, bestätigen.
 /// Ohne eigenen NavigationStack (wird gepusht oder in `ModalNavigation` gezeigt).
 @MainActor
 struct TripReviewView: View {
@@ -20,7 +20,17 @@ struct TripReviewView: View {
     @State private var ruleOffer: PurposeRule?
     @State private var offeredRules: Set<String> = []
     @State private var edit: EditTarget<Trip>?
-    @State private var suggesting = false
+    @State private var suggestState: SuggestState = .idle
+    /// Abgelesener Kilometerstand Ende (bei geschätzten Werten)
+    @State private var odometerText = ""
+    /// Geschäftlich/Aussendienst ausdrücklich ohne Zweck bestätigen
+    @State private var allowWithoutPurpose = false
+    /// Bestätigung in einem abgeschlossenen Monat → Begründung
+    @State private var reasonTarget: EditTarget<Trip>?
+
+    enum SuggestState: Equatable {
+        case idle, loading, notFound, applied
+    }
 
     init(vehicle: Vehicle) {
         self.vehicle = vehicle
@@ -60,6 +70,12 @@ struct TripReviewView: View {
             : (confirmedCount == 1 ? "1 Fahrt bestätigt." : "\(confirmedCount) Fahrten bestätigt.")
     }
 
+    private var needsPurpose: Bool {
+        (category == .business || category == .field) && purpose.trimmed.isEmpty && customerId == nil
+    }
+
+    private var odometerValue: Int? { odometerText.asInt }
+
     var body: some View {
         Group {
             if let t = current {
@@ -68,6 +84,9 @@ struct TripReviewView: View {
                         ProgressView(value: Double(index), total: Double(max(queue.count, 1)))
                             .accessibilityLabel("Fortschritt \(progressText)")
                         card(t)
+                        if t.kmEstimated && store.canWrite {
+                            odometerPrompt(t)
+                        }
                         classification(t)
                         actions(t)
                         if store.canWrite && commuteIds.count > 1 {
@@ -78,7 +97,7 @@ struct TripReviewView: View {
                                     .frame(maxWidth: .infinity)
                             }
                             .buttonStyle(.bordered)
-                            .tint(TripCategory.commute.color)
+                            .tint(Color.infoText)
                         }
                     }
                     .padding()
@@ -98,13 +117,23 @@ struct TripReviewView: View {
         .navigationTitle(titleText)
         .navigationBarTitleDisplayMode(.inline)
         .onAppear(perform: begin)
+        .onDisappear { coordinator.refreshReminders() }   // Erinnerung an offene Bestätigungen aktualisieren
         .sheet(item: $edit, onDismiss: refreshCurrent) { target in
             TripFormView(vehicle: vehicle, trip: target.value)
         }
         .confirmationDialog(bulkTitle + "?", isPresented: $confirmBulk, titleVisibility: .visible) {
             Button(bulkTitle) { confirmAllCommutes() }
         } message: {
-            Text("Die Fahrten werden als Arbeitsweg bestätigt (Zweck aus dem Vorschlag).")
+            Text("Die Fahrten werden als Arbeitsweg bestätigt (Zweck aus dem Vorschlag). Fahrten mit geschätztem "
+                 + "Kilometerstand bleiben zum Ablesen markiert.")
+        }
+        .sheet(item: $reasonTarget) { target in
+            ReasonSheet(title: "Korrektur begründen",
+                        message: "Diese Fahrt gehört zu einem abgeschlossenen Monat. Die Bestätigung wird mit "
+                            + "Begründung im Änderungsprotokoll vermerkt.",
+                        confirmTitle: "Bestätigen", destructive: false) { reason in
+                if let t = target.value { confirm(t, reason: reason) }
+            }
         }
         .alert("Regel vorschlagen?", isPresented: Binding(
             get: { ruleOffer != nil }, set: { if !$0 { ruleOffer = nil } }), presenting: ruleOffer) { rule in
@@ -122,54 +151,140 @@ struct TripReviewView: View {
             Text(dateLine(t))
                 .font(.subheadline.monospacedDigit())
                 .foregroundStyle(.secondary)
-            Text(store.routeText(t))
+            Text(store.routeLabel(t))
                 .font(.title3.weight(.semibold))
-            HStack(spacing: 8) {
-                Label(t.distanceKm.map { Fmt.kmD($0) } ?? "– km", systemImage: "road.lanes")
-                if let a = t.kmStart, let b = t.kmEnd {
-                    Text("\(Fmt.km(a)) → \(Fmt.km(b))").foregroundStyle(.secondary)
-                }
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 8) { kmFacts(t) }
+                VStack(alignment: .leading, spacing: 4) { kmFacts(t) }
             }
             .font(.subheadline)
-            HStack(spacing: 6) {
-                StatusTag(text: Trip.sourceLabel(t.source), color: .blue)
-                StatusTag(text: Trip.statusLabel(t.status), color: .secondary)
-                if t.privateMode { StatusTag(text: "Privatmodus", color: .gray, systemImage: "eye.slash") }
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 6) { tags(t) }
+                VStack(alignment: .leading, spacing: 4) { tags(t) }
             }
             Divider()
             if let s = t.suggestionCategory {
                 let cat = TripCategory.of(s)
                 VStack(alignment: .leading, spacing: 4) {
-                    Label("Vorschlag: \(cat.label.uppercased())", systemImage: cat.systemImage)
+                    Label("Vorschlag: \(cat.uiLabel.uppercased())", systemImage: cat.systemImage)
                         .font(.headline)
-                        .foregroundStyle(cat.color)
+                        .foregroundStyle(cat.textColor)
                     if let p = t.suggestionPurpose?.nilIfEmpty { Text("Zweck: \(p)") }
                     if let c = t.suggestionCustomerId {
                         Text("Kunde: \(store.customer(id: c)?.name ?? "Unbekannt")")
                     }
                     if let r = t.suggestionReason?.nilIfEmpty { Text("Grund: \(r)") }
-                    Text(TripSuggestionText.meta(t)).font(.caption).foregroundStyle(.secondary)
+                    Text(TripSuggestionText.meta(t)).font(.footnote).foregroundStyle(Color.neutralText)
                 }
                 .font(.subheadline)
                 .accessibilityElement(children: .combine)
             } else {
-                HStack {
-                    Text("Kein Vorschlag").foregroundStyle(.secondary)
-                    Spacer()
-                    if store.canWrite {
-                        Button {
-                            Task { await requestSuggestion(t) }
-                        } label: {
-                            if suggesting { ProgressView() } else { Text("Vorschlag holen") }
-                        }
-                        .disabled(suggesting)
-                    }
-                }
+                suggestionRequest(t)
             }
         }
         .padding()
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16))
+    }
+
+    @ViewBuilder
+    private func kmFacts(_ t: Trip) -> some View {
+        Label(KmText.distance(t), systemImage: "road.lanes")
+        if let range = KmText.range(t) {
+            Text(range).foregroundStyle(Color.neutralText)
+        }
+    }
+
+    @ViewBuilder
+    private func tags(_ t: Trip) -> some View {
+        StatusTag(text: Trip.sourceLabel(t.source), color: .blue)
+        StatusTag(text: Trip.statusLabel(t.status), color: .secondary)
+        if t.kmEstimated {
+            StatusTag(text: "km geschätzt", color: .orange, systemImage: "gauge.with.dots.needle.33percent")
+        }
+        if t.privateMode { StatusTag(text: "Privatmodus", color: .gray, systemImage: "eye.slash") }
+    }
+
+    /// „Vorschlag holen“ mit Rückmeldung (lädt / kein Vorschlag).
+    @ViewBuilder
+    private func suggestionRequest(_ t: Trip) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text("Kein Vorschlag").foregroundStyle(Color.neutralText)
+                Spacer()
+                if store.canWrite {
+                    Button {
+                        Task { await requestSuggestion(t) }
+                    } label: {
+                        if suggestState == .loading {
+                            HStack(spacing: 6) {
+                                ProgressView()
+                                Text("Sucht …")
+                            }
+                        } else {
+                            Text("Vorschlag holen")
+                        }
+                    }
+                    .disabled(suggestState == .loading || AppMode.isDemo)
+                }
+            }
+            if suggestState == .notFound {
+                Label("Kein passender Vorschlag gefunden (keine Regel, kein Termin, kein Muster – oder offline). "
+                      + "Bitte Kategorie selbst wählen.", systemImage: "info.circle")
+                    .font(.footnote)
+                    .foregroundStyle(Color.warningText)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    // MARK: Kilometerstand ablesen (U3)
+
+    private func odometerPrompt(_ t: Trip) -> some View {
+        let urgent = coordinator.odometerPromptNeeded(vehicleId: t.vehicleId)
+        let estimatedEnd = t.kmEnd
+        return VStack(alignment: .leading, spacing: 8) {
+            Label(urgent ? "Bitte jetzt den Kilometerstand ablesen" : "Kilometerstand geschätzt",
+                  systemImage: "gauge.with.dots.needle.33percent")
+                .font(.headline)
+                .foregroundStyle(Color.warningText)
+            Text("Der Kilometerstand wurde aus der GPS-Distanz geschätzt. Massgebend ist der Tacho – mit dem "
+                 + "abgelesenen Wert bleibt die Kilometerkette korrekt.")
+                .font(.footnote)
+                .foregroundStyle(Color.neutralText)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: 8) {
+                Text("Kilometerstand Ende")
+                Spacer(minLength: 8)
+                TextField(estimatedEnd.map { String($0) } ?? "km", text: $odometerText)
+                    .keyboardType(.numberPad)
+                    .multilineTextAlignment(.trailing)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(maxWidth: 140)
+                Text("km").foregroundStyle(.secondary)
+            }
+            if let entered = odometerValue, let est = estimatedEnd {
+                let diff = entered - est
+                if let start = t.kmStart, entered < start {
+                    Label("Kleiner als der Kilometerstand Beginn (\(Fmt.km(start))).", systemImage: "xmark.octagon")
+                        .font(.footnote)
+                        .foregroundStyle(Color.dangerText)
+                } else if diff != 0 {
+                    Text("Abweichung zur Schätzung: " + KmText.signed(diff))
+                        .font(.footnote.weight(.semibold))
+                        .foregroundStyle(abs(diff) > 5 ? Color.warningText : Color.neutralText)
+                } else {
+                    Text("Entspricht der Schätzung.").font(.footnote).foregroundStyle(Color.successText)
+                }
+            }
+            Text("Wird beim Bestätigen übernommen. Ohne Eingabe bleibt der Wert «geschätzt».")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+        }
+        .padding()
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.warningText.opacity(0.08), in: RoundedRectangle(cornerRadius: 16))
+        .overlay(RoundedRectangle(cornerRadius: 16).stroke(Color.warningText.opacity(urgent ? 0.6 : 0.25)))
     }
 
     private func dateLine(_ t: Trip) -> String {
@@ -198,9 +313,25 @@ struct TripReviewView: View {
                         .labelsHidden()
                         .pickerStyle(.menu)
                 }
+                if needsPurpose {
+                    purposeHint
+                }
             }
         }
         .disabled(!store.canWrite)
+    }
+
+    /// Hinweis: geschäftliche Fahrt ohne Zweck (U11)
+    private var purposeHint: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Label("Zweck oder Kunde fehlt. Ohne Zweck ist der Monatsabschluss nicht möglich.",
+                  systemImage: "exclamationmark.triangle")
+                .font(.footnote)
+                .foregroundStyle(Color.warningText)
+                .fixedSize(horizontal: false, vertical: true)
+            Toggle("Trotzdem ohne Zweck bestätigen", isOn: $allowWithoutPurpose)
+                .font(.footnote)
+        }
     }
 
     private func categoryButton(_ c: TripCategory) -> some View {
@@ -208,42 +339,70 @@ struct TripReviewView: View {
         return Button {
             category = c
         } label: {
-            Label(c.label, systemImage: c.systemImage)
+            Label(c.uiLabel, systemImage: c.systemImage)
                 .font(.subheadline.weight(.semibold))
+                .multilineTextAlignment(.center)
+                .padding(.vertical, 6)
                 .frame(maxWidth: .infinity, minHeight: 44)
-                .foregroundStyle(selected ? Color.white : c.color)
-                .background(selected ? c.color : c.color.opacity(0.12), in: RoundedRectangle(cornerRadius: 10))
+                .foregroundStyle(selected ? Color(uiColor: .systemBackground) : c.textColor)
+                .background(selected ? c.textColor : c.color.opacity(0.12), in: RoundedRectangle(cornerRadius: 10))
         }
         .buttonStyle(.plain)
         .accessibilityAddTraits(selected ? AccessibilityTraits.isSelected : [])
     }
 
     private func actions(_ t: Trip) -> some View {
-        let closed = store.isMonthClosed(vehicleId: t.vehicleId, month: t.monthKey)
+        let reasonNeeded = store.requiresReason(for: t)
+        let odometerInvalid = odometerValue.map { v in t.kmStart.map { v < $0 } ?? false } ?? false
+        let blocked = !store.canWrite || category == .unknown || (needsPurpose && !allowWithoutPurpose)
+            || odometerInvalid
         return VStack(spacing: 8) {
-            if closed {
-                Label("Monat abgeschlossen – über «Bearbeiten» mit Korrekturbegründung bestätigen.",
+            if reasonNeeded {
+                Label("Monat abgeschlossen – die Bestätigung braucht eine Korrekturbegründung.",
                       systemImage: "lock.fill")
                     .font(.footnote)
-                    .foregroundStyle(.orange)
+                    .foregroundStyle(Color.warningText)
             }
-            HStack(spacing: 10) {
-                Button("Überspringen") { advance() }
-                    .buttonStyle(.bordered)
-                Button("Bearbeiten") { edit = EditTarget(value: t) }
-                    .buttonStyle(.bordered)
-                    .disabled(!store.canWrite)
-                Spacer()
-                Button {
-                    confirm(t)
-                } label: {
-                    Label("OK", systemImage: "checkmark").frame(minWidth: 70)
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 10) {
+                    secondaryActions(t)
+                    Spacer()
+                    okButton(t, reasonNeeded: reasonNeeded, blocked: blocked)
                 }
-                .buttonStyle(.borderedProminent)
-                .disabled(!store.canWrite || category == .unknown || closed)
-                .accessibilityLabel("Als \(category.label) bestätigen")
+                VStack(spacing: 10) {
+                    okButton(t, reasonNeeded: reasonNeeded, blocked: blocked)
+                    HStack(spacing: 10) { secondaryActions(t) }
+                }
             }
         }
+    }
+
+    @ViewBuilder
+    private func secondaryActions(_ t: Trip) -> some View {
+        Button("Überspringen") { advance() }
+            .buttonStyle(.bordered)
+        Button("Bearbeiten") { edit = EditTarget(value: t) }
+            .buttonStyle(.bordered)
+            .disabled(!store.canWrite)
+    }
+
+    private func okTitle(_ reasonNeeded: Bool) -> String {
+        reasonNeeded ? "OK …" : "OK"
+    }
+
+    private func okButton(_ t: Trip, reasonNeeded: Bool, blocked: Bool) -> some View {
+        Button {
+            if reasonNeeded {
+                reasonTarget = EditTarget(value: t)
+            } else {
+                confirm(t, reason: nil)
+            }
+        } label: {
+            Label(okTitle(reasonNeeded), systemImage: "checkmark").frame(minWidth: 70)
+        }
+        .buttonStyle(.borderedProminent)
+        .disabled(blocked)
+        .accessibilityLabel("Als \(category.uiLabel) bestätigen")
     }
 
     // MARK: Ablauf
@@ -269,6 +428,9 @@ struct TripReviewView: View {
     }
 
     private func load() {
+        allowWithoutPurpose = false
+        odometerText = ""
+        suggestState = .idle
         guard let t = current else { return }
         let own = t.categoryValue
         category = own != .unknown ? own : TripCategory.of(t.suggestionCategory)
@@ -287,11 +449,20 @@ struct TripReviewView: View {
         load()
     }
 
-    private func confirm(_ t: Trip) {
+    private func confirm(_ t: Trip, reason: String?) {
         guard category != .unknown else { return }
         var n = store.trip(id: t.id) ?? t
         n.category = category.rawValue
         n.status = "confirmed"
+        // Tacho abgelesen → Schätzung ersetzen
+        if n.kmEstimated, let km = odometerValue, km >= (n.kmStart ?? 0) {
+            n.kmEnd = km
+            n.kmEstimated = false
+        }
+        // Korrektur in abgeschlossenem Monat: Begründung (Op) und – falls leer – als Notiz
+        if let reason = reason?.nilIfEmpty, n.note?.nilIfEmpty == nil {
+            n.note = reason
+        }
         if category == .business || category == .field {
             n.purpose = purpose.nilIfEmpty
             n.customerId = customerId
@@ -300,7 +471,7 @@ struct TripReviewView: View {
         } else if n.purpose == nil {
             n.purpose = n.suggestionPurpose
         }
-        store.save(n)
+        store.save(n, reason: reason)
         confirmedCount += 1
         offerRule()
         advance()
@@ -308,9 +479,11 @@ struct TripReviewView: View {
 
     private func confirmAllCommutes() {
         let ids = commuteIds
-        for id in ids {
-            guard let t = store.trip(id: id) else { continue }
-            store.confirm(t, as: .commute, purpose: t.purpose == nil ? t.suggestionPurpose : nil)
+        store.performBatch {
+            for id in ids {
+                guard let t = store.trip(id: id) else { continue }
+                store.confirm(t, as: .commute, purpose: t.purpose == nil ? t.suggestionPurpose : nil)
+            }
         }
         confirmedCount += ids.count
         let done = Set(ids)
@@ -322,9 +495,12 @@ struct TripReviewView: View {
     }
 
     private func requestSuggestion(_ t: Trip) async {
-        suggesting = true
-        defer { suggesting = false }
-        guard let s = await coordinator.suggest(for: t) else { return }
+        suggestState = .loading
+        guard let s = await coordinator.suggest(for: t) else {
+            suggestState = .notFound
+            return
+        }
+        suggestState = .applied
         var n = store.trip(id: t.id) ?? t
         n.suggestionCategory = s.category
         n.suggestionPurpose = s.purpose

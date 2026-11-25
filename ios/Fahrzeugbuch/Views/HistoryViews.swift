@@ -25,11 +25,11 @@ struct HistorySection: View {
                             HStack {
                                 Text("v\(r.version) · \(r.actionLabel)").font(.subheadline.bold())
                                 if r.conflict {
-                                    Text("Konflikt").font(.caption2).foregroundStyle(.orange)
+                                    StatusTag(text: "Konflikt", color: .orange)
                                 }
                             }
                             Text("\(Self.time(r.recordedAt)) · \(r.actorName ?? "–")")
-                                .font(.caption).foregroundStyle(.secondary)
+                                .font(.footnote).foregroundStyle(Color.neutralText)
                         }
                     }
                 }
@@ -48,7 +48,8 @@ struct HistorySection: View {
                 }
                 .disabled(loading)
                 if let error {
-                    Text(error).font(.caption).foregroundStyle(.orange)
+                    Label(error, systemImage: "exclamationmark.triangle")
+                        .font(.footnote).foregroundStyle(Color.warningText)
                 }
             }
         } header: {
@@ -63,7 +64,7 @@ struct HistorySection: View {
             revisions = try await settings.api.get("api/t/\(store.tenant.slug)/history/\(entity)/\(id)")
             error = nil
         } catch {
-            self.error = "Nur online verfügbar: \(error.localizedDescription)"
+            self.error = "Verlauf nicht geladen: \(error.userMessage)"
         }
     }
 

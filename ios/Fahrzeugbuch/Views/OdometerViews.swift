@@ -31,7 +31,7 @@ struct OdometerListView: View {
                 switch row.source {
                 case .manual(let r):
                     Button { form = EditTarget(value: r) } label: {
-                        rowView(row, icon: "gauge.with.dots.needle.67percent", color: .blue,
+                        rowView(row, icon: "gauge.with.dots.needle.67percent", color: .infoText,
                                 detail: r.note ?? "Manuell erfasst", pending: store.isPending(r.id))
                     }
                     .buttonStyle(.plain)
@@ -41,9 +41,9 @@ struct OdometerListView: View {
                         }
                     }
                 case .fuel:
-                    rowView(row, icon: "fuelpump", color: .green, detail: "Tankvorgang", pending: false)
+                    rowView(row, icon: "fuelpump", color: .successText, detail: "Tankvorgang", pending: false)
                 case .maintenance(let title):
-                    rowView(row, icon: "wrench.and.screwdriver", color: .orange, detail: title, pending: false)
+                    rowView(row, icon: "wrench.and.screwdriver", color: .warningText, detail: title, pending: false)
                 }
             }
         }
@@ -64,22 +64,26 @@ struct OdometerListView: View {
         .sheet(item: $form) { target in
             OdometerFormView(vehicle: vehicle, reading: target.value)
         }
-        .stornoDialog($toDelete, title: "Kilometerstand stornieren?") { store.delete($0) }
+        .reasonedStorno($toDelete, title: "Kilometerstand stornieren?",
+                        message: { _ in "Der Kilometerstand wird als storniert markiert und bleibt im Änderungsprotokoll erhalten." },
+                        requiresReason: { store.requiresReason(odometer: $0) }) { reading, reason in
+            store.delete(reading, reason: reason)
+        }
         .refreshable { await store.sync() }
     }
 
     private func rowView(_ row: Row, icon: String, color: Color, detail: String, pending: Bool) -> some View {
         HStack(spacing: 12) {
-            Image(systemName: icon).foregroundStyle(color).frame(width: 24)
+            Image(systemName: icon).foregroundStyle(color).frame(minWidth: 24)
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
                     Text(Fmt.km(row.km)).font(.headline)
                     if pending { PendingBadge() }
                 }
-                Text(detail).font(.caption).foregroundStyle(.secondary)
+                Text(detail).font(.footnote).foregroundStyle(Color.neutralText)
+                Text(Fmt.day(row.date)).font(.footnote).foregroundStyle(Color.neutralText)
             }
-            Spacer()
-            Text(Fmt.day(row.date)).foregroundStyle(.secondary)
+            Spacer(minLength: 0)
         }
         .contentShape(Rectangle())
         .accessibilityElement(children: .combine)
@@ -95,9 +99,37 @@ struct OdometerFormView: View {
     @State private var km = ""
     @State private var note = ""
     @State private var didPrefill = false
+    @State private var reason = ""
+    @State private var initial = ""
+    @State private var lastKm = 0
     @State private var scan: ScanRequest?
     /// Tacho-Foto, das beim Sichern als Beleg (mit vehicle_id) angelegt wird
     @State private var newAttachments: [PendingAttachment] = []
+
+    private var snapshot: String {
+        FormSnapshot.make([FormSnapshot.date(date), km, note, String(newAttachments.count), reason])
+    }
+
+    private var hasChanges: Bool { didPrefill && snapshot != initial }
+
+    private var candidate: OdometerReading {
+        var r = reading ?? OdometerReading(vehicleId: vehicle.id, date: date, km: km.asInt ?? 0)
+        r.date = date
+        return r
+    }
+
+    private var reasonRequired: Bool { store.requiresReason(odometer: candidate) }
+
+    private var kmPlaceholder: String {
+        lastKm > 0 ? "zuletzt \(lastKm.formatted(.number))" : "vom Tacho"
+    }
+
+    private var unchangedWarning: String? {
+        guard reading == nil, lastKm > 0, let k = km.asInt else { return nil }
+        if k == lastKm { return "Kilometerstand unverändert gegenüber dem letzten Eintrag – bitte vom Tacho ablesen." }
+        if k < lastKm { return "Kleiner als der letzte bekannte Kilometerstand (\(Fmt.km(lastKm)))." }
+        return nil
+    }
 
     var body: some View {
         NavigationStack {
@@ -105,7 +137,8 @@ struct OdometerFormView: View {
                 Section {
                     DatePicker("Datum", selection: $date, displayedComponents: .date)
                     HStack(spacing: 8) {
-                        UnitField("Kilometerstand", text: $km, unit: "km", keyboard: .numberPad)
+                        UnitField("Kilometerstand", text: $km, unit: "km", keyboard: .numberPad,
+                                  placeholder: kmPlaceholder)
                         if store.canWrite {
                             Button { scan = ScanRequest(kind: .odometer) } label: {
                                 Image(systemName: "camera")
@@ -116,9 +149,17 @@ struct OdometerFormView: View {
                     }
                     TextField("Notiz (optional)", text: $note, axis: .vertical)
                 } footer: {
-                    if !newAttachments.isEmpty {
-                        Text("Das Tacho-Foto wird beim Sichern als Beleg gespeichert.")
+                    VStack(alignment: .leading, spacing: 4) {
+                        if let w = unchangedWarning {
+                            Label(w, systemImage: "exclamationmark.triangle").foregroundStyle(Color.warningText)
+                        }
+                        if !newAttachments.isEmpty {
+                            Text("Das Tacho-Foto wird beim Sichern als Beleg gespeichert.")
+                        }
                     }
+                }
+                if reasonRequired && store.canWrite {
+                    ReasonSection(reason: $reason, monthLabel: TripMonth.label(TripMonth.key(date)))
                 }
                 if !newAttachments.isEmpty {
                     Section("Belege") {
@@ -132,7 +173,9 @@ struct OdometerFormView: View {
                 }
             }
             .navigationTitle(reading == nil ? "Kilometerstand" : "Kilometerstand bearbeiten")
-            .formToolbar(canSave: store.canWrite && km.asInt != nil, save: save)
+            .formToolbar(canSave: store.canWrite && km.asInt != nil
+                            && (!reasonRequired || CorrectionReason.isValid(reason)),
+                         hasChanges: hasChanges, save: save)
             .sheet(item: $scan) { request in
                 ScannerView(kinds: [.odometer], initialKind: request.kind, lastKnownKm: lastKmForScan) { outcome in
                     if let k = outcome.km { km = String(k) }
@@ -150,9 +193,10 @@ struct OdometerFormView: View {
                     km = String(r.km)
                     note = r.note ?? ""
                 } else {
-                    let current = store.currentKm(store.vehicle(id: vehicle.id) ?? vehicle)
-                    if current > 0 { km = String(current) }
+                    // Letzter Stand nur als Platzhalter (U6)
+                    lastKm = store.lastKnownKm(for: vehicle.id)
                 }
+                initial = snapshot
             }
         }
     }
@@ -163,7 +207,7 @@ struct OdometerFormView: View {
         r.date = date
         r.km = kmValue
         r.note = note.nilIfEmpty
-        store.save(r)
+        store.save(r, reason: reasonRequired ? reason.trimmed : nil)
         for attachment in newAttachments {
             store.addAttachment(imageData: attachment.data, kind: attachment.kind.rawValue, fuelId: nil,
                                 maintenanceId: nil, vehicleId: vehicle.id)

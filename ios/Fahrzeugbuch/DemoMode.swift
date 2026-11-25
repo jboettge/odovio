@@ -336,6 +336,7 @@ enum Demo {
         s1.suggestionConfidence = 0.95
         s1.suggestionReason = "Regel «Mo–Fr Wohnort → Büro»"
         s1.suggestionSource = "rule"
+        s1.kmEstimated = true   // aufgezeichnet: km aus GPS geschätzt (U3)
         var s2 = trip(10, "2026-11-23", (12, 10), (12, 48), 53358, 53389, from: office, to: meier,
                       category: "unknown", status: "suggested")
         s2.suggestionCategory = "business"
@@ -351,6 +352,7 @@ enum Demo {
         s3.suggestionConfidence = 0.95
         s3.suggestionReason = "Regel «Mo–Fr Wohnort → Büro»"
         s3.suggestionSource = "rule"
+        s3.kmEstimated = true
         trips += [s1, s2, s3]
 
         let october = TripPeriod(id: "12121212-1212-4212-8212-121212121212", version: 1, vehicleId: vehicleId,
@@ -382,6 +384,31 @@ struct DemoScanScreen: View {
     }
 }
 
+extension Demo {
+    /// Beispiele für „Abgelehnte Änderungen“ (nur Anzeige).
+    static func rejectedSamples() -> [RejectedOp] {
+        [
+            RejectedOp(id: "op-demo-1", entity: Trip.entityName, entityId: tripId(3), action: "upsert",
+                       label: "Fahrt Do. 12.11. Büro b-re.ch → Meier AG",
+                       error: "Monat abgeschlossen – Begründung erforderlich (mind. 10 Zeichen).",
+                       date: Date().addingTimeInterval(-3600)),
+            RejectedOp(id: "op-demo-2", entity: FuelEntry.entityName, entityId: pendingFuelId, action: "upsert",
+                       label: "Tankvorgang 24.11.", error: "Notiz höchstens 2000 Zeichen.",
+                       date: Date().addingTimeInterval(-600)),
+        ]
+    }
+
+    /// Zusammenfassung für den Bestätigungsdialog des Monatsabschlusses (November-Daten der Demo).
+    @MainActor
+    static func monthCloseSummary(_ store: TenantStore, vehicle: Vehicle) -> MonthCloseSummary {
+        let month = "2026-11"
+        let checklist = MonthChecklist(trips: store.trips(for: vehicle.id, month: month),
+                                       gaps: store.gaps(for: vehicle.id, month: month), pendingOps: 0, check: nil)
+        return MonthCloseSummary.make(month: month, vehicleName: vehicle.name, checklist: checklist, force: true,
+                                      reason: "Heimfahrt 16.11. vergessen, km laut Tankquittung nachgetragen")
+    }
+}
+
 /// Zeigt einen einzelnen Screen für Screenshots.
 struct DemoScreen: View {
     @Environment(AppSettings.self) private var settings
@@ -393,7 +420,12 @@ struct DemoScreen: View {
                 case "overview": NavigationStack { VehicleDetailView(vehicle: v, pane: .overview) }
                 case "fuel": NavigationStack { VehicleDetailView(vehicle: v, pane: .fuel) }
                 case "maintenance": NavigationStack { VehicleDetailView(vehicle: v, pane: .maintenance) }
-                case "odometer": NavigationStack { VehicleDetailView(vehicle: v, pane: .odometer) }
+                case "odometer":
+                    NavigationStack {
+                        OdometerListView(vehicle: v)
+                            .navigationTitle("Kilometerstände")
+                            .navigationBarTitleDisplayMode(.inline)
+                    }
                 case "maintenance-detail":
                     NavigationStack { MaintenanceDetailView(maintenanceId: Demo.serviceId, vehicle: v) }
                 case "fuel-form": FuelFormView(vehicle: v, entry: nil)
@@ -415,6 +447,12 @@ struct DemoScreen: View {
                 case "gaps": ModalNavigation { GapListView(vehicle: v) }
                 case "month-close": ModalNavigation { MonthCloseView(vehicle: v, month: "2026-11") }
                 case "month-closed": ModalNavigation { MonthCloseView(vehicle: v, month: "2026-10") }
+                case "month-close-confirm":
+                    MonthCloseConfirmView(summary: Demo.monthCloseSummary(store, vehicle: v)) {}
+                case "onboarding": NavigationStack { TripSetupView() }
+                case "home-place": HomePlaceSetupView(store: store)
+                case "rejected": ModalNavigation { RejectedOpsView(previewOps: Demo.rejectedSamples()) }
+                case "glossary": NavigationStack { GlossaryView() }
                 case "trip-reports": ModalNavigation { TripReportsView(vehicle: v) }
                 case "places": NavigationStack { PlacesView() }
                 case "customers": NavigationStack { CustomersView() }

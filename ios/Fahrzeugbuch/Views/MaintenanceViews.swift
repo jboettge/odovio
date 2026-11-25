@@ -43,7 +43,11 @@ struct MaintenanceListView: View {
         .sheet(isPresented: $showNew) {
             MaintenanceFormView(vehicle: vehicle, maintenance: nil)
         }
-        .stornoDialog($toDelete, title: "Wartung stornieren?") { store.delete($0) }
+        .reasonedStorno($toDelete, title: "Wartung stornieren?",
+                        message: { _ in "Die Wartung wird als storniert markiert und bleibt im Änderungsprotokoll erhalten." },
+                        requiresReason: { store.requiresReason(maintenance: $0) }) { m, reason in
+            store.delete(m, reason: reason)
+        }
         .refreshable { await store.sync() }
     }
 }
@@ -60,16 +64,8 @@ private struct MaintenanceRow: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: 6) {
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
                 Text(maintenance.title).font(.headline)
-                if let due {
-                    if due.overdue {
-                        StatusTag(text: "Überfällig", color: .red, systemImage: "exclamationmark.triangle.fill")
-                    } else if due.dueSoon {
-                        StatusTag(text: "Bald fällig", color: .orange, systemImage: "clock")
-                    }
-                }
-                if pending { PendingBadge() }
                 Spacer()
                 if let c = maintenance.cost {
                     Text(Fmt.chf(c))
@@ -77,14 +73,24 @@ private struct MaintenanceRow: View {
                     // ohne Rechnungsbetrag zählt die Materialsumme
                     let total = MaintenanceMaterial.total(materials)
                     Text(Fmt.chf(total))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(Color.neutralText)
                         .accessibilityLabel("Material \(Fmt.chf(total))")
+                }
+            }
+            if pending || due?.overdue == true || due?.dueSoon == true {
+                HStack(spacing: 6) {
+                    if let due {
+                        if due.overdue {
+                            StatusTag(text: "Überfällig", color: .red, systemImage: "exclamationmark.triangle.fill")
+                        } else if due.dueSoon {
+                            StatusTag(text: "Bald fällig", color: .orange, systemImage: "clock")
+                        }
+                    }
+                    if pending { PendingBadge() }
                 }
             }
             HStack(spacing: 8) {
                 Text(Fmt.day(maintenance.date) + (maintenance.km.map { " · " + Fmt.km($0) } ?? ""))
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.85)
                 Spacer(minLength: 4)
                 if !materials.isEmpty {
                     HStack(spacing: 2) {
@@ -100,18 +106,19 @@ private struct MaintenanceRow: View {
                     let complete = doneCount == items.count
                     Label("\(doneCount)/\(items.count)",
                           systemImage: complete ? "checkmark.circle.fill" : "circle.dashed")
-                        .foregroundStyle(complete ? .green : .secondary)
+                        .foregroundStyle(complete ? Color.successText : Color.neutralText)
                         .fixedSize()
                 }
             }
             .font(.subheadline)
-            .foregroundStyle(.secondary)
+            .foregroundStyle(Color.neutralText)
             if !items.isEmpty {
                 ProgressView(value: Double(doneCount), total: Double(items.count))
                     .tint(doneCount == items.count ? .green : .accentColor)
             }
             if let due {
-                Text(due.dueText).font(.caption).foregroundStyle(due.overdue ? .red : .secondary)
+                Text(due.dueText).font(.footnote)
+                    .foregroundStyle(due.overdue ? Color.dangerText : Color.neutralText)
             }
         }
         .accessibilityElement(children: .combine)
@@ -139,7 +146,7 @@ struct MaintenanceDetailView: View {
                     }
                     if let n = m.nextDueKm { LabeledContent("Nächste bei", value: Fmt.km(n)) }
                     if let d = m.nextDueDate { LabeledContent("Nächste bis", value: Fmt.day(d)) }
-                    if m.deleted { Label("Storniert", systemImage: "xmark.circle").foregroundStyle(.red) }
+                    if m.deleted { Label("Storniert", systemImage: "xmark.circle").foregroundStyle(Color.dangerText) }
                 }
 
                 if !items.isEmpty {
@@ -259,6 +266,9 @@ struct MaintenanceFormView: View {
     @State private var materials: [DraftMaterial] = []
     @State private var editingMaterial: DraftMaterial?
     @State private var didPrefill = false
+    @State private var reason = ""
+    @State private var initial = ""
+    @State private var lastKm = 0
 
     private var materialTotal: Double {
         materials.reduce(0.0) { $0 + ($1.lineTotal ?? 0) }
@@ -267,6 +277,28 @@ struct MaintenanceFormView: View {
     private var costMatchesMaterial: Bool {
         guard let c = cost.asDouble else { return false }
         return abs(c - materialTotal) < 0.005
+    }
+
+    private var snapshot: String {
+        var parts = [title, FormSnapshot.date(date), km, cost, note, String(hasDueKm), dueKm, String(hasDueDate),
+                     FormSnapshot.date(dueDate), reason]
+        parts += items.map { "\($0.id)|\($0.label)|\($0.done)" }
+        parts += materials.map { "\($0.id)|\($0.name)|\($0.partNumber)|\($0.quantity)|\($0.unit)|\($0.unitPrice)" }
+        return FormSnapshot.make(parts)
+    }
+
+    private var hasChanges: Bool { didPrefill && snapshot != initial }
+
+    private var candidate: Maintenance {
+        var m = maintenance ?? Maintenance(vehicleId: vehicle.id, date: date, title: title.trimmed)
+        m.date = date
+        return m
+    }
+
+    private var reasonRequired: Bool { store.requiresReason(maintenance: candidate) }
+
+    private var kmPlaceholder: String {
+        lastKm > 0 ? "zuletzt \(lastKm.formatted(.number))" : "optional"
     }
 
     var body: some View {
@@ -287,7 +319,7 @@ struct MaintenanceFormView: View {
                 Section("Wartung") {
                     TextField("Titel (z. B. Service)", text: $title)
                     DatePicker("Datum", selection: $date, displayedComponents: .date)
-                    UnitField("Kilometerstand", text: $km, unit: "km", keyboard: .numberPad)
+                    UnitField("Kilometerstand", text: $km, unit: "km", keyboard: .numberPad, placeholder: kmPlaceholder)
                     UnitField("Kosten", text: $cost, unit: "CHF", placeholder: "optional")
                 }
 
@@ -332,6 +364,10 @@ struct MaintenanceFormView: View {
                 Section("Notiz") {
                     TextField("optional", text: $note, axis: .vertical)
                 }
+
+                if reasonRequired && store.canWrite {
+                    ReasonSection(reason: $reason, monthLabel: TripMonth.label(TripMonth.key(date)))
+                }
             }
             .sheet(item: $editingMaterial) { draft in
                 MaterialEditView(material: draft, isNew: !materials.contains { $0.id == draft.id },
@@ -340,7 +376,9 @@ struct MaintenanceFormView: View {
                 }
             }
             .navigationTitle(maintenance == nil ? "Neue Wartung" : "Wartung bearbeiten")
-            .formToolbar(canSave: store.canWrite && !title.trimmed.isEmpty, save: save)
+            .formToolbar(canSave: store.canWrite && !title.trimmed.isEmpty
+                            && (!reasonRequired || CorrectionReason.isValid(reason)),
+                         hasChanges: hasChanges, save: save)
             .onAppear(perform: prefill)
             .task { await loadTemplates() }
         }
@@ -399,11 +437,10 @@ struct MaintenanceFormView: View {
         // nur einmal: Rückkehr aus dem Material-Sheet darf Eingaben nicht überschreiben
         guard !didPrefill else { return }
         didPrefill = true
+        defer { initial = snapshot }
         guard let m = maintenance else {
-            if km.isEmpty {
-                let current = store.currentKm(store.vehicle(id: vehicle.id) ?? vehicle)
-                if current > 0 { km = String(current) }
-            }
+            // Letzter Stand nur als Platzhalter (U6)
+            lastKm = store.lastKnownKm(for: vehicle.id)
             return
         }
         title = m.title
@@ -467,7 +504,7 @@ struct MaintenanceFormView: View {
         }
         // Stammartikel zuerst, damit die Positionen auf bereits angelegte Artikel verweisen
         saveCatalogChanges()
-        store.save(m, items: newItems, materials: newMaterials)
+        store.save(m, items: newItems, materials: newMaterials, reason: reasonRequired ? reason.trimmed : nil)
     }
 
     /// Neue Stammartikel anlegen bzw. Stammpreise aktualisieren (nur für Positionen, die gesichert werden).
@@ -588,6 +625,8 @@ private struct MaterialEditView: View {
     @State private var newCategory: String
     @State private var onlyThisVehicle: Bool
     @State private var showPicker = false
+    @State private var askDiscard = false
+    private let original: Draft
     let isNew: Bool
     let vehicleId: String?
     let onCommit: (Draft) -> Void
@@ -600,6 +639,7 @@ private struct MaterialEditView: View {
         _saveToCatalog = State(initialValue: material.pendingArticle != nil)
         _newCategory = State(initialValue: material.pendingArticle?.category ?? "")
         _onlyThisVehicle = State(initialValue: material.pendingArticle?.vehicleId != nil)
+        self.original = material
         self.isNew = isNew
         self.vehicleId = vehicleId
         self.onCommit = onCommit
@@ -763,7 +803,7 @@ private struct MaterialEditView: View {
                     }
                 } footer: {
                     if let message = validationMessage {
-                        Text(message).foregroundStyle(.red)
+                        Text(message).foregroundStyle(Color.dangerText)
                     }
                 }
 
@@ -773,7 +813,13 @@ private struct MaterialEditView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Abbrechen") { dismiss() }
+                    Button("Abbrechen") {
+                        if draft != original {
+                            askDiscard = true
+                        } else {
+                            dismiss()
+                        }
+                    }
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button(isNew ? "Hinzufügen" : "Übernehmen") {
@@ -789,6 +835,7 @@ private struct MaterialEditView: View {
                     apply(article)
                 }
             }
+            .discardGuard(hasChanges: draft != original, isAsking: $askDiscard)
         }
         .presentationDetents([.medium, .large])
     }

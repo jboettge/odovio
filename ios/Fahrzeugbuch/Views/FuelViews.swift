@@ -1,17 +1,52 @@
 import SwiftUI
 
+/// Filter der Tankliste.
+enum FuelFilter: String, CaseIterable, Identifiable {
+    case all, full, partial, pending
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .all: "Alle"
+        case .full: "Volltankungen"
+        case .partial: "Teilbetankungen"
+        case .pending: "Nicht synchronisiert"
+        }
+    }
+}
+
 struct FuelListView: View {
     @Environment(TenantStore.self) private var store
     let vehicle: Vehicle
     @State private var form: EditTarget<FuelEntry>?
     @State private var toDelete: FuelEntry?
+    @State private var search = ""
+    @State private var filter: FuelFilter = .all
+    @State private var monthFilter: String?
+
+    private var filterActive: Bool { filter != .all || monthFilter != nil || !search.trimmed.isEmpty }
 
     var body: some View {
-        let entries = store.fuel(for: vehicle.id)
+        let all = store.fuel(for: vehicle.id)
         let consumption = Dictionary(
-            StatsCalculator.consumptionPoints(entries).map { ($0.km, $0.consumption) },
+            StatsCalculator.consumptionPoints(all).map { ($0.km, $0.consumption) },
             uniquingKeysWith: { a, _ in a })
+        let entries = filtered(all)
         List {
+            if !all.isEmpty {
+                Section {
+                    filterBar(Self.months(all))
+                } footer: {
+                    if filterActive {
+                        Text(entries.count == 1 ? "1 Tankvorgang gefunden" : "\(entries.count) Tankvorgänge gefunden")
+                    }
+                }
+            }
+            if !all.isEmpty && entries.isEmpty {
+                Section {
+                    Text("Keine Tankvorgänge für diese Suche bzw. diesen Filter.").foregroundStyle(.secondary)
+                }
+            }
             ForEach(entries) { e in
                 Button { form = EditTarget(value: e) } label: {
                     FuelRow(entry: e, consumption: consumption[e.km], pending: store.isPending(e.id))
@@ -24,8 +59,10 @@ struct FuelListView: View {
                 }
             }
         }
+        .searchable(text: $search, placement: .navigationBarDrawer(displayMode: .always),
+                    prompt: "Tankstelle oder Notiz suchen")
         .overlay {
-            if entries.isEmpty {
+            if all.isEmpty {
                 ContentUnavailableView("Keine Tankvorgänge", systemImage: "fuelpump",
                                        description: Text("Mit + den ersten Tankvorgang erfassen."))
             }
@@ -41,8 +78,61 @@ struct FuelListView: View {
         .sheet(item: $form) { target in
             FuelFormView(vehicle: vehicle, entry: target.value)
         }
-        .stornoDialog($toDelete, title: "Tankvorgang stornieren?") { store.delete($0) }
+        .reasonedStorno($toDelete, title: "Tankvorgang stornieren?",
+                        message: { _ in "Der Tankvorgang wird als storniert markiert und bleibt im Änderungsprotokoll erhalten." },
+                        requiresReason: { store.requiresReason(fuel: $0) }) { entry, reason in
+            store.delete(entry, reason: reason)
+        }
         .refreshable { await store.sync() }
+    }
+
+    static func months(_ entries: [FuelEntry]) -> [String] {
+        Array(Set(entries.map { TripMonth.key($0.date) })).sorted(by: >)
+    }
+
+    private func filtered(_ all: [FuelEntry]) -> [FuelEntry] {
+        let q = search.trimmed
+        return all.filter { e in
+            if let m = monthFilter, TripMonth.key(e.date) != m { return false }
+            switch filter {
+            case .all: break
+            case .full: if !e.fullTank { return false }
+            case .partial: if e.fullTank { return false }
+            case .pending: if !store.isPending(e.id) { return false }
+            }
+            if q.isEmpty { return true }
+            let fields: [String] = [e.station ?? "", e.note ?? "", Fmt.day(e.date), String(e.km)]
+            return fields.contains { $0.localizedCaseInsensitiveContains(q) }
+        }
+    }
+
+    private func filterBar(_ months: [String]) -> some View {
+        HStack(spacing: 8) {
+            Menu {
+                Picker("Monat", selection: $monthFilter) {
+                    Text("Alle Monate").tag(String?.none)
+                    ForEach(months, id: \.self) { m in
+                        Text(TripMonth.label(m)).tag(String?.some(m))
+                    }
+                }
+            } label: {
+                FilterChip(title: monthFilter.map { TripMonth.label($0) } ?? "Alle Monate", icon: "calendar",
+                           active: monthFilter != nil)
+            }
+            .accessibilityLabel("Monat wählen")
+            Menu {
+                Picker("Filter", selection: $filter) {
+                    ForEach(FuelFilter.allCases) { f in
+                        Text(f.label).tag(f)
+                    }
+                }
+            } label: {
+                FilterChip(title: filter == .all ? "Filter" : filter.label,
+                           icon: "line.3.horizontal.decrease.circle", active: filter != .all)
+            }
+            .accessibilityLabel("Tankvorgänge filtern")
+            Spacer(minLength: 0)
+        }
     }
 }
 
@@ -60,24 +150,37 @@ private struct FuelRow: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: 6) {
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
                 Text(Fmt.day(entry.date)).font(.headline)
-                if !entry.fullTank { StatusTag(text: "Teilbetankung") }
-                if pending { PendingBadge() }
-                Spacer()
+                Spacer(minLength: 6)
                 Text(Fmt.chf(entry.priceTotal)).font(.headline)
             }
-            HStack {
-                Text("\(Fmt.km(entry.km)) · \(Fmt.num(entry.liters)) l · CHF \(Fmt.num(entry.pricePerLiter, 3))/l")
-                Spacer()
-                if let c = consumption {
-                    Text("\(Fmt.num(c, 1)) l/100 km").bold()
+            if !entry.fullTank || pending {
+                HStack(spacing: 6) {
+                    if !entry.fullTank { StatusTag(text: "Teilbetankung", systemImage: "drop.halffull") }
+                    if pending { PendingBadge() }
+                }
+            }
+            ViewThatFits(in: .horizontal) {
+                HStack {
+                    Text("\(Fmt.km(entry.km)) · \(Fmt.num(entry.liters)) l · CHF \(Fmt.num(entry.pricePerLiter, 3))/l")
+                    Spacer()
+                    if let c = consumption {
+                        Text("\(Fmt.num(c, 1)) l/100 km").bold()
+                    }
+                }
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(Fmt.km(entry.km))
+                    Text("\(Fmt.num(entry.liters)) l · CHF \(Fmt.num(entry.pricePerLiter, 3))/l")
+                    if let c = consumption {
+                        Text("\(Fmt.num(c, 1)) l/100 km").bold()
+                    }
                 }
             }
             .font(.subheadline)
-            .foregroundStyle(.secondary)
+            .foregroundStyle(Color.neutralText)
             if let s = entry.station, !s.isEmpty {
-                Text(s).font(.caption).foregroundStyle(.secondary)
+                Text(s).font(.footnote).foregroundStyle(Color.neutralText)
             }
         }
         .contentShape(Rectangle())
@@ -100,6 +203,10 @@ struct FuelFormView: View {
     @State private var station = ""
     @State private var note = ""
     @State private var didPrefill = false
+    @State private var reason = ""
+    @State private var initial = ""
+    /// Letzter bekannter Kilometerstand (Platzhalter statt Vorbelegung, U6)
+    @State private var lastKm = 0
     /// Scan (Zapfsäule/Quittung bzw. Tacho)
     @State private var scan: ScanRequest?
     /// Belege, die beim Sichern angelegt werden (nach der Tankung → Reihenfolge in der Outbox)
@@ -114,6 +221,27 @@ struct FuelFormView: View {
         guard entry == nil else { return nil }
         let last = store.lastKnownKm(for: vehicle.id)
         return last > 0 ? last : nil
+    }
+
+    private var snapshot: String {
+        FormSnapshot.make([FormSnapshot.date(date), km, liters, price, String(fullTank), station, note,
+                           String(newAttachments.count), reason])
+    }
+
+    private var hasChanges: Bool { didPrefill && snapshot != initial }
+
+    /// Eintrag mit den aktuellen Eingaben (für die Begründungspflicht)
+    private var candidate: FuelEntry {
+        var e = entry ?? FuelEntry(vehicleId: vehicle.id, date: date, km: km.asInt ?? 0, liters: liters.asDouble ?? 0,
+                                   priceTotal: price.asDouble ?? 0)
+        e.date = date
+        return e
+    }
+
+    private var reasonRequired: Bool { store.requiresReason(fuel: candidate) }
+
+    private var kmPlaceholder: String {
+        lastKm > 0 ? "zuletzt \(lastKm.formatted(.number))" : "vom Tacho"
     }
 
     private var pricePerLiter: Double? {
@@ -134,6 +262,9 @@ struct FuelFormView: View {
         var w: [String] = []
         let others = store.fuel(for: vehicle.id).filter { $0.id != entry?.id }
         if let k = km.asInt {
+            if entry == nil && lastKm > 0 && k == lastKm {
+                w.append("Kilometerstand unverändert gegenüber dem letzten Eintrag – bitte vom Tacho ablesen.")
+            }
             let earlier = others.filter { $0.date <= date }.map(\.km).max() ?? 0
             if k < earlier { w.append("Kilometerstand kleiner als bei einer früheren Tankung (\(Fmt.km(earlier))).") }
             if let l = liters.asDouble, l > 0, fullTank,
@@ -158,7 +289,8 @@ struct FuelFormView: View {
                 Section {
                     DatePicker("Datum", selection: $date, displayedComponents: .date)
                     HStack(spacing: 8) {
-                        UnitField("Kilometerstand", text: $km, unit: "km", keyboard: .numberPad)
+                        UnitField("Kilometerstand", text: $km, unit: "km", keyboard: .numberPad,
+                                  placeholder: kmPlaceholder)
                             .focused($focus, equals: .km)
                         if store.canWrite {
                             Button { scan = ScanRequest(kind: .odometer) } label: {
@@ -185,7 +317,7 @@ struct FuelFormView: View {
                     }
                 } footer: {
                     if !missing.isEmpty && (!liters.isEmpty || !price.isEmpty) {
-                        Text("Erforderlich: \(missing.joined(separator: ", "))").foregroundStyle(.orange)
+                        Text("Erforderlich: \(missing.joined(separator: ", "))").foregroundStyle(Color.warningText)
                     } else {
                         Text("Für die Verbrauchsberechnung immer voll tanken oder Teilbetankungen als solche markieren.")
                     }
@@ -193,9 +325,12 @@ struct FuelFormView: View {
                 if !warnings.isEmpty {
                     Section {
                         ForEach(warnings, id: \.self) { w in
-                            Label(w, systemImage: "exclamationmark.triangle").foregroundStyle(.orange)
+                            Label(w, systemImage: "exclamationmark.triangle").foregroundStyle(Color.warningText)
                         }
                     }
+                }
+                if reasonRequired && store.canWrite {
+                    ReasonSection(reason: $reason, monthLabel: TripMonth.label(TripMonth.key(date)))
                 }
                 Section("Optional") {
                     TextField("Tankstelle", text: $station)
@@ -224,7 +359,9 @@ struct FuelFormView: View {
                 }
             }
             .navigationTitle(entry == nil ? "Tankvorgang" : "Tankvorgang bearbeiten")
-            .formToolbar(canSave: store.canWrite && missing.isEmpty, save: save)
+            .formToolbar(canSave: store.canWrite && missing.isEmpty
+                            && (!reasonRequired || CorrectionReason.isValid(reason)),
+                         hasChanges: hasChanges, save: save)
             .onAppear(perform: prefill)
             .sheet(item: $scan) { request in
                 ScannerView(kinds: request.kind == .odometer ? [.odometer] : [.pump, .receipt],
@@ -252,10 +389,11 @@ struct FuelFormView: View {
         // nur einmal (Vollbild-Ansichten lösen onAppear erneut aus)
         guard !didPrefill else { return }
         didPrefill = true
+        defer { initial = snapshot }
         guard let e = entry else {
-            let current = store.currentKm(store.vehicle(id: vehicle.id) ?? vehicle)
-            if current > 0 { km = String(current) }
-            focus = .liters   // an der Säule: zuerst Liter, dann Betrag
+            // Letzter Stand nur als Platzhalter – der Kilometerstand muss abgelesen werden (U6)
+            lastKm = store.lastKnownKm(for: vehicle.id)
+            focus = .km
             return
         }
         date = e.date
@@ -277,7 +415,7 @@ struct FuelFormView: View {
         e.fullTank = fullTank
         e.station = station.nilIfEmpty
         e.note = note.nilIfEmpty
-        store.save(e)
+        store.save(e, reason: reasonRequired ? reason.trimmed : nil)
         // Belege erst nach der Tankung anlegen (Server kennt fuel_id dann bereits)
         for attachment in newAttachments {
             store.addAttachment(imageData: attachment.data, kind: attachment.kind.rawValue, fuelId: e.id,

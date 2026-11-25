@@ -1,5 +1,7 @@
 import Foundation
+#if canImport(UIKit)
 import UIKit
+#endif
 
 /// Lokale Ablage der GPS-Rohdaten (nur auf dem Gerät, `Application Support/Tracks`, nicht im Backup).
 ///
@@ -10,6 +12,9 @@ import UIKit
 ///   `completeUnlessOpen` geschrieben und beim nächsten Vordergrund auf `complete` angehoben.
 /// - Löschung: Track 30 Tage nach Bestätigung, Endpunkte nach 90 Tagen, stornierte Fahrten sofort.
 /// - Privatmodus: es wird nichts abgelegt (nur Distanz in der Fahrt selbst).
+/// - Laufende Aufzeichnung: `active.json` (Metadaten) plus anhängende Punkt-Segmente `active-<n>.pts.json`
+///   (je Zwischenspeicher nur die neuen Punkte → linearer statt quadratischer Schreibaufwand; neue Dateien
+///   lassen sich auch bei gesperrtem Gerät anlegen).
 @MainActor
 final class TrackStore {
     static let trackRetention: TimeInterval = 30 * 86_400
@@ -56,8 +61,10 @@ final class TrackStore {
     private var metaCache: [String: Meta]?
     let directory: URL
 
-    init() {
-        directory = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+    private var segmentCounter: Int?
+
+    init(directory: URL? = nil) {
+        self.directory = directory ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appending(path: "Tracks", directoryHint: .isDirectory)
     }
 
@@ -134,24 +141,63 @@ final class TrackStore {
     func deleteAll() {
         try? fm.removeItem(at: directory)
         metaCache = nil
+        segmentCounter = nil
     }
 
     // MARK: Laufende Aufzeichnung
 
+    /// Metadaten der laufenden Aufzeichnung (ohne Punkte – die liegen in den Segmenten).
     func saveActive(_ a: ActiveRecording) {
         ensureDirectory()
-        guard let data = try? Self.encoder.encode(a) else { return }
+        var meta = a
+        meta.points = []
+        guard let data = try? Self.encoder.encode(meta) else { return }
         // wird während der Fahrt bei gesperrtem Gerät geschrieben
         write(data, to: activeURL, strict: false)
     }
 
-    func loadActive() -> ActiveRecording? {
-        guard let data = try? Data(contentsOf: activeURL) else { return nil }
-        return try? Self.decoder.decode(ActiveRecording.self, from: data)
+    /// Neue Punkte seit dem letzten Zwischenspeicher als eigenes Segment anhängen.
+    func appendActivePoints(_ points: [TrackPoint]) {
+        guard !points.isEmpty, let data = try? Self.encoder.encode(points) else { return }
+        ensureDirectory()
+        let n = nextSegment()
+        write(data, to: directory.appending(path: String(format: "active-%06d.pts.json", n)), strict: false)
     }
 
+    /// Laufende Aufzeichnung inkl. aller Punkt-Segmente (ältere Dateien mit Punkten in `active.json` bleiben lesbar).
+    func loadActive() -> ActiveRecording? {
+        guard let data = try? Data(contentsOf: activeURL),
+              var a = try? Self.decoder.decode(ActiveRecording.self, from: data) else { return nil }
+        for url in segmentURLs() {
+            if let d = try? Data(contentsOf: url), let pts = try? Self.decoder.decode([TrackPoint].self, from: d) {
+                a.points.append(contentsOf: pts)
+            }
+        }
+        return a
+    }
+
+    /// Entfernt die laufende Aufzeichnung samt Segmenten (auch vor dem Start einer neuen).
     func clearActive() {
         try? fm.removeItem(at: activeURL)
+        for url in segmentURLs() { try? fm.removeItem(at: url) }
+        segmentCounter = 0
+    }
+
+    private func segmentURLs() -> [URL] {
+        let files = (try? fm.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)) ?? []
+        return files.filter { $0.lastPathComponent.hasPrefix("active-") && $0.lastPathComponent.hasSuffix(".pts.json") }
+            .sorted { $0.lastPathComponent < $1.lastPathComponent }
+    }
+
+    private func nextSegment() -> Int {
+        if segmentCounter == nil {
+            segmentCounter = segmentURLs().compactMap { url -> Int? in
+                let name = url.lastPathComponent
+                return Int(name.dropFirst("active-".count).prefix(6))
+            }.max() ?? 0
+        }
+        segmentCounter! += 1
+        return segmentCounter!
     }
 
     // MARK: Ausstehende Fahrten (anderer Mandant)
@@ -219,16 +265,22 @@ final class TrackStore {
 
     /// `strict`: zuerst `complete`, bei gesperrtem Gerät `completeUnlessOpen`.
     private func write(_ data: Data, to url: URL, strict: Bool) {
+        #if os(iOS)
         if strict, (try? data.write(to: url, options: [.atomic, .completeFileProtection])) != nil { return }
         try? data.write(to: url, options: [.atomic, .completeFileProtectionUnlessOpen])
+        #else
+        try? data.write(to: url, options: [.atomic])
+        #endif
     }
 
     /// Im Vordergrund (Daten zugänglich) alle Dateien ausser der laufenden Aufzeichnung auf `complete` setzen.
     private func upgradeProtection() {
+        #if os(iOS)
         guard UIApplication.shared.isProtectedDataAvailable else { return }
         let files = (try? fm.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)) ?? []
-        for url in files where url.lastPathComponent != "active.json" {
+        for url in files where !url.lastPathComponent.hasPrefix("active") {
             try? fm.setAttributes([.protectionKey: FileProtectionType.complete], ofItemAtPath: url.path)
         }
+        #endif
     }
 }

@@ -27,8 +27,21 @@ targets:
         CFBundleDevelopmentRegion: de
         UILaunchScreen: {}
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
-        NSAppTransportSecurity:
-          NSAllowsLocalNetworking: true
+        # Einrichtung per Link/QR: fahrzeugbuch://setup?server=https://…
+        # (das OIDC-Callback-Schema net.jmb.fahrzeugbuch behandelt ASWebAuthenticationSession – nicht hier eintragen)
+        CFBundleURLTypes:
+          - CFBundleURLName: net.jmb.fahrzeugbuch.setup
+            CFBundleURLSchemes: [fahrzeugbuch]
+        # Home-Screen-Quick-Actions (Behandlung: AppDelegate/QuickAction in AppRouter.swift)
+        UIApplicationShortcutItems:
+          - UIApplicationShortcutItemType: net.jmb.fahrzeugbuch.addFuel
+            UIApplicationShortcutItemTitle: Tanken
+            UIApplicationShortcutItemSubtitle: Tankvorgang erfassen
+            UIApplicationShortcutItemIconType: UIApplicationShortcutIconTypeAdd
+          - UIApplicationShortcutItemType: net.jmb.fahrzeugbuch.startTrip
+            UIApplicationShortcutItemTitle: Fahrt starten
+            UIApplicationShortcutItemSubtitle: Mit dem Standardfahrzeug
+            UIApplicationShortcutItemIconType: UIApplicationShortcutIconTypePlay
         # Intelligentes Fahrtenbuch (ios/Fahrzeugbuch/Trips)
         NSLocationWhenInUseUsageDescription: >-
           Das Fahrtenbuch nutzt deinen Standort nur während einer Fahrt, um Distanz sowie Start- und Zielort
@@ -39,7 +52,7 @@ targets:
           auf. Ausserhalb von Fahrten wird nur grob erkannt, ob du losfährst (bekannte Orte, wesentliche
           Standortänderungen) – kein Bewegungsprofil. Die Rohdaten bleiben auf dem Gerät; dein
           Fahrzeugbuch-Server erhält Start/Ziel als Adresse, die Distanz und zur Strassendistanz-Berechnung
-          den reduzierten Track (dort nicht gespeichert).
+          den reduzierten Track ohne Wohnort-Umgebung und ohne die ersten/letzten 200 m (dort nicht gespeichert).
         NSMotionUsageDescription: >-
           Bewegungsdaten („im Auto“, „stillstehend“, „gehend“) werden nur auf dem iPhone ausgewertet, um
           Beginn und Ende einer Fahrt automatisch zu erkennen. Sie verlassen das Gerät nicht.

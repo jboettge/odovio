@@ -54,6 +54,34 @@ struct StopTripIntent: AppIntent {
     }
 }
 
+/// „Tanken erfassen“: öffnet die App direkt im Tank-Formular (Standardfahrzeug).
+struct AddFuelIntent: AppIntent {
+    static let title: LocalizedStringResource = "Tanken erfassen"
+    static let description: IntentDescription? = IntentDescription(
+        "Öffnet das Fahrzeugbuch direkt beim Erfassen eines Tankvorgangs.")
+    static let openAppWhenRun: Bool = true
+
+    @MainActor
+    func perform() async throws -> some IntentResult {
+        AppRouter.shared.pending = .addFuel(vehicleId: nil)
+        return .result()
+    }
+}
+
+/// „Fahrten bestätigen“: öffnet das Review offener Fahrten.
+struct ReviewTripsIntent: AppIntent {
+    static let title: LocalizedStringResource = "Fahrten bestätigen"
+    static let description: IntentDescription? = IntentDescription(
+        "Öffnet die Liste der Fahrten, die noch bestätigt werden müssen.")
+    static let openAppWhenRun: Bool = true
+
+    @MainActor
+    func perform() async throws -> some IntentResult {
+        AppRouter.shared.pending = .review(vehicleId: nil)
+        return .result()
+    }
+}
+
 struct FahrtenbuchShortcuts: AppShortcutsProvider {
     static var appShortcuts: [AppShortcut] {
         AppShortcut(
@@ -84,6 +112,25 @@ struct FahrtenbuchShortcuts: AppShortcutsProvider {
             ],
             shortTitle: "Fahrt beenden",
             systemImageName: "flag.checkered"
+        )
+        AppShortcut(
+            intent: AddFuelIntent(),
+            phrases: [
+                "Tanken erfassen mit \(.applicationName)",
+                "Tankvorgang in \(.applicationName) erfassen",
+                "\(.applicationName) Tanken",
+            ],
+            shortTitle: "Tanken erfassen",
+            systemImageName: "fuelpump.fill"
+        )
+        AppShortcut(
+            intent: ReviewTripsIntent(),
+            phrases: [
+                "Fahrten bestätigen in \(.applicationName)",
+                "\(.applicationName) Fahrten bestätigen",
+            ],
+            shortTitle: "Fahrten bestätigen",
+            systemImageName: "checkmark.circle"
         )
     }
 }

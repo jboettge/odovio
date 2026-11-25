@@ -128,12 +128,12 @@ private struct ThumbnailFrame: View {
                     Text(badge)
                         .font(.caption2.weight(.semibold))
                         .padding(.horizontal, 4).padding(.vertical, 1)
-                        .background(.orange, in: Capsule())
-                        .foregroundStyle(.white)
+                        .background(Color.warningText, in: Capsule())
+                        .foregroundStyle(Color(uiColor: .systemBackground))
                         .padding(3)
                 }
             }
-            Text(caption).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+            Text(caption).font(.footnote).foregroundStyle(Color.neutralText).lineLimit(2)
         }
         .frame(width: 76)
     }

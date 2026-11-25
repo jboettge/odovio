@@ -17,6 +17,16 @@ struct TripSuggestion: Equatable {
     var ruleId: String? = nil
 }
 
+/// Termin aus dem Gerätekalender (nur lokal ausgewertet).
+struct CalendarAppointment {
+    var title: String
+    var location: String?
+    var start: Date
+    var end: Date
+    var lat: Double?
+    var lon: Double?
+}
+
 /// Häufig besuchter Punkt ohne passenden Ort → Nutzer benennt ihn einmal.
 struct PlaceCandidate: Identifiable, Hashable {
     var id: String
@@ -176,23 +186,9 @@ enum GeoMath {
     }
 }
 
-/// Zeitpunkte der Fahrten (ISO-8601 mit Offset) lesen.
+/// Zeitpunkte der Fahrten (ISO-8601 mit Offset) lesen – zentral über `ISODate`.
 enum TripTime {
-    private static let plain: ISO8601DateFormatter = {
-        let f = ISO8601DateFormatter()
-        f.formatOptions = [.withInternetDateTime]
-        return f
-    }()
-
-    private static let fractional: ISO8601DateFormatter = {
-        let f = ISO8601DateFormatter()
-        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        return f
-    }()
-
-    static func parse(_ s: String) -> Date? {
-        plain.date(from: s) ?? fractional.date(from: s)
-    }
+    static func parse(_ s: String) -> Date? { ISODate.parse(s) }
 
     /// "yyyy-MM" in lokaler Zeit (Monatsabschluss)
     static func month(_ d: Date, calendar: Calendar = .current) -> String {
@@ -238,5 +234,53 @@ enum TripCategoryText {
         case "field": "Aussendienst"
         default: "unbekannt"
         }
+    }
+}
+
+/// Datenschutz für Geodienste (S2): Wohnort und die ersten/letzten Meter einer Fahrt verlassen das Gerät nicht.
+enum GeoPrivacy {
+    /// Anfang und Ende des Tracks, die nie übertragen werden
+    static let cutMeters = 200.0
+    /// Mindestradius um den Wohnort
+    static let minHomeRadius = 250.0
+    /// Bezeichnung für Start/Ziel im Wohnort-Radius
+    static let homeLabel = "Wohnort"
+
+    struct Zone {
+        var lat: Double
+        var lon: Double
+        var radius: Double
+    }
+
+    /// Schutzzonen aus Wohnort/privaten Orten mit (lokalen) Koordinaten.
+    static func zones(_ places: [Place]) -> [Zone] {
+        places.compactMap { p in
+            guard !p.deleted, p.keepsCoordinatesLocal, let lat = p.lat, let lon = p.lon else { return nil }
+            return Zone(lat: lat, lon: lon, radius: max(Double(p.radiusM), minHomeRadius))
+        }
+    }
+
+    static func isProtected(_ point: TrackPoint, zones: [Zone]) -> Bool {
+        zones.contains { GeoMath.distance(lat1: $0.lat, lon1: $0.lon, lat2: point.lat, lon2: point.lon) <= $0.radius }
+    }
+
+    /// Punkte für `/geo/match`: ohne Punkte in Schutzzonen und ohne die ersten/letzten `cut` Meter.
+    static func trimmed(_ points: [TrackPoint], zones: [Zone], cut: Double = cutMeters) -> [TrackPoint] {
+        guard points.count >= 2 else { return [] }
+        var startIndex = 0
+        var acc = 0.0
+        while startIndex < points.count - 1 && acc < cut {
+            acc += GeoMath.distance(points[startIndex], points[startIndex + 1])
+            startIndex += 1
+        }
+        var endIndex = points.count - 1
+        acc = 0
+        while endIndex > startIndex && acc < cut {
+            acc += GeoMath.distance(points[endIndex], points[endIndex - 1])
+            endIndex -= 1
+        }
+        guard endIndex > startIndex else { return [] }
+        let kept = points[startIndex...endIndex].filter { !isProtected($0, zones: zones) }
+        return kept.count >= 2 ? Array(kept) : []
     }
 }

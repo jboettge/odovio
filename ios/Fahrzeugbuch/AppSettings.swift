@@ -4,6 +4,7 @@ import Network
 import SwiftUI
 import Observation
 import Security
+import UserNotifications
 
 @MainActor
 @Observable
@@ -61,6 +62,7 @@ final class AppSettings {
         let sub = try await auth.login(server: baseURL, session: session)
         let owner = UserDefaults.standard.string(forKey: "dataOwnerSub")
         if let owner, owner != sub {
+            store?.flush()
             let pending = TenantStore.pendingCountOnDisk()
             resetLocalData()
             loginNotice = "Lokale Daten des vorherigen Benutzers wurden vom Gerät entfernt"
@@ -93,7 +95,7 @@ final class AppSettings {
             tenantError = nil
             UserDefaults.standard.set(try? JSONEncoder().encode(me.tenants), forKey: "tenants")
         } catch {
-            if tenants.isEmpty { tenantError = error.localizedDescription }
+            if tenants.isEmpty { tenantError = error.userMessage }
         }
         tenantsLoaded = true
         let chosen = currentTenantSlug.flatMap { s in tenants.first { $0.slug == s } } ?? tenants.first
@@ -115,10 +117,26 @@ final class AppSettings {
 
     /// Abmelden: Tokens widerrufen und lokale Daten entfernen.
     func logout() async {
-        await auth.logout(server: baseURL)
+        await auth.logout(server: isConfigured ? baseURL : nil)
         resetLocalData()
     }
 
+    /// Serverwechsel: Abmelden inkl. Token-Widerruf beim bisherigen Server, Issuer-Pin entfernen,
+    /// lokale Daten löschen, neue URL setzen (danach Anmeldung am neuen Server).
+    func changeServer(to url: String) async {
+        let new = url.trimmed
+        if auth.isLoggedIn {
+            await auth.logout(server: isConfigured ? baseURL : nil)
+        } else {
+            auth.clearSession()
+        }
+        auth.resetIssuerPin()
+        resetLocalData()
+        serverURL = new
+    }
+
+    /// Alle lokalen Daten entfernen: Mandantendateien, Belege, Tracks, Exporte (PDF/CSV),
+    /// geplante/zugestellte Mitteilungen, URL-Cache und Cookies.
     func resetLocalData() {
         TripCoordinator.shared.resetLocalData()   // laufende Aufzeichnung verwerfen, Tracks löschen
         store = nil
@@ -127,16 +145,25 @@ final class AppSettings {
         for key in ["tenants", "tenant", "dataOwnerSub", "checklistTemplates"] {
             UserDefaults.standard.removeObject(forKey: key)
         }
+        for key in UserDefaults.standard.dictionaryRepresentation().keys where key.hasPrefix("defaultVehicle-") {
+            UserDefaults.standard.removeObject(forKey: key)
+        }
         TenantStore.deleteAll()
         Self.cleanupExports(olderThan: 0)
+        URLCache.shared.removeAllCachedResponses()
+        HTTPCookieStorage.shared.removeCookies(since: .distantPast)
+        let center = UNUserNotificationCenter.current()
+        center.removeAllPendingNotificationRequests()   // Fälligkeiten, Fahrt-Mitteilungen, Wochenerinnerung
+        center.removeAllDeliveredNotifications()
+        AppRouter.shared.pending = nil
     }
 
-    /// Exportierte PDFs im temporären Verzeichnis entfernen.
+    /// Exportierte Dateien (PDF, CSV …, Präfix `Fahrzeugbuch_`) im temporären Verzeichnis entfernen.
     static func cleanupExports(olderThan seconds: TimeInterval) {
         let fm = FileManager.default
         let dir = fm.temporaryDirectory
         let files = (try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.contentModificationDateKey])) ?? []
-        for url in files where url.lastPathComponent.hasPrefix("Fahrzeugbuch_") && url.pathExtension == "pdf" {
+        for url in files where url.lastPathComponent.hasPrefix("Fahrzeugbuch_") {
             let date = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
             if seconds == 0 || (date.map { Date().timeIntervalSince($0) > seconds } ?? true) {
                 try? fm.removeItem(at: url)

@@ -65,7 +65,7 @@ struct PlacesView: View {
             Section {
             } footer: {
                 Text("Datenschutz: Die Koordinaten des Wohnorts bleiben nur auf diesem Gerät. Andere Orte werden "
-                     + "auf rund 100 m gerundet synchronisiert. Private Orte erscheinen in Berichten ohne Adresse.")
+                     + "auf rund 100 m gerundet synchronisiert. Vertrauliche Orte erscheinen in Berichten ohne Adresse.")
             }
         }
         .overlay {
@@ -115,8 +115,8 @@ struct PlaceRow: View {
     private var detail: String {
         var parts: [String] = [place.kindValue.label, "Radius \(place.radiusM) m"]
         if let customerName { parts.append(customerName) }
-        if let c = place.defaultCategory { parts.append(TripCategory.of(c).label) }
-        if place.isPrivate { parts.append("privat") }
+        if let c = place.defaultCategory { parts.append(TripCategory.of(c).uiLabel) }
+        if place.isPrivate { parts.append("vertraulich") }
         if !place.hasCoordinate { parts.append("ohne Koordinaten") }
         return parts.joined(separator: " · ")
     }
@@ -152,6 +152,8 @@ struct PlaceFormView: View {
     @State private var defaultCategory: String?
     @State private var isPrivate = false
     @State private var didPrefill = false
+    @State private var initial = ""
+    @State private var askDiscard = false
 
     init(place: Place?) {
         self.place = place
@@ -163,6 +165,10 @@ struct PlaceFormView: View {
         return store.canWrite ? "Ort bearbeiten" : "Ort"
     }
     private var cancelTitle: String { store.canWrite ? "Abbrechen" : "Fertig" }
+
+    private var snapshot: String { FormSnapshot.make([name, kind.rawValue, lat, lon, String(radius), customerId ?? "", defaultCategory ?? "", String(isPrivate)]) }
+
+    private var hasChanges: Bool { store.canWrite && didPrefill && snapshot != initial }
 
     private var latValue: Double? { lat.asDouble }
     private var lonValue: Double? { lon.asDouble }
@@ -207,14 +213,14 @@ struct PlaceFormView: View {
                     Picker("Standard-Kategorie", selection: $defaultCategory) {
                         Text("Keine").tag(String?.none)
                         ForEach(TripCategory.selectable) { c in
-                            Text(c.label).tag(String?.some(c.rawValue))
+                            Text(c.uiLabel).tag(String?.some(c.rawValue))
                         }
                     }
-                    Toggle("Privater Ort", isOn: $isPrivate)
+                    Toggle("Vertraulicher Ort", isOn: $isPrivate)
                 } header: {
                     Text("Erkennung")
                 } footer: {
-                    Text("Privat: Fahrten zu diesem Ort werden ohne Adresse gespeichert und berichtet.")
+                    Text("Vertraulich: Fahrten zu diesem Ort werden ohne Adresse gespeichert und berichtet.")
                 }
                 .disabled(!store.canWrite)
 
@@ -244,7 +250,7 @@ struct PlaceFormView: View {
 
                 if !errors.isEmpty {
                     Section {
-                        ForEach(errors, id: \.self) { Text($0).foregroundStyle(.red) }
+                        ForEach(errors, id: \.self) { Text($0).foregroundStyle(Color.dangerText) }
                     }
                 }
 
@@ -256,7 +262,13 @@ struct PlaceFormView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button(cancelTitle) { dismiss() }
+                    Button(cancelTitle) {
+                        if hasChanges {
+                            askDiscard = true
+                        } else {
+                            dismiss()
+                        }
+                    }
                 }
                 if store.canWrite {
                     ToolbarItem(placement: .confirmationAction) {
@@ -268,6 +280,7 @@ struct PlaceFormView: View {
                     }
                 }
             }
+            .discardGuard(hasChanges: hasChanges, isAsking: $askDiscard)
             .onAppear(perform: prefill)
         }
     }
@@ -275,6 +288,7 @@ struct PlaceFormView: View {
     private func prefill() {
         guard !didPrefill else { return }
         didPrefill = true
+        defer { initial = snapshot }
         guard let p = place.map({ store.place(id: $0.id) ?? $0 }) else { return }
         name = p.name
         kind = p.kindValue
@@ -398,6 +412,8 @@ struct CustomerFormView: View {
     @State private var ref = ""
     @State private var note = ""
     @State private var didPrefill = false
+    @State private var initial = ""
+    @State private var askDiscard = false
 
     init(customer: Customer?) {
         self.customer = customer
@@ -409,6 +425,10 @@ struct CustomerFormView: View {
         return store.canWrite ? "Kunde bearbeiten" : "Kunde"
     }
     private var cancelTitle: String { store.canWrite ? "Abbrechen" : "Fertig" }
+
+    private var snapshot: String { FormSnapshot.make([name, ref, note]) }
+
+    private var hasChanges: Bool { store.canWrite && didPrefill && snapshot != initial }
 
     private var errors: [String] {
         var e: [String] = []
@@ -435,7 +455,7 @@ struct CustomerFormView: View {
                 .disabled(!store.canWrite)
                 if !errors.isEmpty {
                     Section {
-                        ForEach(errors, id: \.self) { Text($0).foregroundStyle(.red) }
+                        ForEach(errors, id: \.self) { Text($0).foregroundStyle(Color.dangerText) }
                     }
                 }
                 if let c = stored {
@@ -449,7 +469,13 @@ struct CustomerFormView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button(cancelTitle) { dismiss() }
+                    Button(cancelTitle) {
+                        if hasChanges {
+                            askDiscard = true
+                        } else {
+                            dismiss()
+                        }
+                    }
                 }
                 if store.canWrite {
                     ToolbarItem(placement: .confirmationAction) {
@@ -461,9 +487,11 @@ struct CustomerFormView: View {
                     }
                 }
             }
+            .discardGuard(hasChanges: hasChanges, isAsking: $askDiscard)
             .onAppear {
                 guard !didPrefill else { return }
                 didPrefill = true
+                defer { initial = snapshot }
                 guard let c = stored ?? customer else { return }
                 name = c.name
                 ref = c.ref ?? ""
@@ -502,7 +530,7 @@ struct RulesView: View {
     private var emptyText: String {
         store.canWrite
             ? "Regeln schlagen Kategorie und Zweck vor, z. B. «Mo–Fr Wohnort → Büro = Arbeitsweg». "
-                + "Mit + erfassen oder im Review vorgeschlagene Regeln übernehmen."
+                + "Mit + erfassen oder beim Bestätigen vorgeschlagene Regeln übernehmen."
             : "Es sind noch keine Regeln erfasst."
     }
 
@@ -525,7 +553,7 @@ struct RulesView: View {
                         }
                     }
                 } footer: {
-                    Text("Reihenfolge nach Priorität (kleinere Zahl zuerst). Vorschläge werden immer im Review "
+                    Text("Reihenfolge nach Priorität (kleinere Zahl zuerst). Vorschläge werden immer beim Bestätigen "
                          + "bestätigt – ausser bei Regeln mit Auto-Bestätigung.")
                 }
             }
@@ -606,6 +634,8 @@ struct RuleFormView: View {
     @State private var autoConfirm = false
     @State private var active = true
     @State private var didPrefill = false
+    @State private var initial = ""
+    @State private var askDiscard = false
 
     init(rule: PurposeRule?) {
         self.rule = rule
@@ -617,6 +647,10 @@ struct RuleFormView: View {
         return store.canWrite ? "Regel bearbeiten" : "Regel"
     }
     private var cancelTitle: String { store.canWrite ? "Abbrechen" : "Fertig" }
+
+    private var snapshot: String { FormSnapshot.make([String(priority), fromPlaceId ?? "", toPlaceId ?? "", days.sorted().map(String.init).joined(separator: ","), String(useTime), TimeOfDay.string(timeFrom), TimeOfDay.string(timeTo), vehicleId ?? "", resultCategory.rawValue, resultPurpose, resultCustomerId ?? "", String(autoConfirm), String(active)]) }
+
+    private var hasChanges: Bool { store.canWrite && didPrefill && snapshot != initial }
 
     private var errors: [String] {
         var e: [String] = []
@@ -657,7 +691,7 @@ struct RuleFormView: View {
                 Section("Dann") {
                     Picker("Kategorie", selection: $resultCategory) {
                         ForEach(TripCategory.selectable) { c in
-                            Label(c.label, systemImage: c.systemImage).tag(c)
+                            Label(c.uiLabel, systemImage: c.systemImage).tag(c)
                         }
                     }
                     TextField("Zweck (optional)", text: $resultPurpose)
@@ -679,10 +713,10 @@ struct RuleFormView: View {
                 } footer: {
                     if autoConfirm {
                         Text("Achtung: Passende Fahrten werden ohne Rückfrage bestätigt. Nur für eindeutige Fälle "
-                             + "wie den Arbeitsweg verwenden – die Fahrten bleiben im Review markiert sichtbar.")
-                            .foregroundStyle(.red)
+                             + "wie den Arbeitsweg verwenden – die Fahrten bleiben beim Bestätigen markiert sichtbar.")
+                            .foregroundStyle(Color.dangerText)
                     } else {
-                        Text("Standard: Die Regel macht nur einen Vorschlag; du bestätigst im Review.")
+                        Text("Standard: Die Regel macht nur einen Vorschlag; du bestätigst ihn selbst.")
                     }
                 }
                 .disabled(!store.canWrite)
@@ -696,7 +730,7 @@ struct RuleFormView: View {
 
                 if !errors.isEmpty {
                     Section {
-                        ForEach(errors, id: \.self) { Text($0).foregroundStyle(.red) }
+                        ForEach(errors, id: \.self) { Text($0).foregroundStyle(Color.dangerText) }
                     }
                 }
 
@@ -708,7 +742,13 @@ struct RuleFormView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button(cancelTitle) { dismiss() }
+                    Button(cancelTitle) {
+                        if hasChanges {
+                            askDiscard = true
+                        } else {
+                            dismiss()
+                        }
+                    }
                 }
                 if store.canWrite {
                     ToolbarItem(placement: .confirmationAction) {
@@ -720,6 +760,7 @@ struct RuleFormView: View {
                     }
                 }
             }
+            .discardGuard(hasChanges: hasChanges, isAsking: $askDiscard)
             .onAppear(perform: prefill)
         }
     }
@@ -765,6 +806,7 @@ struct RuleFormView: View {
     private func prefill() {
         guard !didPrefill else { return }
         didPrefill = true
+        defer { initial = snapshot }
         guard let r = stored ?? rule else { return }
         priority = r.priority
         fromPlaceId = r.fromPlaceId
@@ -901,7 +943,7 @@ struct TaxParamFormView: View {
             switch self {
             case .federal: "Bund"
             case .canton: "Kanton"
-            case .tenant: "Mandant (eigenes Reglement)"
+            case .tenant: "Fahrzeugbuch (eigenes Reglement)"
             }
         }
     }
@@ -914,6 +956,8 @@ struct TaxParamFormView: View {
     @State private var sourceUrl = ""
     @State private var note = ""
     @State private var didPrefill = false
+    @State private var initial = ""
+    @State private var askDiscard = false
 
     init(param: TaxParam?) {
         self.param = param
@@ -925,6 +969,10 @@ struct TaxParamFormView: View {
         return store.canWrite ? "Parameter bearbeiten" : "Parameter"
     }
     private var cancelTitle: String { store.canWrite ? "Abbrechen" : "Fertig" }
+
+    private var snapshot: String { FormSnapshot.make([String(year), String(describing: scopeKind), canton, key, value, sourceUrl, note]) }
+
+    private var hasChanges: Bool { store.canWrite && didPrefill && snapshot != initial }
 
     private var scope: String {
         switch scopeKind {
@@ -989,7 +1037,7 @@ struct TaxParamFormView: View {
                     Text("Parameter")
                 } footer: {
                     if let duplicateHint {
-                        Text(duplicateHint).foregroundStyle(.orange)
+                        Text(duplicateHint).foregroundStyle(Color.warningText)
                     }
                 }
                 .disabled(!store.canWrite)
@@ -1009,7 +1057,7 @@ struct TaxParamFormView: View {
 
                 if !errors.isEmpty {
                     Section {
-                        ForEach(errors, id: \.self) { Text($0).foregroundStyle(.red) }
+                        ForEach(errors, id: \.self) { Text($0).foregroundStyle(Color.dangerText) }
                     }
                 }
 
@@ -1021,7 +1069,13 @@ struct TaxParamFormView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button(cancelTitle) { dismiss() }
+                    Button(cancelTitle) {
+                        if hasChanges {
+                            askDiscard = true
+                        } else {
+                            dismiss()
+                        }
+                    }
                 }
                 if store.canWrite {
                     ToolbarItem(placement: .confirmationAction) {
@@ -1033,6 +1087,7 @@ struct TaxParamFormView: View {
                     }
                 }
             }
+            .discardGuard(hasChanges: hasChanges, isAsking: $askDiscard)
             .onAppear(perform: prefill)
         }
     }
@@ -1040,6 +1095,7 @@ struct TaxParamFormView: View {
     private func prefill() {
         guard !didPrefill else { return }
         didPrefill = true
+        defer { initial = snapshot }
         guard let p = stored ?? param else { return }
         year = p.year
         if p.scope == "federal" {

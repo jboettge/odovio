@@ -1,16 +1,6 @@
 import EventKit
 import Foundation
 
-/// Termin aus dem Gerätekalender (nur lokal ausgewertet).
-struct CalendarAppointment {
-    var title: String
-    var location: String?
-    var start: Date
-    var end: Date
-    var lat: Double?
-    var lon: Double?
-}
-
 /// Liest Termine aus EventKit – nur lesend und nur mit Vollzugriff (iOS 17).
 /// Kalenderinhalte verlassen das Gerät nicht; höchstens der Termintitel als Zweckvorschlag.
 @MainActor

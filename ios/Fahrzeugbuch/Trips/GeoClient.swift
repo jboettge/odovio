@@ -47,6 +47,25 @@ struct GeoClient {
         var trip: Features
         var customers: [CustomerRef]
         var recent: [Recent]
+
+        /// Kontext für das LLM: zuletzt bestätigte Fahrten – nie Privatfahrten (weder Privatmodus noch
+        /// Kategorie „privat“), nie Koordinaten; Texte gekürzt.
+        static func recentContext(history: [Trip], excluding tripId: String?, limit: Int = 20) -> [Recent] {
+            func cut(_ s: String?) -> String? { s?.nilIfEmpty.map { String($0.prefix(120)) } }
+            return history
+                .filter { t in
+                    t.id != tripId && !t.deleted && !t.privateMode
+                        && (t.status == "confirmed" || t.status == "locked")
+                        && t.category != TripCategory.personal.rawValue
+                        && TripCategoryText.all.contains(t.category)
+                }
+                .sorted { ($0.startDate ?? .distantPast) > ($1.startDate ?? .distantPast) }
+                .prefix(limit)
+                .map { t in
+                    Recent(startLabel: cut(t.startLabel), endLabel: cut(t.endLabel), category: t.category,
+                           purpose: cut(t.purpose))
+                }
+        }
     }
 
     private struct MatchPoint: Encodable {
@@ -69,9 +88,9 @@ struct GeoClient {
         var source: String?
     }
 
-    private struct RawResponse {
-        var data: Data
-        var status: Int
+    private struct ReverseBody: Encodable {
+        var lat: Double
+        var lon: Double
     }
 
     static let maxMatchPoints = 5000
@@ -79,6 +98,7 @@ struct GeoClient {
     // MARK: Aufrufe
 
     /// Strassendistanz zum Track (der Server verwirft den Track nach dem Abgleich).
+    /// Aufrufer übergeben den mit `GeoPrivacy.trimmed` gekappten Track (Wohnort, erste/letzte 200 m).
     func match(_ points: [TrackPoint]) async -> MatchResult? {
         guard points.count >= 2 else { return nil }
         let thinned = Self.thin(points, max: Self.maxMatchPoints)
@@ -94,12 +114,12 @@ struct GeoClient {
     }
 
     /// Adresse/Gemeinde zu einem Punkt; die Koordinate wird vorher auf `roundingMeters` gerundet.
+    /// POST mit Körper (nicht als Query), damit Koordinaten nicht in Zugriffs-Logs landen.
     func reverse(_ point: TrackPoint?, roundingMeters: Double) async -> ReverseResult? {
         guard let point else { return nil }
         let r = GeoMath.rounded(lat: point.lat, lon: point.lon, meters: roundingMeters)
-        let query = [URLQueryItem(name: "lat", value: String(format: "%.5f", r.lat)),
-                     URLQueryItem(name: "lon", value: String(format: "%.5f", r.lon))]
-        guard let response = try? await request("GET", "api/geo/reverse", query: query, timeout: 8),
+        guard let body = try? APIClient.encoder.encode(ReverseBody(lat: r.lat, lon: r.lon)),
+              let response = try? await request("POST", "api/geo/reverse", body: body, timeout: 8),
               response.status == 200, !response.data.isEmpty else { return nil }
         return try? APIClient.decoder.decode(ReverseResult.self, from: response.data)
     }
@@ -127,30 +147,10 @@ struct GeoClient {
         return (0..<n).map { points[min(points.count - 1, Int((Double($0) * step).rounded()))] }
     }
 
-    /// Eigener Request (statt `APIClient.send`), damit leere Antworten (204) und Statuscodes tolerant
-    /// behandelt werden. Gleiche Basis-URL und Token wie die App, inkl. einmaligem Refresh nach 401.
-    private func request(_ method: String, _ path: String, query: [URLQueryItem] = [], body: Data? = nil,
-                         timeout: TimeInterval) async throws -> RawResponse {
-        guard var comps = URLComponents(url: api.baseURL.appending(path: path), resolvingAgainstBaseURL: false) else {
-            throw URLError(.badURL)
-        }
-        if !query.isEmpty { comps.queryItems = query }
-        guard let url = comps.url else { throw URLError(.badURL) }
-        var req = URLRequest(url: url)
-        req.httpMethod = method
-        req.timeoutInterval = timeout
-        if let body {
-            req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            req.httpBody = body
-        }
-        let token = try await api.tokenProvider(false)
-        req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        var (data, response) = try await URLSession.shared.data(for: req)
-        if (response as? HTTPURLResponse)?.statusCode == 401 {
-            let fresh = try await api.tokenProvider(true)
-            req.setValue("Bearer \(fresh)", forHTTPHeaderField: "Authorization")
-            (data, response) = try await URLSession.shared.data(for: req)
-        }
-        return RawResponse(data: data, status: (response as? HTTPURLResponse)?.statusCode ?? 0)
+    /// Tolerant (204/503 usw. ohne Fehler) über `APIClient.rawResponse` – gleiche Session (ohne Cache),
+    /// Basis-URL und Token wie die App, inkl. einmaligem Refresh nach 401.
+    private func request(_ method: String, _ path: String, body: Data? = nil,
+                         timeout: TimeInterval) async throws -> APIClient.RawResponse {
+        try await api.rawResponse(method, path, body: body, timeout: timeout)
     }
 }

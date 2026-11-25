@@ -96,7 +96,7 @@ struct ScanResultView: View {
                     fieldRow(field)
                 }
                 if let warning = consistencyWarning {
-                    Label(warning, systemImage: "exclamationmark.triangle").foregroundStyle(.orange)
+                    Label(warning, systemImage: "exclamationmark.triangle").foregroundStyle(Color.warningText)
                 }
             } header: {
                 HStack {

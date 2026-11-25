@@ -2,6 +2,7 @@ import Foundation
 import UserNotifications
 
 /// Lokale Erinnerungen für datumsbasierte Fälligkeiten (14 Tage vorher und am Stichtag, 09:00).
+/// Plant nur, wenn Mitteilungen bereits erlaubt sind (fragt selbst nicht nach).
 /// Kilometer-Fälligkeiten werden in der App angezeigt (ohne Hintergrundbetrieb nicht planbar).
 enum DueNotifications {
     private static let prefix = "fzb-due-"
@@ -17,11 +18,10 @@ enum DueNotifications {
         let mine = "\(prefix)\(store.tenant.slug)-"
         center.removePendingNotificationRequests(withIdentifiers: pending.map(\.identifier).filter { $0.hasPrefix(mine) })
         guard !items.isEmpty else { return }
-        let settings = await center.notificationSettings()
-        if settings.authorizationStatus == .notDetermined {
-            _ = try? await center.requestAuthorization(options: [.alert, .sound, .badge])
-        }
-        guard await center.notificationSettings().authorizationStatus == .authorized else { return }
+        // Keine unvermittelte Abfrage beim Öffnen der Liste (U8): Berechtigung wird über
+        // `TripCoordinator.requestNotifications()` (Einrichtung/Einstellungen) erteilt.
+        let status = await center.notificationSettings().authorizationStatus
+        guard status == .authorized || status == .provisional || status == .ephemeral else { return }
 
         let cal = Calendar.current
         for (vehicle, item) in items {

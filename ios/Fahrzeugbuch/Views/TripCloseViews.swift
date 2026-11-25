@@ -35,9 +35,9 @@ struct CheckRow: View {
 
     private var color: Color {
         switch ok {
-        case .some(true): .green
-        case .some(false): .red
-        case .none: .secondary
+        case .some(true): .successText
+        case .some(false): .dangerText
+        case .none: .neutralText
         }
     }
 
@@ -57,7 +57,7 @@ struct CheckRow: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(title)
                 if let detail {
-                    Text(detail).font(.caption).foregroundStyle(.secondary)
+                    Text(detail).font(.footnote).foregroundStyle(Color.neutralText)
                 }
             }
         }
@@ -90,17 +90,17 @@ struct GapListView: View {
         List {
             Section {
                 if gaps.isEmpty {
-                    Label("Keine Lücken in der km-Kette", systemImage: "checkmark.seal")
-                        .foregroundStyle(.green)
+                    Label("Keine Lücken in der Kilometerkette", systemImage: "checkmark.seal")
+                        .foregroundStyle(Color.successText)
                 }
                 ForEach(gaps) { g in
                     gapRow(g)
                 }
             } header: {
-                Text("km-Kette")
+                Text("Kilometerkette")
             } footer: {
-                Text("Eine Lücke entsteht, wenn der km-Stand am Ende einer Fahrt nicht dem Beginn der nächsten "
-                     + "entspricht. Fehlende Kilometer als Fahrt erfassen oder den km-Stand korrigieren.")
+                Text("Eine Lücke entsteht, wenn der Kilometerstand am Ende einer Fahrt nicht dem Beginn der nächsten "
+                     + "entspricht. Fehlende Kilometer als Fahrt erfassen oder den Kilometerstand korrigieren.")
             }
 
             Section {
@@ -119,7 +119,8 @@ struct GapListView: View {
                 }
                 .disabled(loading || AppMode.isDemo)
                 if let checkError {
-                    Text(checkError).font(.caption).foregroundStyle(.orange)
+                    Label(checkError, systemImage: "exclamationmark.triangle")
+                        .font(.footnote).foregroundStyle(Color.warningText)
                 }
                 if let check {
                     serverResult(check)
@@ -127,8 +128,8 @@ struct GapListView: View {
             } header: {
                 Text("Server-Prüfung")
             } footer: {
-                Text("Prüft zusätzlich fehlende km-Stände, Abweichungen GPS/Route und den Abgleich mit Tank- "
-                     + "und Kilometerständen (nur online).")
+                Text("Prüft zusätzlich fehlende Kilometerstände, Abweichungen GPS/Route und den Abgleich mit "
+                     + "Tankvorgängen und Kilometerständen (nur online).")
             }
         }
         .navigationTitle("Lücken")
@@ -151,7 +152,7 @@ struct GapListView: View {
                                 Button {
                                     form = EditTarget(value: gapTrip(g, after: after, before: before, category: c))
                                 } label: {
-                                    Label(c.label, systemImage: c.systemImage)
+                                    Label(c.uiLabel, systemImage: c.systemImage)
                                 }
                             }
                         } label: {
@@ -160,10 +161,10 @@ struct GapListView: View {
                     }
                     Menu {
                         if let a = after, !a.isLocked {
-                            Button("km-Ende der vorherigen Fahrt") { form = EditTarget(value: a) }
+                            Button("Kilometerstand Ende der vorherigen Fahrt") { form = EditTarget(value: a) }
                         }
                         if let b = before, !b.isLocked {
-                            Button("km-Beginn der nächsten Fahrt") { form = EditTarget(value: b) }
+                            Button("Kilometerstand Beginn der nächsten Fahrt") { form = EditTarget(value: b) }
                         }
                     } label: {
                         Label("Kilometerstand korrigieren", systemImage: "gauge.with.dots.needle.33percent")
@@ -181,18 +182,18 @@ struct GapListView: View {
         let gapDetail: String? = c.gaps.isEmpty ? nil : GapText.summary(c.gaps)
         let openCount = c.unconfirmed ?? 0
         let openDetail: String? = openCount > 0 ? "\(openCount) offen" : nil
-        CheckRow(title: "Keine km-Lücken", ok: c.gaps.isEmpty, detail: gapDetail)
+        CheckRow(title: "Keine Lücken in der Kilometerkette", ok: c.gaps.isEmpty, detail: gapDetail)
         CheckRow(title: "Alle Fahrten bestätigt", ok: openCount == 0, detail: openDetail)
         if let o = c.odometerCheck {
-            CheckRow(title: "km-Abgleich Tank/Odometer", ok: o.ok, detail: OdometerText.describe(o))
+            CheckRow(title: "Abgleich mit Tankvorgängen/Kilometerständen", ok: o.ok, detail: OdometerText.describe(o))
         }
         ForEach(c.mismatches) { m in
             Button {
                 if let id = m.tripId, let t = store.trip(id: id) { form = EditTarget(value: t) }
             } label: {
                 Label(mismatchText(m), systemImage: "exclamationmark.triangle")
-                    .font(.caption)
-                    .foregroundStyle(.orange)
+                    .font(.footnote)
+                    .foregroundStyle(Color.warningText)
             }
             .buttonStyle(.plain)
         }
@@ -233,7 +234,7 @@ struct GapListView: View {
             check = try await TripServer.check(settings, store, vehicleId: vehicle.id, month: month)
             checkError = nil
         } catch {
-            checkError = "Nur online verfügbar: \(error.localizedDescription)"
+            checkError = "Server-Prüfung nicht möglich: \(error.userMessage)"
         }
     }
 }
@@ -266,7 +267,7 @@ enum OdometerText {
         if let note = o.note?.nilIfEmpty, o.odometerKm == nil { return note }
         var parts: [String] = []
         if let t = o.tripKm { parts.append("Fahrten \(Fmt.kmD(t))") }
-        if let k = o.odometerKm { parts.append("km-Stände \(Fmt.kmD(k))") }
+        if let k = o.odometerKm { parts.append("Kilometerstände \(Fmt.kmD(k))") }
         if let d = o.diffKm { parts.append("Differenz \(Fmt.kmD(d))") }
         return parts.isEmpty ? "Keine Angaben" : parts.joined(separator: " · ")
     }
@@ -274,7 +275,176 @@ enum OdometerText {
 
 // MARK: Monatsabschluss
 
-/// Monatsabschluss: Checkliste, Abschliessen (POST close, ggf. erzwungen), Fahrtenbuch-PDF.
+/// km je Kategorie (für Zusammenfassungen).
+struct CategoryKm: Identifiable, Hashable {
+    let category: TripCategory
+    let km: Double
+    var id: String { category.rawValue }
+}
+
+/// Checkliste eines Monats (lokal + Server-Prüfung).
+struct MonthChecklist {
+    var trips: [Trip]
+    var open: [Trip]
+    var gaps: [TripGap]
+    var missingPurpose: [Trip]
+    var incomplete: [Trip]
+    var estimated: [Trip]
+    var pendingOps: Int
+    var odometerOk: Bool?
+    var mismatches: [TripMismatch]
+
+    init(trips: [Trip], gaps: [TripGap], pendingOps: Int, check: TripCheck?) {
+        self.trips = trips
+        self.open = trips.filter(\.needsReview)
+        self.gaps = gaps
+        self.missingPurpose = trips.filter { t in
+            let c = t.categoryValue
+            return (c == .business || c == .field) && t.purpose?.nilIfEmpty == nil && t.customerId == nil
+                && t.customerName?.nilIfEmpty == nil
+        }
+        self.incomplete = trips.filter { $0.kmStart == nil || $0.kmEnd == nil || $0.endAt == nil }
+        self.estimated = trips.filter(\.kmEstimated)
+        self.pendingOps = pendingOps
+        self.odometerOk = check?.odometerCheck?.ok
+        self.mismatches = check?.mismatches ?? []
+    }
+
+    var allOk: Bool {
+        open.isEmpty && gaps.isEmpty && missingPurpose.isEmpty && incomplete.isEmpty && estimated.isEmpty
+            && pendingOps == 0 && odometerOk != false && mismatches.isEmpty
+    }
+
+    /// Offene Punkte als Text (Bestätigungsdialog, erzwungener Abschluss)
+    var issues: [String] {
+        var list: [String] = []
+        if !open.isEmpty { list.append("\(open.count) Fahrt(en) nicht bestätigt") }
+        if !gaps.isEmpty { list.append(GapText.summary(gaps)) }
+        if !missingPurpose.isEmpty { list.append("\(missingPurpose.count) geschäftliche Fahrt(en) ohne Zweck") }
+        if !incomplete.isEmpty { list.append("\(incomplete.count) Fahrt(en) ohne Kilometerstand oder Endzeit") }
+        if !estimated.isEmpty { list.append("\(estimated.count) Fahrt(en) mit geschätztem Kilometerstand") }
+        if pendingOps > 0 { list.append("\(pendingOps) Änderung(en) nicht synchronisiert") }
+        if odometerOk == false { list.append("Abweichung zu Tankvorgängen/Kilometerständen") }
+        if !mismatches.isEmpty { list.append("\(mismatches.count) Abweichung(en) laut Server") }
+        return list
+    }
+}
+
+/// Inhalt des Bestätigungsdialogs vor dem (irreversiblen) Abschluss.
+struct MonthCloseSummary: Identifiable {
+    let id = UUID()
+    let month: String
+    let vehicleName: String
+    let tripCount: Int
+    let km: [CategoryKm]
+    let totalKm: Double
+    let gapCount: Int
+    let gapKm: Int
+    let issues: [String]
+    let force: Bool
+    let reason: String
+
+    static func make(month: String, vehicleName: String, checklist: MonthChecklist, force: Bool,
+                     reason: String) -> MonthCloseSummary {
+        var totals: [TripCategory: Double] = [:]
+        for t in checklist.trips {
+            totals[t.categoryValue, default: 0] += max(t.distanceKm ?? 0, 0)
+        }
+        let km = TripCategory.allCases.compactMap { c -> CategoryKm? in
+            let v = totals[c] ?? 0
+            guard v > 0 || TripCategory.selectable.contains(c) else { return nil }
+            return CategoryKm(category: c, km: v)
+        }
+        return MonthCloseSummary(month: month, vehicleName: vehicleName, tripCount: checklist.trips.count, km: km,
+                                 totalKm: totals.values.reduce(0, +), gapCount: checklist.gaps.count,
+                                 gapKm: checklist.gaps.reduce(0) { $0 + abs($1.km) },
+                                 issues: checklist.issues, force: force, reason: reason)
+    }
+}
+
+/// Bestätigung mit Zusammenfassung; der Abschluss ist nicht umkehrbar.
+struct MonthCloseConfirmView: View {
+    @Environment(\.dismiss) private var dismiss
+    let summary: MonthCloseSummary
+    let onConfirm: () -> Void
+
+    private var confirmTitle: String {
+        summary.force ? "Trotzdem endgültig abschliessen" : "Endgültig abschliessen"
+    }
+
+    private var gapText: String {
+        if summary.gapCount == 0 { return "Keine" }
+        return "\(summary.gapCount) · \(Fmt.km(summary.gapKm))"
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    LabeledContent("Fahrzeug", value: summary.vehicleName)
+                    LabeledContent("Monat", value: TripMonth.label(summary.month))
+                    LabeledContent("Fahrten", value: "\(summary.tripCount)")
+                }
+                Section {
+                    ForEach(summary.km) { entry in
+                        LabeledContent {
+                            Text(Fmt.kmD(entry.km)).monospacedDigit()
+                        } label: {
+                            Label(entry.category.uiLabel, systemImage: entry.category.systemImage)
+                        }
+                    }
+                    LabeledContent {
+                        Text(Fmt.kmD(summary.totalKm)).monospacedDigit().fontWeight(.semibold)
+                    } label: {
+                        Text("Total").fontWeight(.semibold)
+                    }
+                    LabeledContent("Lücken", value: gapText)
+                } header: {
+                    Text("Kilometer nach Kategorie")
+                }
+                if summary.force {
+                    Section {
+                        ForEach(summary.issues, id: \.self) { issue in
+                            Label(issue, systemImage: "exclamationmark.triangle")
+                                .foregroundStyle(Color.warningText)
+                        }
+                        LabeledContent("Begründung") {
+                            Text(summary.reason).multilineTextAlignment(.trailing)
+                        }
+                    } header: {
+                        Text("Offene Punkte")
+                    } footer: {
+                        Text("Die offenen Punkte und die Begründung werden im Fahrtenbuch vermerkt.")
+                    }
+                }
+                Section {
+                    Label("Nicht umkehrbar: Alle Fahrten des Monats werden gesperrt. Korrekturen sind danach nur "
+                          + "per Storno bzw. neuer Fahrt mit Begründung möglich und bleiben im Änderungsprotokoll "
+                          + "sichtbar.", systemImage: "lock.fill")
+                        .font(.subheadline)
+                        .foregroundStyle(Color.dangerText)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Section {
+                    Button(role: .destructive) {
+                        onConfirm()
+                        dismiss()
+                    } label: {
+                        Text(confirmTitle).frame(maxWidth: .infinity).fontWeight(.semibold)
+                    }
+                    .disabled(AppMode.isDemo)
+                    Button("Abbrechen", role: .cancel) { dismiss() }
+                        .frame(maxWidth: .infinity)
+                }
+            }
+            .navigationTitle("Monat abschliessen?")
+            .navigationBarTitleDisplayMode(.inline)
+        }
+        .presentationDetents([.large])
+    }
+}
+
+/// Monatsabschluss: Checkliste, Abschliessen (nur abgelaufene Monate, mit Bestätigung), Fahrtenbuch-PDF.
 @MainActor
 struct MonthCloseView: View {
     @Environment(AppSettings.self) private var settings
@@ -287,8 +457,10 @@ struct MonthCloseView: View {
     @State private var loadingCheck = false
     @State private var closing = false
     @State private var conflict: String?
-    @State private var forceAllowed = false
+    @State private var forceMode = false
     @State private var forceReason = ""
+    @State private var confirmation: MonthCloseSummary?
+    @State private var resultText: String?
     @State private var fileURL: URL?
     @State private var previewURL: URL?
     @State private var loadingPDF = false
@@ -300,20 +472,31 @@ struct MonthCloseView: View {
         _month = State(initialValue: month ?? TripMonth.previous())
     }
 
+    /// Nur abgelaufene Monate (der laufende erscheint nur, wenn er ausdrücklich übergeben wurde).
     private var months: [String] {
-        var set = Set(TripMonth.recent(13))
-        for t in store.trips(for: vehicle.id) { set.insert(t.monthKey) }
+        let current = TripMonth.current()
+        var set = Set(TripMonth.recent(13).filter { $0 < current })
+        for t in store.trips(for: vehicle.id) where t.monthKey < current { set.insert(t.monthKey) }
+        set.insert(month)
         return set.sorted(by: >)
     }
 
+    private var isPast: Bool { month < TripMonth.current() }
+
     private var period: TripPeriod? { store.period(vehicleId: vehicle.id, month: month) }
 
-    private var reasonValid: Bool { forceReason.trimmed.count >= 10 }
+    private var reasonValid: Bool { CorrectionReason.isValid(forceReason) }
+
+    private var nextMonthStart: String {
+        guard let d = TripMonth.date(month),
+              let next = Calendar.current.date(byAdding: .month, value: 1, to: d) else { return "Monatsende" }
+        return Fmt.day(next)
+    }
 
     var body: some View {
         let trips = store.trips(for: vehicle.id, month: month)
-        let open = trips.filter(\.needsReview)
         let gaps = store.gaps(for: vehicle.id, month: month)
+        let checklist = MonthChecklist(trips: trips, gaps: gaps, pendingOps: store.outbox.count, check: check)
         Form {
             Section {
                 Picker("Monat", selection: $month) {
@@ -327,54 +510,22 @@ struct MonthCloseView: View {
             if let p = period {
                 closedSection(p)
             } else {
-                Section {
-                    CheckRow(title: "Alle Fahrten bestätigt", ok: open.isEmpty,
-                             detail: open.isEmpty ? nil : "\(open.count) offen")
-                    if !open.isEmpty {
-                        ForEach(open) { t in
-                            Button {
-                                form = EditTarget(value: t)
-                            } label: {
-                                Text("\(dayText(t)) · \(store.routeText(t))")
-                                    .font(.caption)
-                            }
-                        }
-                    }
-                    CheckRow(title: "Keine km-Lücke", ok: gaps.isEmpty,
-                             detail: gaps.isEmpty ? nil : GapText.summary(gaps))
-                    CheckRow(title: "km-Abgleich mit Tank-/km-Ständen", ok: check?.odometerCheck?.ok,
-                             detail: odometerDetail)
-                    CheckRow(title: "Alles synchronisiert", ok: store.outbox.isEmpty,
-                             detail: store.outbox.isEmpty ? nil : "\(store.outbox.count) Änderung(en) ausstehend")
-                    if let c = check, !c.mismatches.isEmpty {
-                        ForEach(c.mismatches) { m in
-                            Label(m.reason ?? "Abweichung", systemImage: "exclamationmark.triangle")
-                                .font(.caption)
-                                .foregroundStyle(.orange)
-                        }
-                    }
-                    Button {
-                        Task { await loadCheck() }
-                    } label: {
-                        HStack {
-                            Label("Server-Prüfung aktualisieren", systemImage: "arrow.clockwise")
-                            if loadingCheck { Spacer(); ProgressView() }
-                        }
-                    }
-                    .disabled(loadingCheck || AppMode.isDemo)
-                    if let checkError {
-                        Text(checkError).font(.caption).foregroundStyle(.orange)
-                    }
-                } header: {
-                    Text("Checkliste")
-                } footer: {
-                    if month == TripMonth.current() {
-                        Text("Der Monat läuft noch – üblich ist der Abschluss im Folgemonat.")
-                    }
-                }
-
+                checklistSection(checklist)
                 if store.canWrite {
-                    closeSection
+                    if isPast {
+                        closeSection(checklist)
+                        if !checklist.allOk || conflict != nil {
+                            forceSection(checklist)
+                        }
+                    } else {
+                        Section {
+                            Label("Der laufende Monat kann erst ab \(nextMonthStart) abgeschlossen werden.",
+                                  systemImage: "calendar.badge.clock")
+                                .foregroundStyle(Color.neutralText)
+                        } header: {
+                            Text("Abschliessen")
+                        }
+                    }
                 }
             }
 
@@ -384,16 +535,89 @@ struct MonthCloseView: View {
         .navigationBarTitleDisplayMode(.inline)
         .task(id: month) {
             conflict = nil
-            forceAllowed = false
+            forceMode = false
             fileURL = nil
             check = nil
+            checkError = nil
             if !AppMode.isDemo && period == nil { await loadCheck() }
         }
         .sheet(item: $form) { target in
             TripFormView(vehicle: vehicle, trip: target.value)
         }
+        .sheet(item: $confirmation) { summary in
+            MonthCloseConfirmView(summary: summary) {
+                Task { await close(force: summary.force) }
+            }
+        }
         .quickLookPreview($previewURL)
         .errorAlert($error)
+    }
+
+    // MARK: Checkliste
+
+    private func checklistSection(_ c: MonthChecklist) -> some View {
+        Section {
+            CheckRow(title: "Alle Fahrten bestätigt", ok: c.open.isEmpty,
+                     detail: c.open.isEmpty ? nil : "\(c.open.count) offen")
+            tripLinks(c.open)
+            CheckRow(title: "Geschäftliche Fahrten mit Zweck", ok: c.missingPurpose.isEmpty,
+                     detail: c.missingPurpose.isEmpty ? nil : "\(c.missingPurpose.count) ohne Zweck oder Kunde")
+            tripLinks(c.missingPurpose)
+            CheckRow(title: "Kilometerstand und Endzeit erfasst", ok: c.incomplete.isEmpty,
+                     detail: c.incomplete.isEmpty ? nil : "\(c.incomplete.count) unvollständig")
+            tripLinks(c.incomplete)
+            CheckRow(title: "Kilometerstände abgelesen (nicht geschätzt)", ok: c.estimated.isEmpty,
+                     detail: c.estimated.isEmpty ? nil : "\(c.estimated.count) geschätzt")
+            tripLinks(c.estimated)
+            CheckRow(title: "Keine Lücke in der Kilometerkette", ok: c.gaps.isEmpty,
+                     detail: c.gaps.isEmpty ? nil : GapText.summary(c.gaps))
+            CheckRow(title: "Abgleich mit Tankvorgängen/Kilometerständen", ok: c.odometerOk, detail: odometerDetail)
+            CheckRow(title: "Alles synchronisiert", ok: c.pendingOps == 0,
+                     detail: c.pendingOps == 0 ? nil : "\(c.pendingOps) Änderung(en) ausstehend")
+            if c.pendingOps > 0 {
+                Button("Jetzt synchronisieren") { Task { await store.sync() } }
+                    .disabled(store.isSyncing)
+            }
+            ForEach(c.mismatches) { m in
+                Label(m.reason ?? "Abweichung", systemImage: "exclamationmark.triangle")
+                    .font(.footnote)
+                    .foregroundStyle(Color.warningText)
+            }
+            Button {
+                Task { await loadCheck() }
+            } label: {
+                HStack {
+                    Label("Server-Prüfung aktualisieren", systemImage: "arrow.clockwise")
+                    if loadingCheck { Spacer(); ProgressView() }
+                }
+            }
+            .disabled(loadingCheck || AppMode.isDemo)
+            if let checkError {
+                Label(checkError, systemImage: "exclamationmark.triangle")
+                    .font(.footnote).foregroundStyle(Color.warningText)
+            }
+        } header: {
+            Text("Checkliste")
+        } footer: {
+            if !isPast {
+                Text("Der Monat läuft noch – der Abschluss ist erst im Folgemonat möglich.")
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func tripLinks(_ list: [Trip]) -> some View {
+        ForEach(list.prefix(5)) { t in
+            Button {
+                form = EditTarget(value: t)
+            } label: {
+                Text("\(dayText(t)) · \(store.routeLabel(t))")
+                    .font(.footnote)
+            }
+        }
+        if list.count > 5 {
+            Text("… und \(list.count - 5) weitere").font(.footnote).foregroundStyle(.secondary)
+        }
     }
 
     private var odometerDetail: String {
@@ -402,7 +626,9 @@ struct MonthCloseView: View {
     }
 
     private func monthTitle(_ m: String) -> String {
-        store.isMonthClosed(vehicleId: vehicle.id, month: m) ? "\(TripMonth.label(m)) (abgeschlossen)" : TripMonth.label(m)
+        if store.isMonthClosed(vehicleId: vehicle.id, month: m) { return "\(TripMonth.label(m)) (abgeschlossen)" }
+        if m >= TripMonth.current() { return "\(TripMonth.label(m)) (läuft)" }
+        return TripMonth.label(m)
     }
 
     private func dayText(_ t: Trip) -> String {
@@ -410,62 +636,97 @@ struct MonthCloseView: View {
         return "\(Fmt.weekdayDay(d)) \(Fmt.time(d))"
     }
 
+    // MARK: Abgeschlossen
+
     private func closedSection(_ p: TripPeriod) -> some View {
         Section {
-            Label("Abgeschlossen", systemImage: "lock.fill").foregroundStyle(.green)
+            Label("Abgeschlossen", systemImage: "lock.fill").foregroundStyle(Color.successText)
+            if let resultText {
+                Text(resultText).font(.footnote).foregroundStyle(Color.neutralText)
+            }
             if let d = p.closedDate {
                 LabeledContent("Am", value: Fmt.dateTime(d))
             }
             if let by = p.closedBy { LabeledContent("Durch", value: by) }
             if let a = p.kmStart, let b = p.kmEnd {
-                LabeledContent("km-Stand", value: "\(Fmt.km(a)) – \(Fmt.km(b))")
+                LabeledContent("Kilometerstand", value: "\(Fmt.km(a)) – \(Fmt.km(b))")
             }
             LabeledContent("Fahrten", value: "\(p.tripsCount)")
-            LabeledContent(TripCategory.business.label, value: Fmt.kmD(p.businessKm))
-            LabeledContent(TripCategory.personal.label, value: Fmt.kmD(p.privateKm))
-            LabeledContent(TripCategory.commute.label, value: Fmt.kmD(p.commuteKm))
-            LabeledContent(TripCategory.field.label, value: Fmt.kmD(p.fieldKm))
+            LabeledContent(TripCategory.business.uiLabel, value: Fmt.kmD(p.businessKm))
+            LabeledContent(TripCategory.personal.uiLabel, value: Fmt.kmD(p.privateKm))
+            LabeledContent(TripCategory.commute.uiLabel, value: Fmt.kmD(p.commuteKm))
+            LabeledContent(TripCategory.field.uiLabel, value: Fmt.kmD(p.fieldKm))
+            if let n = p.corrections, n > 0 {
+                LabeledContent("Korrekturen nach Abschluss", value: "\(n)")
+            }
             if let note = p.note?.nilIfEmpty {
-                Text(note).font(.caption).foregroundStyle(.orange)
+                Label(note, systemImage: "exclamationmark.lock")
+                    .font(.footnote)
+                    .foregroundStyle(Color.warningText)
             }
         } header: {
             Text("Status")
         } footer: {
-            Text("Fahrten dieses Monats sind gesperrt. Korrekturen nur per Storno und neuer Fahrt mit Begründung; "
+            Text("Fahrten dieses Monats sind gesperrt. Korrekturen nur per Storno bzw. neuer Fahrt mit Begründung; "
                  + "der Abschluss ist mit einem Integritätsanker gesichert.")
         }
     }
 
-    private var closeSection: some View {
+    // MARK: Abschliessen
+
+    private func closeSection(_ c: MonthChecklist) -> some View {
         Section {
             Button {
-                Task { await close(force: false) }
+                confirmation = MonthCloseSummary.make(month: month, vehicleName: vehicle.name, checklist: c,
+                                                      force: false, reason: "")
             } label: {
                 HStack {
-                    Label("Monat abschliessen", systemImage: "lock.doc")
+                    Label("Monat abschliessen …", systemImage: "lock.doc")
                     if closing { Spacer(); ProgressView() }
                 }
             }
-            .disabled(closing || AppMode.isDemo)
+            .disabled(!c.allOk || closing || AppMode.isDemo)
             if let conflict {
                 Label(conflict, systemImage: "exclamationmark.octagon")
-                    .foregroundStyle(.red)
+                    .foregroundStyle(Color.dangerText)
                     .font(.subheadline)
-            }
-            if forceAllowed {
-                TextField("Begründung (mind. 10 Zeichen)", text: $forceReason, axis: .vertical)
-                Button(role: .destructive) {
-                    Task { await close(force: true) }
-                } label: {
-                    Label("Trotz Lücken abschliessen", systemImage: "exclamationmark.lock")
-                }
-                .disabled(closing || !reasonValid)
             }
         } header: {
             Text("Abschliessen")
         } footer: {
-            Text("Nach dem Abschluss sind die Fahrten unveränderlich. Ein erzwungener Abschluss trotz Lücken "
-                 + "wird mit Begründung im Fahrtenbuch vermerkt.")
+            if c.allOk {
+                Text("Nach dem Abschluss sind die Fahrten unveränderlich. Vor dem Abschluss folgt eine Zusammenfassung.")
+            } else {
+                Text("Möglich, sobald alle Punkte der Checkliste erfüllt sind.")
+            }
+        }
+    }
+
+    private func forceSection(_ c: MonthChecklist) -> some View {
+        Section {
+            if forceMode {
+                TextField("Begründung (mind. \(CorrectionReason.minLength) Zeichen)", text: $forceReason,
+                          axis: .vertical)
+                Text(CorrectionReason.hint(forceReason))
+                    .font(.footnote)
+                    .foregroundStyle(reasonValid ? Color.secondary : Color.warningText)
+                Button(role: .destructive) {
+                    confirmation = MonthCloseSummary.make(month: month, vehicleName: vehicle.name, checklist: c,
+                                                          force: true, reason: forceReason.trimmed)
+                } label: {
+                    Label("Trotzdem abschliessen …", systemImage: "exclamationmark.lock")
+                }
+                .disabled(closing || !reasonValid || AppMode.isDemo)
+            } else {
+                Button {
+                    forceMode = true
+                } label: {
+                    Label("Trotzdem abschliessen (mit Begründung)", systemImage: "exclamationmark.lock")
+                }
+                .disabled(AppMode.isDemo)
+            }
+        } footer: {
+            Text("Nur in begründeten Ausnahmen: Offene Punkte und Begründung werden im Fahrtenbuch vermerkt.")
         }
     }
 
@@ -489,10 +750,12 @@ struct MonthCloseView: View {
         } footer: {
             if !store.outbox.isEmpty {
                 Text("\(store.outbox.count) Änderung(en) noch nicht synchronisiert – sie fehlen im PDF.")
-                    .foregroundStyle(.orange)
+                    .foregroundStyle(Color.warningText)
             }
         }
     }
+
+    // MARK: Server
 
     private func loadCheck() async {
         guard !AppMode.isDemo else { return }
@@ -502,32 +765,40 @@ struct MonthCloseView: View {
             check = try await TripServer.check(settings, store, vehicleId: vehicle.id, month: month)
             checkError = nil
         } catch {
-            checkError = "Nur online verfügbar: \(error.localizedDescription)"
+            checkError = "Server-Prüfung nicht möglich: \(error.userMessage)"
         }
     }
 
     private func close(force: Bool) async {
-        guard !AppMode.isDemo else { return }
+        guard !AppMode.isDemo, isPast else { return }
         closing = true
         defer { closing = false }
         await store.sync()   // ausstehende Fahrten zuerst übertragen
-        var payload: [String: Any] = ["force": force]
-        if force { payload["reason"] = forceReason.trimmed }
+        let reason: String? = force ? forceReason.trimmed : nil
         do {
-            let data = try JSONSerialization.data(withJSONObject: payload)
-            let closed: TripPeriod = try await settings.api.send(
-                "POST", "api/t/\(store.tenant.slug)/vehicles/\(vehicle.id)/periods/\(month)/close", body: data)
-            store.storePeriod(closed)
+            let response = try await store.closeMonth(vehicleId: vehicle.id, month: month, force: force,
+                                                      reason: reason)
+            store.storePeriod(response.period)
             conflict = nil
-            forceAllowed = false
+            forceMode = false
             forceReason = ""
+            resultText = Self.summaryText(response)
             await store.sync()   // gesperrte Fahrten holen
         } catch let e as APIError where e.status == 409 {
-            conflict = e.detailText
-            forceAllowed = e.detailHasGaps
+            conflict = e.userMessage
+            forceMode = true
+            await loadCheck()
         } catch {
-            self.error = "Abschluss nur online möglich: \(error.localizedDescription)"
+            self.error = "Abschluss fehlgeschlagen: \(error.userMessage)"
         }
+    }
+
+    private static func summaryText(_ r: PeriodCloseResponse) -> String {
+        var parts: [String] = []
+        if let n = r.lockedTrips { parts.append(n == 1 ? "1 Fahrt gesperrt" : "\(n) Fahrten gesperrt") }
+        if let g = r.gaps, g > 0 { parts.append(g == 1 ? "1 Lücke vermerkt" : "\(g) Lücken vermerkt") }
+        if r.forced == true { parts.append("mit Begründung erzwungen") }
+        return parts.isEmpty ? "Monat abgeschlossen." : parts.joined(separator: " · ")
     }
 
     private func loadPDF() async {
@@ -542,7 +813,7 @@ struct MonthCloseView: View {
             fileURL = url
             previewURL = url
         } catch {
-            self.error = "PDF nur online verfügbar: \(error.localizedDescription)"
+            self.error = "Fahrtenbuch-PDF nicht erstellt: \(error.userMessage)"
         }
     }
 }
@@ -617,7 +888,8 @@ struct TripReportsView: View {
                     HStack { Text("Lade Jahresbericht …"); Spacer(); ProgressView() }
                 }
                 if let reportError {
-                    Text(reportError).font(.caption).foregroundStyle(.orange)
+                    Label(reportError, systemImage: "exclamationmark.triangle")
+                        .font(.footnote).foregroundStyle(Color.warningText)
                 }
             } header: {
                 Text("Jahresbericht")
@@ -713,7 +985,7 @@ struct TripReportsView: View {
                 ForEach(r.warnings, id: \.self) { w in
                     Label(w, systemImage: "exclamationmark.triangle")
                         .font(.subheadline)
-                        .foregroundStyle(.orange)
+                        .foregroundStyle(Color.warningText)
                 }
             }
         }
@@ -754,9 +1026,9 @@ struct TripReportsView: View {
 
     private func categoryTile(_ c: TripCategory, km: Double?, share: Double?) -> some View {
         VStack(alignment: .leading, spacing: 4) {
-            Label(c.label, systemImage: c.systemImage)
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(c.color)
+            Label(c.uiLabel, systemImage: c.systemImage)
+                .font(.footnote.weight(.semibold))
+                .foregroundStyle(c.textColor)
             Text(share.map { Fmt.pct($0) } ?? "–")
                 .font(.title2.weight(.bold).monospacedDigit())
             Text(km.map { Fmt.kmD($0) } ?? "– km")
@@ -767,7 +1039,7 @@ struct TripReportsView: View {
         .padding(10)
         .background(c.color.opacity(0.1), in: RoundedRectangle(cornerRadius: 10))
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("\(c.label): \(share.map { Fmt.pct($0) } ?? "keine Angabe"), \(km.map { Fmt.kmD($0) } ?? "keine Kilometer")")
+        .accessibilityLabel("\(c.uiLabel): \(share.map { Fmt.pct($0) } ?? "keine Angabe"), \(km.map { Fmt.kmD($0) } ?? "keine Kilometer")")
     }
 
     private func itemRow(_ item: YearReportItem) -> some View {
@@ -835,7 +1107,7 @@ struct TripReportsView: View {
             reportError = nil
         } catch {
             report = localReport
-            reportError = "Steuerposten nur online verfügbar: \(error.localizedDescription)"
+            reportError = "Steuerposten nicht geladen: \(error.userMessage)"
         }
     }
 
@@ -849,7 +1121,7 @@ struct TripReportsView: View {
             logbookURL = url
             previewURL = url
         } catch {
-            self.error = "PDF nur online verfügbar: \(error.localizedDescription)"
+            self.error = "Fahrtenbuch-PDF nicht erstellt: \(error.userMessage)"
         }
     }
 
@@ -863,7 +1135,7 @@ struct TripReportsView: View {
                         URLQueryItem(name: "to", value: f.string(from: to))],
                 name: "Fahrzeugbuch_Fahrten_\(vehicle.name)_\(f.string(from: from))_\(f.string(from: to)).csv")
         } catch {
-            self.error = "CSV nur online verfügbar: \(error.localizedDescription)"
+            self.error = "CSV nicht erstellt: \(error.userMessage)"
         }
     }
 
@@ -877,7 +1149,7 @@ struct TripReportsView: View {
             yearPDF = url
             previewURL = url
         } catch {
-            self.error = "PDF nur online verfügbar: \(error.localizedDescription)"
+            self.error = "Jahresbericht-PDF nicht erstellt: \(error.userMessage)"
         }
     }
 }

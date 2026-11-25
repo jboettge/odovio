@@ -108,7 +108,8 @@ enum ExportFile {
     static func write(_ data: Data, name: String) throws -> URL {
         let safe = name.replacingOccurrences(of: "/", with: "-").replacingOccurrences(of: " ", with: "_")
         let url = FileManager.default.temporaryDirectory.appending(path: safe)
-        try data.write(to: url, options: .atomic)
+        // Dateischutz: nur bei entsperrtem Gerät lesbar (S13)
+        try data.write(to: url, options: [.atomic, .completeFileProtection])
         return url
     }
 }
@@ -182,8 +183,15 @@ extension View {
     }
 
     /// Standard-Toolbar für Formulare in Sheets (Speichern wirkt sofort lokal).
-    func formToolbar(canSave: Bool, save: @escaping () -> Void) -> some View {
-        modifier(FormToolbar(canSave: canSave, save: save))
+    /// `hasChanges`: Wischen zum Schliessen sperren und beim Abbrechen nachfragen.
+    func formToolbar(canSave: Bool, hasChanges: Bool = false, save: @escaping () -> Void) -> some View {
+        modifier(FormToolbar(canSave: canSave, hasChanges: hasChanges, save: save))
+    }
+
+    /// Schutz vor verlorenen Eingaben: sperrt das Wegwischen des Sheets bei Änderungen und zeigt
+    /// die Rückfrage „Änderungen verwerfen?“, sobald `isAsking` gesetzt wird.
+    func discardGuard(hasChanges: Bool, isAsking: Binding<Bool>) -> some View {
+        modifier(DiscardGuard(hasChanges: hasChanges, isAsking: isAsking))
     }
 
     /// Bestätigung für Stornierungen (revisionssicher: nichts wird physisch gelöscht).
@@ -204,14 +212,22 @@ extension View {
 private struct FormToolbar: ViewModifier {
     @Environment(\.dismiss) private var dismiss
     let canSave: Bool
+    let hasChanges: Bool
     let save: () -> Void
+    @State private var askDiscard = false
 
     func body(content: Content) -> some View {
         content
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Abbrechen") { dismiss() }
+                    Button("Abbrechen") {
+                        if hasChanges {
+                            askDiscard = true
+                        } else {
+                            dismiss()
+                        }
+                    }
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Sichern") {
@@ -221,33 +237,72 @@ private struct FormToolbar: ViewModifier {
                     .disabled(!canSave)
                 }
             }
+            .discardGuard(hasChanges: hasChanges, isAsking: $askDiscard)
     }
 }
 
-/// Sync-Status als Toolbar-Symbol; Tippen synchronisiert.
+private struct DiscardGuard: ViewModifier {
+    @Environment(\.dismiss) private var dismiss
+    let hasChanges: Bool
+    @Binding var isAsking: Bool
+
+    func body(content: Content) -> some View {
+        content
+            .interactiveDismissDisabled(hasChanges)
+            .alert("Änderungen verwerfen?", isPresented: $isAsking) {
+                Button("Verwerfen", role: .destructive) { dismiss() }
+                Button("Weiter bearbeiten", role: .cancel) {}
+            } message: {
+                Text("Deine Eingaben in diesem Formular gehen verloren.")
+            }
+    }
+}
+
+/// Vergleichswert für „Formular geändert?“ (Felder als Text).
+enum FormSnapshot {
+    static func make(_ parts: [String]) -> String { parts.joined(separator: "\u{1F}") }
+    static func date(_ d: Date) -> String { String(Int(d.timeIntervalSince1970)) }
+}
+
+/// Sync-Status als Toolbar-Symbol; Tippen zeigt Details (inkl. abgelehnter Änderungen).
 struct SyncStatusButton: View {
     // Barrierefreiheit: beschreibt den Status für VoiceOver
     @Environment(TenantStore.self) private var store
     @State private var showInfo = false
+    @State private var showRejected = false
+
+    private var spokenStatus: String {
+        let rejected = store.rejectedOps.count
+        if store.isSyncing { return "Synchronisiert gerade" }
+        if rejected > 0 { return rejected == 1 ? "1 Änderung abgelehnt" : "\(rejected) Änderungen abgelehnt" }
+        if store.syncError != nil { return "Synchronisation fehlgeschlagen" }
+        if store.outbox.isEmpty { return "Synchronisiert" }
+        return "\(store.outbox.count) Änderungen ausstehend"
+    }
 
     var body: some View {
+        let rejected = store.rejectedOps.count
         Button { showInfo = true } label: {
             if store.isSyncing {
                 ProgressView()
+            } else if rejected > 0 {
+                HStack(spacing: 2) {
+                    Image(systemName: "exclamationmark.icloud.fill")
+                    Text("\(rejected)").font(.caption.monospacedDigit().weight(.bold))
+                }
+                .foregroundStyle(Color.dangerText)
             } else if store.syncError != nil {
-                Image(systemName: "exclamationmark.icloud").foregroundStyle(.orange)
+                Image(systemName: "exclamationmark.icloud").foregroundStyle(Color.warningText)
             } else if !store.outbox.isEmpty {
                 HStack(spacing: 2) {
                     Image(systemName: "icloud.and.arrow.up")
-                    Text("\(store.outbox.count)").font(.caption2.monospacedDigit())
+                    Text("\(store.outbox.count)").font(.caption.monospacedDigit())
                 }
             } else {
                 Image(systemName: "checkmark.icloud")
             }
         }
-        .accessibilityLabel(store.isSyncing ? "Synchronisiert gerade"
-                            : store.syncError != nil ? "Synchronisation fehlgeschlagen"
-                            : store.outbox.isEmpty ? "Synchronisiert" : "\(store.outbox.count) Änderungen ausstehend")
+        .accessibilityLabel(spokenStatus)
         .popover(isPresented: $showInfo) {
             VStack(alignment: .leading, spacing: 8) {
                 Text("Synchronisation").font(.headline)
@@ -259,7 +314,20 @@ struct SyncStatusButton: View {
                     Text("Zuletzt: \(last.formatted(date: .abbreviated, time: .shortened))")
                 }
                 if let err = store.syncError {
-                    Text(err).foregroundStyle(.orange)
+                    Label(err, systemImage: "exclamationmark.triangle").foregroundStyle(Color.warningText)
+                }
+                if rejected > 0 {
+                    Button {
+                        showInfo = false
+                        Task { @MainActor in
+                            try? await Task.sleep(nanoseconds: 450_000_000)   // Popover zuerst schliessen
+                            showRejected = true
+                        }
+                    } label: {
+                        Label(rejected == 1 ? "1 abgelehnte Änderung ansehen" : "\(rejected) abgelehnte Änderungen ansehen",
+                              systemImage: "exclamationmark.triangle.fill")
+                            .foregroundStyle(Color.dangerText)
+                    }
                 }
                 Button("Jetzt synchronisieren") { Task { await store.sync() } }
                     .buttonStyle(.borderedProminent)
@@ -268,6 +336,9 @@ struct SyncStatusButton: View {
             .font(.subheadline)
             .padding()
             .presentationCompactAdaptation(.popover)
+        }
+        .sheet(isPresented: $showRejected) {
+            ModalNavigation { RejectedOpsView() }
         }
     }
 }
@@ -317,20 +388,122 @@ struct UnitField: View {
     }
 }
 
-/// Kleines farbiges Etikett (Teilbetankung, Überfällig, Ausstehend …).
+/// Kleines Etikett (Teilbetankung, Überfällig, Ausstehend …): Text + optional Symbol, nie nur Farbe.
+/// Systemfarben werden auf kontrastreiche Varianten abgebildet (≥ 4.5:1).
 struct StatusTag: View {
     let text: String
-    var color: Color = .orange
+    var color: Color = .warningText
     var systemImage: String?
+
+    private var textColor: Color { Color.accessible(color) }
 
     var body: some View {
         HStack(spacing: 3) {
-            if let systemImage { Image(systemName: systemImage) }
+            if let systemImage { Image(systemName: systemImage).accessibilityHidden(true) }
             Text(text)
         }
-        .font(.caption2.weight(.semibold))
+        .font(.footnote.weight(.semibold))
         .padding(.horizontal, 6).padding(.vertical, 2)
-        .foregroundStyle(color)
-        .background(color.opacity(0.15), in: Capsule())
+        .foregroundStyle(textColor)
+        .background(textColor.opacity(0.12), in: Capsule())
+        .fixedSize(horizontal: false, vertical: true)
+    }
+}
+
+// MARK: Farben (Kontrast)
+
+extension Color {
+    private static func adaptive(light: UIColor, dark: UIColor) -> Color {
+        Color(uiColor: UIColor { traits in traits.userInterfaceStyle == .dark ? dark : light })
+    }
+
+    /// Warnungen/Vorschläge als Text (statt `.orange`, ≈ 6:1 auf Weiss)
+    static let warningText = adaptive(light: UIColor(red: 0.62, green: 0.30, blue: 0.0, alpha: 1),
+                                      dark: UIColor(red: 1.0, green: 0.70, blue: 0.30, alpha: 1))
+    /// Fehler/Überfällig als Text (statt `.red`)
+    static let dangerText = adaptive(light: UIColor(red: 0.70, green: 0.11, blue: 0.10, alpha: 1),
+                                     dark: UIColor(red: 1.0, green: 0.45, blue: 0.42, alpha: 1))
+    /// Erfüllt/OK als Text (statt `.green`)
+    static let successText = adaptive(light: UIColor(red: 0.10, green: 0.45, blue: 0.20, alpha: 1),
+                                      dark: UIColor(red: 0.30, green: 0.85, blue: 0.45, alpha: 1))
+    /// Information als Text (statt `.blue`)
+    static let infoText = adaptive(light: UIColor(red: 0.0, green: 0.35, blue: 0.80, alpha: 1),
+                                   dark: UIColor(red: 0.40, green: 0.70, blue: 1.0, alpha: 1))
+    static let purpleText = adaptive(light: UIColor(red: 0.50, green: 0.20, blue: 0.70, alpha: 1),
+                                     dark: UIColor(red: 0.80, green: 0.60, blue: 1.0, alpha: 1))
+    /// Neutrale Kleinschrift (dunkler als `.secondary`)
+    static let neutralText = adaptive(light: UIColor(red: 0.30, green: 0.30, blue: 0.32, alpha: 1),
+                                      dark: UIColor(red: 0.78, green: 0.78, blue: 0.80, alpha: 1))
+
+    /// Bildet Systemfarben auf kontrastreiche Textfarben ab.
+    static func accessible(_ c: Color) -> Color {
+        if c == .orange || c == .yellow { return .warningText }
+        if c == .red { return .dangerText }
+        if c == .green { return .successText }
+        if c == .blue { return .infoText }
+        if c == .purple { return .purpleText }
+        if c == .gray || c == .secondary { return .neutralText }
+        return c
+    }
+}
+
+extension TripCategory {
+    /// Begriffe laut Glossar (Kategorie „Privatfahrt“ ≠ Privatmodus ≠ Privatfahrzeug ≠ vertraulicher Ort)
+    var uiLabel: String { self == .personal ? "Privatfahrt" : label }
+
+    /// Kontrastreiche Textfarbe der Kategorie (Füllflächen nutzen weiterhin `color`)
+    var textColor: Color {
+        switch self {
+        case .business: .warningText
+        case .personal: .neutralText
+        case .commute: .infoText
+        case .field: .purpleText
+        case .unknown: .warningText
+        }
+    }
+}
+
+extension Trip {
+    /// Für die Leserolle maskierte Privatfahrt (ohne Orte/Zweck) oder Privatmodus.
+    var isMaskedPrivate: Bool {
+        privateMode || (category == TripCategory.personal.rawValue && startLabel == nil && endLabel == nil
+                        && startPlaceId == nil && endPlaceId == nil)
+    }
+}
+
+extension TenantStore {
+    /// Strecke für die Anzeige; maskierte Privatfahrten erscheinen als „Privatfahrt“.
+    func routeLabel(_ t: Trip) -> String {
+        t.isMaskedPrivate ? "Privatfahrt" : routeText(t)
+    }
+
+    /// Kundenname: Stammdaten, sonst vom Server mitgelieferter Name.
+    func customerLabel(_ t: Trip) -> String? {
+        if let id = t.customerId, let c = customer(id: id) { return c.name }
+        return t.customerName?.nilIfEmpty
+    }
+}
+
+/// Kilometer-Texte mit Kennzeichnung geschätzter Werte („ca.“).
+enum KmText {
+    static func value(_ km: Int, estimated: Bool) -> String {
+        estimated ? "ca. " + Fmt.km(km) : Fmt.km(km)
+    }
+
+    static func distance(_ t: Trip) -> String {
+        guard let d = t.distanceKm else { return "– km" }
+        return t.kmEstimated ? "ca. " + Fmt.kmD(d) : Fmt.kmD(d)
+    }
+
+    /// "+3 km" / "-2 km"
+    static func signed(_ km: Int) -> String {
+        let sign: String = km > 0 ? "+" : ""
+        return sign + Fmt.km(km)
+    }
+
+    static func range(_ t: Trip) -> String? {
+        guard let a = t.kmStart, let b = t.kmEnd else { return nil }
+        let prefix: String = t.kmEstimated ? "ca. " : ""
+        return prefix + Fmt.km(a) + " → " + Fmt.km(b)
     }
 }

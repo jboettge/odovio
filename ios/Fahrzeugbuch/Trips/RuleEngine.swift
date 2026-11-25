@@ -34,6 +34,32 @@ enum RuleEngine {
     static let patternWindow: TimeInterval = 28 * 86_400
     static let patternMinCount = 3
 
+    // MARK: Vorschlag übernehmen
+
+    /// `suggestion_*` setzen. Eine Regel mit Auto-Bestätigung bestätigt die Fahrt – ausser die km-Stände
+    /// sind nur geschätzt (GPS): dann bleibt sie „vorgeschlagen“, damit der Tachostand geprüft wird (U3).
+    static func apply(_ s: TripSuggestion, to trip: inout Trip) {
+        trip.suggestionCategory = s.category
+        trip.suggestionPurpose = s.purpose.map { String($0.prefix(Trip.maxPurpose)) }
+        trip.suggestionCustomerId = s.customerId
+        trip.suggestionConfidence = (min(1, max(0, s.confidence)) * 100).rounded() / 100
+        trip.suggestionReason = String(s.reason.prefix(300))
+        trip.suggestionSource = s.source
+        if s.source == "rule" && s.autoConfirm && !trip.kmEstimated {
+            // Regel mit Auto-Bestätigung (pro Regel aktivierbar, im Review sichtbar)
+            trip.category = s.category
+            trip.purpose = s.purpose
+            trip.customerId = s.customerId
+            trip.status = "confirmed"
+        } else {
+            trip.status = "suggested"
+        }
+        if trip.privateMode {
+            trip.suggestionPurpose = nil
+            trip.suggestionCustomerId = nil
+        }
+    }
+
     // MARK: Stufe 1 – Regeln
 
     static func ruleSuggestion(rules: [PurposeRule], facts: TripFacts, placeNames: [String: String] = [:],
