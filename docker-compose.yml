@@ -1,0 +1,45 @@
+# Portainer: Stacks → Add stack → Repository
+#   Compose path: fahrzeugbuch/docker-compose.yml
+#   Env: API_TOKEN, DB_PASSWORD (siehe .env.example)
+services:
+  db:
+    image: postgres:17-alpine
+    container_name: fahrzeugbuch-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: fahrzeugbuch
+      POSTGRES_USER: fahrzeugbuch
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD fehlt}
+    volumes:
+      - fahrzeugbuch-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fahrzeugbuch -d fahrzeugbuch"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks: [internal]
+
+  api:
+    build: ./server
+    image: fahrzeugbuch-api:latest
+    container_name: fahrzeugbuch-api
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql+psycopg://fahrzeugbuch:${DB_PASSWORD}@db:5432/fahrzeugbuch
+      API_TOKEN: ${API_TOKEN:?API_TOKEN fehlt}
+      # CHECKLIST_FILE: /config/checklists.json
+    # volumes:
+    #   - ./checklists.json:/config/checklists.json:ro
+    ports:
+      - "${API_PORT:-8085}:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+    networks: [internal, default]
+
+volumes:
+  fahrzeugbuch-db:
+
+networks:
+  internal:
+    internal: true
