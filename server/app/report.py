@@ -153,14 +153,20 @@ def integrity_section(db: Session, tenant: models.Tenant) -> tuple[list, dict, m
     return story, audit, anchor
 
 
+def plain(text: str, limit: int = 200) -> str:
+    """Für Canvas-Text und PDF-Metadaten (kein Paragraph-Markup): ohne Steuerzeichen, gekürzt."""
+    return "".join(c if c.isprintable() else " " for c in str(text))[:limit]
+
+
 def footer(title: str, audit: dict, page_width: float):
-    text = f"{title} · Integrität: {'OK' if audit['ok'] else 'FEHLER'} · Kette {audit['head_hash'][:12]}…"
+    text = plain(f"{title} · Integrität: {'OK' if audit['ok'] else 'FEHLER'} · Kette {audit['head_hash'][:12]}…",
+                 180)
 
     def on_page(canvas, doc):
         canvas.saveState()
         canvas.setFont("Helvetica", 7)
         canvas.setFillColor(colors.grey)
-        canvas.drawString(15 * mm, 10 * mm, text[:180])
+        canvas.drawString(15 * mm, 10 * mm, text)
         canvas.drawRightString(page_width - 15 * mm, 10 * mm, f"Seite {doc.page}")
         canvas.restoreState()
     return on_page
@@ -307,6 +313,6 @@ def build_report(
     buf = io.BytesIO()
     doc = SimpleDocTemplate(buf, pagesize=A4, leftMargin=15 * mm, rightMargin=15 * mm,
                             topMargin=15 * mm, bottomMargin=18 * mm,
-                            title=f"Fahrzeugbuch {v.name}", author=user_name or "Fahrzeugbuch")
+                            title=plain(f"Fahrzeugbuch {v.name}"), author=plain(user_name or "Fahrzeugbuch"))
     doc.build(story, onFirstPage=on_page, onLaterPages=on_page)
     return buf.getvalue()

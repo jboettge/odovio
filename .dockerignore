@@ -1,0 +1,19 @@
+# Build-Kontext fahrzeugbuch/ (server/Dockerfile): nur server/ (ohne Tests) und web/ (Quellen) ins Image
+**/__pycache__
+**/*.pyc
+**/.pytest_cache
+**/.ruff_cache
+**/.test.db*
+**/.env
+**/.env.*
+.git
+ios/
+docs/
+deploy/
+keycloak/
+server/tests/
+web/node_modules
+web/dist
+web/screenshots
+web/test-results
+web/playwright-report

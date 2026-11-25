@@ -30,10 +30,11 @@ from fastapi.responses import JSONResponse
 from fastapi.routing import APIRoute
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
-from . import classify, geo, vision
+from . import classify, geo, security, vision
 from .auth import TENANT_SLUG, User, can_write, require_user
 from .classify import PrivateTrip, SuggestRequest
 from .geo import GeoNoResult, GeoUnavailable, InvalidTrack, UpstreamBusy, UpstreamError
+from .schemas import Clean
 
 log = logging.getLogger("fahrzeugbuch.intel")
 SCAN_MAX_IMAGE = vision.MAX_IMAGE_BYTES
@@ -77,6 +78,7 @@ class RateLimiter:
                 q.popleft()
             if len(q) >= limit:
                 retry = max(1, int(self.window - (now - q[0])) + 1)
+                security.event("rate_limited", status=429, reason=key.split(":", 1)[0], throttle=10)
                 raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "Zu viele Anfragen",
                                     headers={"Retry-After": str(retry)})
             q.append(now)
@@ -114,9 +116,12 @@ GeoUser = Annotated[User, Depends(geo_user)]
 
 def write_access(tenant: str, user: CurrentUser) -> User:
     slug = tenant.lower()
-    role = user.tenants.get(slug) if TENANT_SLUG.match(slug) else None
+    role = user.tenants.get(slug) if len(slug) <= 64 and TENANT_SLUG.match(slug) else None
     if role is None:
-        raise HTTPException(status.HTTP_403_FORBIDDEN, f"Kein Zugriff auf Mandant {tenant}")
+        security.mark_probe("forbidden_tenant")
+        security.event("forbidden_tenant", status=403, tenant=slug, reason="kein Mandantenrecht")
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Kein Zugriff auf diesen Mandanten")
+    security.set_tenant(slug)
     if not can_write(role):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Nur Lesezugriff auf diesen Mandanten")
     return user
@@ -133,7 +138,7 @@ def _upstream(e: Exception, what: str) -> HTTPException:
 
 
 # ---------- Schemas ----------
-class _In(BaseModel):
+class _In(Clean):
     model_config = ConfigDict(allow_inf_nan=False, extra="ignore")
 
 

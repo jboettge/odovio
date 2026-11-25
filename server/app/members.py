@@ -30,7 +30,7 @@ from fastapi import HTTPException, status
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from . import models
+from . import models, security
 from .audit import append_revision
 from .auth import ADMIN_SUFFIX, ROLE_RANK, User, group_prefix, higher_role
 from .geo import UPSTREAMS, UpstreamBusy, UpstreamError, env_float
@@ -44,6 +44,15 @@ GROUP_TTL_S = 300
 MEMBER_ID = re.compile(r"^[A-Za-z0-9-]{1,36}$")
 ROLE_GROUP_SUFFIX = {"write": None, "read": "lesen", "admin": ADMIN_SUFFIX}
 NOT_CONFIGURED = "Mitgliederverwaltung nicht konfiguriert"
+
+
+def _seg(value: str) -> str:
+    """Ein Pfadsegment der Admin-API: nur Keycloak-IDs (UUID-artig), URL-kodiert – keine Pfad-Injection
+    (auch nicht über IDs aus Keycloak-Antworten)."""
+    value = str(value)
+    if not MEMBER_ID.match(value):
+        raise UpstreamError("ungültige Keycloak-ID")
+    return urllib.parse.quote(value, safe="")
 
 
 class KeycloakDenied(Exception):
@@ -174,7 +183,7 @@ class KeycloakAdmin:
         parent, _, name = path.strip("/").rpartition("/")
         if parent:
             pid = self.ensure_group("/" + parent)
-            code, _, hdrs = self.call("POST", f"/groups/{pid}/children", {"name": name})
+            code, _, hdrs = self.call("POST", f"/groups/{_seg(pid)}/children", {"name": name})
         else:
             code, _, hdrs = self.call("POST", "/groups", {"name": name})
         if code not in (200, 201, 204, 409):
@@ -189,7 +198,7 @@ class KeycloakAdmin:
     def group_members(self, gid: str) -> list[dict]:
         out: list[dict] = []
         while len(out) < MAX_MEMBERS:
-            code, page, _ = self.call("GET", f"/groups/{gid}/members",
+            code, page, _ = self.call("GET", f"/groups/{_seg(gid)}/members",
                                       query={"first": len(out), "max": PAGE, "briefRepresentation": "true"})
             if code == 404:
                 return out
@@ -213,16 +222,16 @@ class KeycloakAdmin:
         return None
 
     def get_user(self, uid: str) -> dict | None:
-        code, user, _ = self.call("GET", f"/users/{uid}")
+        code, user, _ = self.call("GET", f"/users/{_seg(uid)}")
         return user if code == 200 and isinstance(user, dict) else None
 
     def join(self, uid: str, gid: str) -> None:
-        code, _, _ = self.call("PUT", f"/users/{uid}/groups/{gid}")
+        code, _, _ = self.call("PUT", f"/users/{_seg(uid)}/groups/{_seg(gid)}")
         if code not in (200, 204):
             raise UpstreamError(f"Gruppe zuweisen: HTTP {code}")
 
     def leave(self, uid: str, gid: str) -> None:
-        code, _, _ = self.call("DELETE", f"/users/{uid}/groups/{gid}")
+        code, _, _ = self.call("DELETE", f"/users/{_seg(uid)}/groups/{_seg(gid)}")
         if code not in (200, 204, 404):
             raise UpstreamError(f"Gruppe entfernen: HTTP {code}")
 
@@ -378,6 +387,7 @@ def add_member(db, tenant, user: User, kc: KeycloakAdmin, query: str, role: str,
 def _member_or_404(members: dict[str, Membership], uid: str) -> Membership:
     m = members.get(uid) if MEMBER_ID.match(uid) else None
     if m is None:
+        security.mark_probe("unknown_member")
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Mitglied nicht gefunden")
     return m
 

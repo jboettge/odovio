@@ -3,6 +3,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import unicodedata
 import uuid
 from contextlib import asynccontextmanager
@@ -17,7 +18,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
-from . import intel, logfilter, members, models, privacy, schemas, web
+from . import intel, logfilter, members, models, privacy, schemas, security, web
 from .activity import ACTIVITY_LIMIT, ACTIVITY_MAX, activity
 from .attachments import (
     EXTENSIONS,
@@ -45,18 +46,17 @@ from .timeutil import current_month, today
 from .trips import PeriodError, check_month, close_period, month_bounds, send_webhook, webhook_url
 
 log = logging.getLogger("fahrzeugbuch")
-logfilter.install()    # Zugriffslog ohne Query-Strings
+logfilter.install()          # Zugriffslog ohne Query-Strings
+security.install_logging()   # Logs ohne Steuerzeichen, mit Request-ID; Sicherheits-Log als JSON-Zeilen
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    # Unsichere Konfiguration → Warnungen im Sicherheits-Log (config_warning); STRICT_CONFIG=1 → Abbruch
+    security.check_config()
     # Mit getrennter App-Rolle (Compose) migriert der Dienst "migrate"; die API darf das nicht.
     if os.environ.get("AUTO_MIGRATE", "1") == "1":
         create_schema(engine)
-    if os.environ.get("DEFAULT_TENANT") and not os.environ.get("OIDC_REQUIRED_ROLE"):
-        log.warning("DEFAULT_TENANT ohne OIDC_REQUIRED_ROLE: jeder Realm-Benutzer erhält Schreibzugriff")
-    if signing_key() is None:
-        log.warning("ANCHOR_SIGNING_KEY fehlt: Hash-Kette wird nicht signiert verankert")
     yield
 
 
@@ -64,8 +64,12 @@ async def lifespan(_: FastAPI):
 SCAN_MAX_BODY = 4 * ((intel.SCAN_MAX_IMAGE + 2) // 3) + 64 * 1024
 
 
+MAX_AUTH_HEADER = 8 * 1024
+
+
 class RequestGuard:
-    """ASGI: (1) /api/* ohne Bearer-Header → 401 bevor der Body gelesen wird,
+    """ASGI: (1) /api/* ohne Bearer-Header bzw. mit Authorization-Header > 8 KiB → 401 bevor der Body
+    gelesen und das Token geparst wird,
     (2) Body-Grösse begrenzen (Content-Length und tatsächlich gestreamte Bytes),
     (3) alle /api/*-Antworten mit `Cache-Control: no-store` (keine Mandantendaten in Geräte-/Proxy-Caches).
     Belegdateien (…/blob) dürfen bis `max_upload`, die Bildauswertung (…/scan) bis SCAN_MAX_BODY,
@@ -88,12 +92,20 @@ class RequestGuard:
         headers = dict(scope.get("headers") or [])
         if scope["path"].startswith("/api/"):
             send = _no_store(send)
-            if not headers.get(b"authorization", b"").lower().startswith(b"bearer "):
+            authorization = headers.get(b"authorization", b"")
+            if len(authorization) > MAX_AUTH_HEADER:
+                security.auth_failure("oversized_token")
+                return await self._reply(send, 401, b'{"detail":"Token ung\\u00fcltig"}',
+                                         [(b"www-authenticate", b"Bearer")])
+            if not authorization.lower().startswith(b"bearer "):
+                security.auth_failure("missing_token")
                 return await self._reply(send, 401, b'{"detail":"Token fehlt"}',
                                          [(b"www-authenticate", b"Bearer")])
         max_body = self.limit_for(scope["path"])
         length = headers.get(b"content-length")
         if length is not None and (not length.isdigit() or int(length) > max_body):
+            if scope["path"].endswith("/blob"):
+                security.event("upload_rejected", status=413, reason="too_large")
             return await self._reply(send, 413, b'{"detail":"Anfrage zu gross"}')
         received = 0
 
@@ -109,6 +121,8 @@ class RequestGuard:
         try:
             await self.app(scope, limited, send)
         except _TooLarge:
+            if scope["path"].endswith("/blob"):
+                security.event("upload_rejected", status=413, reason="too_large")
             await self._reply(send, 413, b'{"detail":"Anfrage zu gross"}')
 
     @staticmethod
@@ -135,10 +149,15 @@ _docs = os.environ.get("DOCS_ENABLED") == "1"
 app = FastAPI(title="Fahrzeugbuch", version="2.2.0", lifespan=lifespan,
               docs_url="/docs" if _docs else None, redoc_url=None,
               openapi_url="/openapi.json" if _docs else None)
+# Reihenfolge (aussen → innen): SecurityMiddleware (Request-ID, Host, IP-Sperre/Rate-Limit, CORS/CSRF, Header)
+# → WebSecurityHeaders (CSP für das Frontend) → RequestGuard (Bearer vorhanden, Body-Limits, no-store)
+# → JsonGuard (JSON-Tiefe/-Elemente vor dem Parsen) → App
+app.add_middleware(security.JsonGuard)
 app.add_middleware(RequestGuard, max_body=int(os.environ.get("MAX_BODY_BYTES", str(1024 * 1024))),
                    max_upload=max_upload())
 app.include_router(intel.router)
 app.add_middleware(web.WebSecurityHeaders)
+app.add_middleware(security.SecurityMiddleware)
 
 
 @app.exception_handler(RequestValidationError)
@@ -184,21 +203,63 @@ def _get_or_create_tenant(db: Session, slug: str) -> models.Tenant:
 
 def tenant_access(tenant: str, user: CurrentUser, db: DB) -> Access:
     slug = tenant.lower()
-    role = user.tenants.get(slug)
-    if role is None or not TENANT_SLUG.match(slug):
-        raise HTTPException(status.HTTP_403_FORBIDDEN, f"Kein Zugriff auf Mandant {tenant}")
+    role = user.tenants.get(slug) if len(slug) <= 64 and TENANT_SLUG.match(slug) else None
+    if role is None:
+        security.mark_probe("forbidden_tenant")
+        security.event("forbidden_tenant", status=403, tenant=slug, reason="kein Mandantenrecht")
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Kein Zugriff auf diesen Mandanten")
+    security.set_tenant(slug)
     return Access(_get_or_create_tenant(db, slug), role, user)
 
 
 TenantAccess = Annotated[Access, Depends(tenant_access)]
 
+# ---------- Pfadparameter (strikt, nach Anmeldung und Mandantenprüfung) ----------
+UUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+
+
+def _not_found(detail: str) -> HTTPException:
+    """404 für unbekannte/fremde/ungültige IDs – zählt als Probing (Brute-Force-Sperre)."""
+    security.mark_probe("unknown_id")
+    return HTTPException(status.HTTP_404_NOT_FOUND, detail)
+
+
+def _uuid_or_404(value: str, detail: str) -> str:
+    if not UUID_RE.match(value):
+        raise _not_found(detail)
+    return value.lower()
+
+
+def vehicle_id(vid: str, _: TenantAccess) -> str:
+    return _uuid_or_404(vid, "Fahrzeug nicht gefunden")
+
+
+def attachment_id(aid: str, _: TenantAccess) -> str:
+    return _uuid_or_404(aid, "Beleg nicht gefunden")
+
+
+def month_path(month: str, _: TenantAccess) -> str:
+    return _month(month)
+
+
+def member_id(member_id: str, _: TenantAccess) -> str:
+    if not members.MEMBER_ID.match(member_id):
+        raise _not_found("Mitglied nicht gefunden")
+    return member_id
+
+
+VehicleId = Annotated[str, Depends(vehicle_id)]
+AttachmentId = Annotated[str, Depends(attachment_id)]
+MonthPath = Annotated[str, Depends(month_path)]
+MemberId = Annotated[str, Depends(member_id)]
+
 
 def _vehicle_or_404(db: Session, access: Access, vid: str, **kw) -> VehicleData:
     """404 nur, wenn das Fahrzeug nie existiert hat bzw. einem anderen Mandanten gehört (Berichte:
     allow_deleted=True → auch stornierte Fahrzeuge)."""
-    data = load_vehicle(db, access.tenant.id, vid, **kw)
+    data = load_vehicle(db, access.tenant.id, vid, **kw) if UUID_RE.match(vid) else None
     if data is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Fahrzeug nicht gefunden")
+        raise _not_found("Fahrzeug nicht gefunden")
     return data
 
 
@@ -221,6 +282,7 @@ def _require_admin_web(access: Access) -> None:
     if access.role != "admin":
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Nur für Verwalter dieses Mandanten")
     if not access.user.web:
+        security.event("web_only_violation", status=403, reason="Mitgliederverwaltung")
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Verwaltung nur im Webfrontend")
 
 
@@ -268,9 +330,13 @@ def _period(date_from: dt.date | None, date_to: dt.date | None, month: str | Non
 
 def content_disposition(filename: str, disposition: str = "attachment") -> str:
     """RFC 6266: ASCII-Fallback + UTF-8 (filename*), keine Steuer-/Anführungszeichen."""
-    clean = "".join(c if c.isprintable() and c not in '"\\/;' else "_" for c in filename).replace(" ", "_")
+    clean = "".join(c if c.isprintable() and c not in '"\\/;%' else "_" for c in filename).replace(" ", "_")
+    clean = unicodedata.normalize("NFC", clean)[:150] or "Fahrzeugbuch.pdf"
     ascii_name = unicodedata.normalize("NFKD", clean).encode("ascii", "ignore").decode() or "Fahrzeugbuch.pdf"
-    return f'{disposition}; filename="{ascii_name}"; filename*=UTF-8\'\'{quote(clean)}'
+    ascii_name = "".join(c if c.isprintable() and c not in '"\\/;%' else "_" for c in ascii_name)
+    if disposition not in ("attachment", "inline"):
+        disposition = "attachment"
+    return f'{disposition}; filename="{ascii_name}"; filename*=UTF-8\'\'{quote(clean, safe="")}'
 
 
 # ---------- öffentlich ----------
@@ -343,13 +409,13 @@ def list_vehicles(access: TenantAccess, db: DB):
 
 
 @app.get("/api/t/{tenant}/vehicles/{vid}/stats", response_model=schemas.Stats)
-def get_stats(vid: str, access: TenantAccess, db: DB):
+def get_stats(vid: VehicleId, access: TenantAccess, db: DB):
     return vehicle_stats(_vehicle_or_404(db, access, vid, allow_deleted=True))
 
 
 @app.get("/api/t/{tenant}/vehicles/{vid}/report.pdf", response_class=Response)
 def get_report(
-    vid: str,
+    vid: VehicleId,
     access: TenantAccess,
     db: DB,
     date_from: Annotated[dt.date | None, Query(alias="from")] = None,
@@ -375,7 +441,7 @@ MonthQ = Annotated[str | None, Query(max_length=7)]
 
 
 @app.get("/api/t/{tenant}/vehicles/{vid}/trips/check")
-def trips_check(vid: str, access: TenantAccess, db: DB, month: Annotated[str, Query(max_length=7)]):
+def trips_check(vid: VehicleId, access: TenantAccess, db: DB, month: Annotated[str, Query(max_length=7)]):
     """km-Kette, Plausibilität und Odometer-Abgleich eines Monats (nur Einträge des Monats laden)."""
     first, last = month_bounds(_month(month))
     data = _vehicle_or_404(db, access, vid, allow_deleted=True, date_from=first, date_to=last, children=False)
@@ -383,7 +449,7 @@ def trips_check(vid: str, access: TenantAccess, db: DB, month: Annotated[str, Qu
 
 
 @app.post("/api/t/{tenant}/vehicles/{vid}/periods/{month}/close")
-def period_close(vid: str, month: str, req: schemas.CloseRequest, access: TenantAccess, db: DB,
+def period_close(vid: VehicleId, month: MonthPath, req: schemas.CloseRequest, access: TenantAccess, db: DB,
                  background: BackgroundTasks):
     """Monatsabschluss (nur abgelaufene Monate, lokale Zeit): Fahrten sperren, Namen einfrieren,
     Abschluss ins Journal, signierten Anker erzwingen."""
@@ -409,7 +475,7 @@ def period_close(vid: str, month: str, req: schemas.CloseRequest, access: Tenant
 
 
 @app.get("/api/t/{tenant}/vehicles/{vid}/logbook.pdf", response_class=Response)
-def get_logbook(vid: str, access: TenantAccess, db: DB, month: MonthQ = None,
+def get_logbook(vid: VehicleId, access: TenantAccess, db: DB, month: MonthQ = None,
                 date_from: DateFrom = None, date_to: DateTo = None):
     _report_rate(access)
     if month is None and date_from is None and date_to is None:
@@ -427,7 +493,7 @@ def get_logbook(vid: str, access: TenantAccess, db: DB, month: MonthQ = None,
 
 
 @app.get("/api/t/{tenant}/vehicles/{vid}/trips.csv", response_class=Response)
-def get_trips_csv(vid: str, access: TenantAccess, db: DB, date_from: DateFrom = None, date_to: DateTo = None):
+def get_trips_csv(vid: VehicleId, access: TenantAccess, db: DB, date_from: DateFrom = None, date_to: DateTo = None):
     _report_rate(access)
     date_from, date_to = _period(date_from, date_to, max_days=LOGBOOK_MAX_DAYS)
     _vehicle_or_404(db, access, vid, allow_deleted=True, children=False)
@@ -444,14 +510,14 @@ YearQ = Annotated[int | None, Query(ge=2000, le=2100)]
 
 
 @app.get("/api/t/{tenant}/vehicles/{vid}/year-report")
-def get_year_report(vid: str, access: TenantAccess, db: DB, year: YearQ = None):
+def get_year_report(vid: VehicleId, access: TenantAccess, db: DB, year: YearQ = None):
     _report_rate(access)
     data = _vehicle_or_404(db, access, vid, allow_deleted=True)
     return year_report(db, access.tenant, data, year or today().year)
 
 
 @app.get("/api/t/{tenant}/vehicles/{vid}/year-report.pdf", response_class=Response)
-def get_year_report_pdf(vid: str, access: TenantAccess, db: DB, year: YearQ = None):
+def get_year_report_pdf(vid: VehicleId, access: TenantAccess, db: DB, year: YearQ = None):
     _report_rate(access)
     year = year or today().year
     _vehicle_or_404(db, access, vid, allow_deleted=True, children=False)
@@ -479,11 +545,16 @@ def _attachment_or_404(db: Session, access: Access, aid: str) -> models.Attachme
     try:
         aid = str(uuid.UUID(aid))
     except ValueError:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Beleg nicht gefunden") from None
+        raise _not_found("Beleg nicht gefunden") from None
     att = db.get(models.Attachment, aid)
     if att is None or att.tenant_id != access.tenant.id:   # fremder Mandant → wie nicht vorhanden
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Beleg nicht gefunden")
+        raise _not_found("Beleg nicht gefunden")
     return att
+
+
+def _upload_rejected(code: int, detail: str, reason: str) -> HTTPException:
+    security.event("upload_rejected", status=code, reason=reason)
+    return HTTPException(code, detail)
 
 
 def _media_type(value: str | None) -> str:
@@ -492,35 +563,38 @@ def _media_type(value: str | None) -> str:
 
 @app.put("/api/t/{tenant}/attachments/{aid}/blob", status_code=status.HTTP_201_CREATED,
          responses={200: {"description": "Datei war bereits gespeichert (gleiche Prüfsumme)"}})
-def put_attachment_blob(aid: str, request: Request, background: BackgroundTasks, db: DB,
+def put_attachment_blob(aid: AttachmentId, request: Request, background: BackgroundTasks, db: DB,
                         access: Annotated[Access, Depends(_write_access)],
                         body: Annotated[bytes, Depends(_raw_body)]):
     """Datei zu bestehenden Beleg-Metadaten hochladen (Roh-Body, Content-Type = mime der Metadaten).
     Idempotent; eine gespeicherte Datei wird nie überschrieben."""
     att = _attachment_or_404(db, access, aid)
     if len(body) > schemas.MAX_ATTACHMENT_BYTES:
-        raise HTTPException(status.HTTP_413_CONTENT_TOO_LARGE, "Anfrage zu gross")
+        raise _upload_rejected(status.HTTP_413_CONTENT_TOO_LARGE, "Anfrage zu gross", "too_large")
     if _media_type(request.headers.get("content-type")) != att.mime:
-        raise HTTPException(status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, "Content-Type entspricht nicht dem Beleg (mime)")
+        raise _upload_rejected(status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+                               "Content-Type entspricht nicht dem Beleg (mime)", "content_type")
     if not content_matches(att.mime, body):
-        raise HTTPException(status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
-                            f"Dateiinhalt ist kein {EXTENSIONS.get(att.mime, att.mime).upper()} (Magic Bytes)")
+        raise _upload_rejected(status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+                               f"Dateiinhalt ist kein {EXTENSIONS.get(att.mime, att.mime).upper()} (Magic Bytes)",
+                               "magic_bytes")
     if len(body) != att.size:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "Grösse stimmt nicht")
+        raise _upload_rejected(status.HTTP_422_UNPROCESSABLE_CONTENT, "Grösse stimmt nicht", "size")
     if hashlib.sha256(body).hexdigest() != att.sha256:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "Prüfsumme stimmt nicht")
+        raise _upload_rejected(status.HTTP_422_UNPROCESSABLE_CONTENT, "Prüfsumme stimmt nicht", "sha256")
     path = blob_path(access.tenant.id, att.id)
     if path.is_file():
         if file_sha256(path) == att.sha256:
             return JSONResponse({"stored": True, "existing": True}, status_code=status.HTTP_200_OK)
         log.error("Beleg %s: gespeicherte Datei weicht von der Prüfsumme ab – nicht überschrieben", att.id)
-        raise HTTPException(status.HTTP_409_CONFLICT, "Datei existiert bereits mit anderem Inhalt")
+        raise _upload_rejected(status.HTTP_409_CONFLICT, "Datei existiert bereits mit anderem Inhalt", "exists")
     if att.deleted:
-        raise HTTPException(status.HTTP_409_CONFLICT, "Beleg storniert")
+        raise _upload_rejected(status.HTTP_409_CONFLICT, "Beleg storniert", "deleted")
     quota = quota_bytes()
     if tenant_usage(access.tenant.id) + len(body) > quota:
-        raise HTTPException(status.HTTP_507_INSUFFICIENT_STORAGE,
-                            f"Speicherkontingent für Belege erschöpft (max. {quota // (1024 * 1024)} MB je Mandant)")
+        raise _upload_rejected(status.HTTP_507_INSUFFICIENT_STORAGE,
+                               f"Speicherkontingent für Belege erschöpft (max. {quota // (1024 * 1024)} MB je Mandant)",
+                               "quota")
     try:
         store_blob(path, body)
     except OSError as e:
@@ -537,7 +611,7 @@ def put_attachment_blob(aid: str, request: Request, background: BackgroundTasks,
 
 
 @app.get("/api/t/{tenant}/attachments/{aid}/blob", response_class=FileResponse)
-def get_attachment_blob(aid: str, access: TenantAccess, db: DB):
+def get_attachment_blob(aid: AttachmentId, access: TenantAccess, db: DB):
     """Datei eines Belegs (auch stornierter Belege: revisionssicher abrufbar)."""
     att = _attachment_or_404(db, access, aid)
     path = blob_path(access.tenant.id, att.id)
@@ -557,7 +631,8 @@ def get_attachment_blob(aid: str, access: TenantAccess, db: DB):
 @app.get("/api/t/{tenant}/history/{entity}/{eid}", response_model=list[schemas.RevisionOut])
 def get_history(entity: str, eid: str, access: TenantAccess, db: DB):
     if entity not in ENTITIES:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Unbekannter Objekttyp")
+        raise _not_found("Unbekannter Objekttyp")
+    eid = _uuid_or_404(eid, "Objekt nicht gefunden")
     q = select(models.Revision).where(
         models.Revision.tenant_id == access.tenant.id,
         models.Revision.entity == entity,
@@ -653,21 +728,26 @@ def _member_change(db: Session, tenant: models.Tenant, fn):
 def add_member(req: schemas.MemberCreate, access: TenantAccess, db: DB):
     """Benutzer (Benutzername oder E-Mail, muss in Keycloak existieren) mit genau einer Rolle aufnehmen."""
     kc, tenant = _member_admin(access, db)
-    return _member_change(db, tenant, lambda t: members.add_member(db, t, access.user, kc, req.user, req.role,
-                                                                   is_admin=True))
+    out = _member_change(db, tenant, lambda t: members.add_member(db, t, access.user, kc, req.user, req.role,
+                                                                  is_admin=True))
+    security.event("admin_action", status=201, reason="member_add", target=out["id"], role=req.role)
+    return out
 
 
 @app.patch("/api/t/{tenant}/members/{member_id}", response_model=schemas.Member)
-def patch_member(member_id: str, req: schemas.MemberUpdate, access: TenantAccess, db: DB):
+def patch_member(member_id: MemberId, req: schemas.MemberUpdate, access: TenantAccess, db: DB):
     kc, tenant = _member_admin(access, db)
-    return _member_change(db, tenant, lambda t: members.change_role(db, t, access.user, kc, member_id, req.role,
-                                                                    is_admin=True))
+    out = _member_change(db, tenant, lambda t: members.change_role(db, t, access.user, kc, member_id, req.role,
+                                                                   is_admin=True))
+    security.event("admin_action", status=200, reason="member_role", target=member_id, role=req.role)
+    return out
 
 
 @app.delete("/api/t/{tenant}/members/{member_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_member(member_id: str, access: TenantAccess, db: DB):
+def delete_member(member_id: MemberId, access: TenantAccess, db: DB):
     kc, tenant = _member_admin(access, db)
     _member_change(db, tenant, lambda t: members.remove_member(db, t, access.user, kc, member_id))
+    security.event("admin_action", status=204, reason="member_remove", target=member_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 

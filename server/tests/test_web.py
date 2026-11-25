@@ -35,6 +35,16 @@ def test_no_traversal_and_api_untouched(client, tmp_path, monkeypatch):
     assert client.get("/health", headers={"Authorization": ""}).json() == {"status": "ok"}
 
 
+def test_auth_callback_and_client_routes_serve_index(client, tmp_path, monkeypatch):
+    _dist(tmp_path, monkeypatch)
+    for path in ("/auth/callback?code=x&state=y", "/auth/logout", "/uebersicht", "/"):
+        r = client.get(path, headers={"Authorization": ""})
+        assert r.status_code == 200 and "FZB" in r.text, path
+    assert client.get("/auth/config", headers={"Authorization": ""}).json()["client_id"]
+    for path in ("/api/unbekannt", "/openapi.json", "/docs", "/docs/x"):
+        assert client.get(path, headers={"Authorization": ""}).status_code in (401, 404), path
+
+
 def test_without_dist_404(client, monkeypatch, tmp_path):
     monkeypatch.setenv("WEB_DIST", str(tmp_path / "fehlt"))
     assert client.get("/", headers={"Authorization": ""}).status_code == 404

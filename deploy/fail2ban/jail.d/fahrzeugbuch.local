@@ -1,0 +1,21 @@
+# fail2ban-Jail für die Fahrzeugbuch-API (Alternative zu CrowdSec). Sperrt am Docker-Host bzw. – besser –
+# dort, wo der Reverse Proxy läuft (sonst trifft die Sperre nur den Proxy). Bei Docker: Kette DOCKER-USER.
+# logpath: Docker json-file-Log des Containers (docker inspect -f '{{.LogPath}}' fahrzeugbuch-api)
+#          oder bei Log-Treiber journald: backend = systemd, journalmatch = CONTAINER_NAME=fahrzeugbuch-api
+[fahrzeugbuch]
+enabled  = true
+filter   = fahrzeugbuch
+logpath  = /var/lib/docker/containers/*/*-json.log
+backend  = auto
+# Feld "ts" ist UTC
+logtimezone = UTC
+# 15 Ereignisse (401/429/Sperre der API) in 10 min → 1 h sperren, Wiederholungstäter länger
+maxretry = 15
+findtime = 10m
+bantime  = 1h
+bantime.increment = true
+bantime.maxtime = 1w
+chain    = DOCKER-USER
+action   = iptables-allports[name=fahrzeugbuch, chain=DOCKER-USER]
+# eigene Netze/Monitoring nie sperren
+ignoreip = 127.0.0.1/8 ::1 10.0.0.0/8 192.168.0.0/16

@@ -28,6 +28,15 @@
 #           Account und den realm-management-Rollen view-users, query-users, query-groups, manage-users;
 #           das Secret wird am Ende ausgegeben (→ KC_ADMIN_CLIENT_ID/KC_ADMIN_CLIENT_SECRET der API).
 #           Hinweis: manage-users erlaubt dem Service-Account, ALLE Benutzer/Gruppen des Realms zu ändern.
+# REALMWEITE Härtung – wirkt auf ALLE Clients und Benutzer des Realms, daher nur mit explizitem Flag:
+#           ENABLE_BRUTE_FORCE=1   → bruteForceProtected (5 Fehlversuche, Wartezeit +60 s bis max. 15 min,
+#                                    keine permanente Sperre)
+#           SET_PASSWORD_POLICY=1  → passwordPolicy = PASSWORD_POLICY
+#                                    (Default "length(12) and notUsername and passwordHistory(3)")
+#           REQUIRE_ADMIN_OTP=1    → Required Action CONFIGURE_TOTP (realmweit aktivieren) und für alle
+#                                    ADMINS-Benutzer ohne OTP setzen; danach verlangt der Standard-Browser-
+#                                    Flow (Conditional OTP) bei jeder Anmeldung das OTP. Strenger: eigener Flow
+#                                    mit „Condition – User Role/Group“ für die Gruppen …/admin.
 #           Restriktiver: Keycloak 26 Fine-Grained Admin Permissions (FGAP v2, Realm-Einstellung „Admin
 #           Permissions“) – statt manage-users nur Berechtigungen „manage-membership“/„view-members“ auf die
 #           Gruppe /fahrzeugbuch (inkl. Untergruppen) und „view“ auf Benutzer für den Service-Account vergeben.
@@ -49,6 +58,10 @@ WEB_URL=${WEB_URL:-}
 WEB_URL=${WEB_URL%/}
 WEB_CLIENT=${WEB_CLIENT:-fahrzeugbuch-web}
 CREATE_ADMIN_API=${CREATE_ADMIN_API:-0}
+ENABLE_BRUTE_FORCE=${ENABLE_BRUTE_FORCE:-0}
+SET_PASSWORD_POLICY=${SET_PASSWORD_POLICY:-0}
+PASSWORD_POLICY=${PASSWORD_POLICY:-length(12) and notUsername and passwordHistory(3)}
+REQUIRE_ADMIN_OTP=${REQUIRE_ADMIN_OTP:-0}
 ADMIN_API_CLIENT=${ADMIN_API_CLIENT:-fahrzeugbuch-admin-api}
 GROUP_ROOT=fahrzeugbuch
 if [[ -z "${KCADM:-}" ]]; then
@@ -229,6 +242,61 @@ for pair in $ADMINS; do
   IFS=, read -ra users <<< "${pair#*=}"
   for u in "${users[@]}"; do join "$GROUP_ROOT/$t/admin" "$u"; done
 done
+
+# --- REALMWEITE Härtung (nur mit explizitem Flag, siehe Kopf) ------------------
+if [[ "$ENABLE_BRUTE_FORCE" == "1" ]]; then
+  kc update "realms/$REALM" -s bruteForceProtected=true -s permanentLockout=false -s failureFactor=5 \
+    -s waitIncrementSeconds=60 -s maxFailureWaitSeconds=900
+  echo "REALMWEIT ($REALM): Brute-Force-Schutz an (5 Fehlversuche, +60 s, max. 15 min, keine Dauersperre)"
+fi
+if [[ "$SET_PASSWORD_POLICY" == "1" ]]; then
+  kc update "realms/$REALM" -s "passwordPolicy=$PASSWORD_POLICY"
+  echo "REALMWEIT ($REALM): Passwort-Richtlinie = $PASSWORD_POLICY (gilt bei der nächsten Passwortänderung)"
+fi
+json_strings() {  # $1 = JSON-Text → alle "…"-Werte zeilenweise (reines Bash, ohne jq)
+  local rest=$1
+  while [[ $rest =~ \"([^\"]*)\" ]]; do
+    echo "${BASH_REMATCH[1]}"
+    rest=${rest#*"${BASH_REMATCH[0]}"}
+  done
+}
+if [[ "$REQUIRE_ADMIN_OTP" == "1" ]]; then
+  enabled=$(kc get authentication/required-actions/CONFIGURE_TOTP -r "$REALM" --fields enabled --format csv \
+    --noquotes 2>/dev/null | head -1 || true)
+  if [[ "$enabled" != "true" ]]; then
+    kc update authentication/required-actions/CONFIGURE_TOTP -r "$REALM" -s enabled=true
+    echo "REALMWEIT ($REALM): Required Action CONFIGURE_TOTP aktiviert"
+  fi
+  declare -A otp_done=()
+  for pair in $ADMINS; do
+    IFS=, read -ra users <<< "${pair#*=}"
+    for u in "${users[@]}"; do
+      [[ -n "${otp_done[$u]:-}" ]] && continue
+      otp_done[$u]=1
+      uid=$(user_id "$u")
+      [[ -z "$uid" ]] && { warn "Benutzer $u nicht gefunden (OTP)"; continue; }
+      has_otp=0
+      while IFS= read -r a; do [[ "$a" == otp ]] && has_otp=1; done \
+        < <(json_strings "$(kc get "users/$uid/credentials" -r "$REALM")")
+      if [[ "$has_otp" == 1 ]]; then
+        echo "$u: OTP bereits eingerichtet"
+        continue
+      fi
+      actions=()
+      while IFS= read -r a; do
+        [[ -n "$a" && "$a" != requiredActions ]] && actions+=("$a")
+      done < <(json_strings "$(kc get "users/$uid" -r "$REALM" --fields requiredActions)")
+      if [[ " ${actions[*]} " == *" CONFIGURE_TOTP "* ]]; then
+        echo "$u: CONFIGURE_TOTP bereits gesetzt"
+        continue
+      fi
+      actions+=(CONFIGURE_TOTP)
+      list=$(printf '"%s",' "${actions[@]}")
+      kc update "users/$uid" -r "$REALM" -s "requiredActions=[${list%,}]"
+      echo "$u: OTP bei der nächsten Anmeldung einrichten (CONFIGURE_TOTP)"
+    done
+  done
+fi
 
 ISSUER="${KC_PUBLIC_URL:-$KC_URL}/realms/$REALM"
 cat <<INFO

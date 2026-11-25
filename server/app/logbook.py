@@ -11,6 +11,7 @@ import csv
 import datetime as dt
 import io
 import json
+import unicodedata
 from xml.sax.saxutils import escape as _esc
 
 from reportlab.lib.pagesizes import A4, landscape
@@ -37,6 +38,7 @@ from .report import (
     _table,
     footer,
     integrity_section,
+    plain,
 )
 from .stats import VehicleData
 from .tax import DISCLAIMER
@@ -246,19 +248,27 @@ def _build(story: list, page, footer_title: str, audit: dict, title: str, user_n
     on_page = footer(footer_title, audit, page[0])
     buf = io.BytesIO()
     doc = SimpleDocTemplate(buf, pagesize=page, leftMargin=15 * mm, rightMargin=15 * mm,
-                            topMargin=15 * mm, bottomMargin=18 * mm, title=title,
-                            author=user_name or "Fahrzeugbuch")
+                            topMargin=15 * mm, bottomMargin=18 * mm, title=plain(title),
+                            author=plain(user_name or "Fahrzeugbuch"))
     doc.build(story, onFirstPage=on_page, onLaterPages=on_page)
     return buf.getvalue()
 
 
 # ---------- CSV ----------
+FORMULA_START = frozenset("=+-@")
+_LEADING_SPACE = " \u00a0\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u202f\u3000\ufeff"
+
+
 def _cell(v) -> str:
-    """Keine Formel-Injektion in Excel (=, +, -, @ am Anfang von Text)."""
+    """Keine Formel-/DDE-Injektion in Excel/LibreOffice: Text, der (nach Leerraum) mit = + - @ beginnt – auch
+    in Unicode-Varianten wie ＝ ＋ － ＠ ﹦ (NFKC) –, oder mit Tab/CR/LF, bekommt ein führendes Apostroph."""
     if v is None:
         return ""
     s = str(v)
-    return "'" + s if s[:1] in ("=", "+", "-", "@", "\t", "\r") else s
+    if s[:1] in ("\t", "\r", "\n"):
+        return "'" + s
+    first = unicodedata.normalize("NFKC", s.lstrip(_LEADING_SPACE)[:1])[:1]
+    return "'" + s if first in FORMULA_START else s
 
 
 def trips_csv(db: Session, tenant: models.Tenant, data: VehicleData, date_from: dt.date, date_to: dt.date,

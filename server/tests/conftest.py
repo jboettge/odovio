@@ -17,6 +17,14 @@ os.environ.pop("OIDC_REQUIRED_ROLE", None)
 os.environ.pop("DEFAULT_TENANT", None)
 # Rate-Limits der Berichte/Prüfung/Vollabgleich in Tests praktisch aus (eigene Tests setzen sie gezielt)
 os.environ.update(RATE_REPORTS="100000", RATE_VERIFY="100000", RATE_FULL_SYNC="100000")
+# Globale Limits/Brute-Force-Sperre ebenfalls praktisch aus (test_security setzt niedrige Werte gezielt)
+os.environ.update(RATE_IP_PER_MIN="1000000", RATE_IP_BURST="1000000", RATE_PUBLIC_PER_MIN="1000000",
+                  RATE_PUBLIC_BURST="1000000", RATE_WEB_PER_MIN="1000000", RATE_WEB_BURST="1000000",
+                  RATE_USER_PER_MIN="1000000", RATE_USER_BURST="1000000",
+                  BRUTE_401_THRESHOLD="1000000", BRUTE_403_THRESHOLD="1000000")
+for _k in ("ALLOWED_HOSTS", "CORS_ORIGINS", "FORCE_HSTS", "SECURITY_ALLOWLIST", "STRICT_CONFIG", "FORWARDED_ALLOW_IPS",
+           "MAX_TOKEN_LIFETIME_S", "OIDC_ALLOW_HTTP", "N8N_WEBHOOK_URL", "N8N_WEBHOOK_SECRET", "DOCS_ENABLED"):
+    os.environ.pop(_k, None)
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import jwt  # noqa: E402
@@ -24,7 +32,7 @@ import pytest  # noqa: E402
 from cryptography.hazmat.primitives.asymmetric import rsa  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
-from app import attachments, auth, geo, integrity, intel, members  # noqa: E402
+from app import attachments, auth, geo, integrity, intel, members, security  # noqa: E402
 from app.db import Base, engine  # noqa: E402
 from app.main import app  # noqa: E402
 
@@ -62,7 +70,7 @@ def reset_db() -> None:
     with engine.begin() as conn:
         conn.exec_driver_sql("DROP TABLE IF EXISTS alembic_version")
     for reset in (intel.limiter.reset, geo.reset_upstreams, integrity.clear_verify_cache,
-                  attachments.clear_hash_cache, members.reset_clients):
+                  attachments.clear_hash_cache, members.reset_clients, security.reset):
         reset()
 
 

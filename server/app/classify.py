@@ -21,6 +21,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from . import geo
 from .geo import GeoUnavailable, UpstreamError
+from .schemas import Clean
 
 log = logging.getLogger("fahrzeugbuch.classify")
 
@@ -51,7 +52,7 @@ SYSTEM_PROMPT = (
 
 
 # ---------- Eingabe ----------
-class _In(BaseModel):
+class _In(Clean):
     model_config = ConfigDict(allow_inf_nan=False, extra="forbid", str_strip_whitespace=True)
 
 

@@ -1,0 +1,40 @@
+# CrowdSec-Szenarien für die Fahrzeugbuch-API (Parser fahrzeugbuch/security-logs).
+# 1) Sperre der API (brute_force_block) → sofort bannen (die API hat bereits gezählt)
+# 2) viele auth_failed (401) je IP → bannen, auch wenn die API-Schwelle höher eingestellt ist
+# 3) anhaltendes rate_limited (429) je IP → bannen
+type: trigger
+name: fahrzeugbuch/brute-force-block
+description: "Fahrzeugbuch: API hat eine IP wegen Fehlversuchen gesperrt"
+filter: "evt.Meta.log_type == 'fahrzeugbuch_security' && evt.Meta.fzb_event == 'brute_force_block'"
+groupby: evt.Meta.source_ip
+blackhole: 5m
+labels:
+  service: fahrzeugbuch
+  type: bruteforce
+  remediation: true
+---
+type: leaky
+name: fahrzeugbuch/auth-failed
+description: "Fahrzeugbuch: viele fehlgeschlagene Anmeldungen (401) je IP"
+filter: "evt.Meta.log_type == 'fahrzeugbuch_security' && evt.Meta.fzb_event == 'auth_failed'"
+groupby: evt.Meta.source_ip
+capacity: 30
+leakspeed: 10s
+blackhole: 5m
+labels:
+  service: fahrzeugbuch
+  type: bruteforce
+  remediation: true
+---
+type: leaky
+name: fahrzeugbuch/rate-limited
+description: "Fahrzeugbuch: anhaltend Rate-Limit überschritten (429) je IP"
+filter: "evt.Meta.log_type == 'fahrzeugbuch_security' && evt.Meta.fzb_event == 'rate_limited'"
+groupby: evt.Meta.source_ip
+capacity: 20
+leakspeed: 30s
+blackhole: 10m
+labels:
+  service: fahrzeugbuch
+  type: http_dos
+  remediation: true

@@ -1,0 +1,5 @@
+# Ausnahmen für pip-audit (CI-Job server, Schritt „Schwachstellen in Abhängigkeiten“).
+# Eine Ausnahme je Zeile, IMMER mit Begründung (sonst schlägt der CI-Schritt fehl):
+#   <GHSA-/PYSEC-/CVE-ID>  # <warum nicht ausnutzbar / bis wann behoben, Datum, Kürzel>
+# Beispiel (auskommentiert):
+#   GHSA-xxxx-xxxx-xxxx  # betrifft nur den CLI-Modus von xyz, den die API nicht nutzt – 2026-11-25 jb

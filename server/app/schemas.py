@@ -3,7 +3,22 @@ import re
 import uuid
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
+
+from .security import clean_text
+
+# Text aller Eingabe-Schemas: NFC, ohne Steuer-/Bidi-Zeichen; Zeilenumbrüche/Tab nur in Notizen/Begründungen
+MULTILINE_FIELDS = frozenset({"note", "reason"})
+RAW_FIELDS = frozenset({"image_b64"})     # Base64 (Bildauswertung) unverändert
+
+
+class Clean(BaseModel):
+    @field_validator("*", mode="before")
+    @classmethod
+    def _clean_text(cls, v, info: ValidationInfo):
+        if isinstance(v, str) and info.field_name not in RAW_FIELDS:
+            return clean_text(v, multiline=info.field_name in MULTILINE_FIELDS)
+        return v
 
 
 class AuthConfig(BaseModel):
@@ -60,7 +75,7 @@ class MemberList(BaseModel):
     manageable: bool
 
 
-class MemberCreate(BaseModel):
+class MemberCreate(Clean):
     user: str = Field(min_length=1, max_length=255)     # Benutzername oder E-Mail
     role: Role
 
@@ -76,7 +91,7 @@ MAX_KM = 5_000_000
 NOTE = 2000
 
 
-class Payload(BaseModel):
+class Payload(Clean):
     model_config = ConfigDict(allow_inf_nan=False)
 
 
@@ -359,13 +374,13 @@ class TripPeriodData(Payload):
     corrections: int = 0      # Stornos/Korrekturen nach dem Abschluss (Summen bleiben unverändert)
 
 
-class CloseRequest(BaseModel):
+class CloseRequest(Clean):
     force: bool = False
     reason: str | None = Field(default=None, max_length=500)
 
 
 # ---------- Sync-Protokoll ----------
-class SyncOp(BaseModel):
+class SyncOp(Clean):
     op_id: str = Field(min_length=8, max_length=64)
     entity: Literal["vehicle", "odometer", "fuel", "maintenance", "maintenance_item", "maintenance_material",
                     "material_article", "trip", "place", "customer", "purpose_rule", "tax_param", "trip_period",

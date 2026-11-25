@@ -1,0 +1,95 @@
+# Caddy (v2.8+) als Reverse Proxy für das Fahrzeugbuch – BEISPIEL, an die eigene Umgebung anpassen.
+#
+# - TLS automatisch (ACME); HTTP → HTTPS leitet Caddy selbst um.
+# - Header: HSTS, nosniff, Referrer-Policy (die API setzt sie ebenfalls; doppelt schadet nicht).
+# - Body-Grössen: 8 MB für Belegdateien (…/blob), 3 MB für die Bildauswertung (…/scan), sonst 1 MB
+#   (passend zu MAX_UPLOAD_BYTES / SCAN_MAX_BODY / MAX_BODY_BYTES der API).
+# - Zugriffslog OHNE Query-String (Koordinaten, Zeiträume) und ohne Authorization/Cookie.
+# - Die API vertraut X-Forwarded-For/-Proto nur von FORWARDED_ALLOW_IPS = IP dieses Proxys.
+#   Caddy ersetzt X-Forwarded-For standardmässig durch die echte Client-IP (keine Übernahme fremder Werte,
+#   solange `trusted_proxies` nicht gesetzt ist) → IP-Rate-Limits/-Sperren der API greifen je Client.
+# - API-Env dazu: ALLOWED_HOSTS=fahrzeugbuch.j-mb.net,localhost  FORWARDED_ALLOW_IPS=<IP von Caddy>
+#
+# Upstream: API_BIND:API_PORT aus docker-compose (z. B. 10.0.10.5:8085).
+
+{
+	# optional: Plugin github.com/mholt/caddy-ratelimit (xcaddy build --with github.com/mholt/caddy-ratelimit)
+	# order rate_limit before basicauth
+	servers {
+		# langsame Clients begrenzen (Slowloris)
+		timeouts {
+			read_header 10s
+			read_body 60s
+			idle 60s
+		}
+		max_header_size 32KB
+	}
+}
+
+fahrzeugbuch.j-mb.net {
+	encode zstd gzip
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "no-referrer"
+		-Server
+		-Via
+	}
+
+	# --- Option: nur aus LAN/VPN erreichbar (Rest 403) -------------------------------------------
+	# @outside not remote_ip private_ranges 10.8.0.0/24
+	# respond @outside 403
+
+	# --- Option: Rate-Limit schon am Proxy (Plugin caddy-ratelimit, siehe oben) ---------------------
+	# rate_limit {
+	# 	zone fzb_ip {
+	# 		key {remote_host}
+	# 		events 600
+	# 		window 1m
+	# 	}
+	# }
+
+	@blob path_regexp blob ^/api/t/[^/]+/attachments/[^/]+/blob$
+	@scan path_regexp scan ^/api/t/[^/]+/scan$
+
+	handle @blob {
+		request_body {
+			max_size 8MB
+		}
+		reverse_proxy 10.0.10.5:8085
+	}
+	handle @scan {
+		request_body {
+			max_size 3MB
+		}
+		reverse_proxy 10.0.10.5:8085
+	}
+	handle {
+		request_body {
+			max_size 1MB
+		}
+		reverse_proxy 10.0.10.5:8085 {
+			# Healthcheck des Upstreams (unauthentifiziert, Rate-Limit RATE_PUBLIC_PER_MIN beachten)
+			health_uri /health
+			health_interval 60s
+		}
+	}
+
+	log {
+		output file /var/log/caddy/fahrzeugbuch.access.log {
+			roll_size 50MiB
+			roll_keep 10
+		}
+		format filter {
+			wrap json
+			fields {
+				# Query-String entfernen (…?lat=…&lon=… bzw. Zeiträume gehören nicht ins Log)
+				request>uri regexp "\?.*$" ""
+				request>headers>Authorization delete
+				request>headers>Cookie delete
+				resp_headers>Set-Cookie delete
+			}
+		}
+	}
+}

@@ -27,7 +27,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import DataError, IntegrityError
 from sqlalchemy.orm import Session
 
-from . import models, privacy, schemas
+from . import models, privacy, schemas, security
 from .attachments import blob_path
 from .audit import append_revision
 from .auth import User
@@ -287,6 +287,7 @@ def _apply(db: Session, tenant: models.Tenant, user: User, op: schemas.SyncOp) -
     if op.entity in SERVER_ONLY:
         raise Rejected(f"{op.entity} wird nur vom Server geschrieben")
     if op.entity in WEB_ONLY and not user.web:
+        security.event("web_only_violation", status=200, reason=f"sync {op.entity}")
         raise Rejected(WEB_ONLY[op.entity])
     hook = HOOKS.get(op.entity)
     ctx = OpContext(db, tenant, user, op)

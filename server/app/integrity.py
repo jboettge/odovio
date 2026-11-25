@@ -29,7 +29,7 @@ from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 from sqlalchemy import and_, func, select
 from sqlalchemy.orm import Session
 
-from . import models
+from . import models, security
 from .attachments import persist_blob_checks, verify_blobs
 from .audit import canonical, verify_chain
 from .db import snapshot_session
@@ -247,9 +247,15 @@ def verify_all(db: Session, tenant: models.Tenant, full: bool = False) -> dict:
     blobs = verify_blobs(db, tenant, use_cache=not full)
     if blobs["updates"]:
         persist_blob_checks(tenant.id, blobs["updates"])
+    ok = chain["ok"] and not state and not anchors["anchor_problems"] and not blobs["problems"]
+    if not ok:
+        first = (chain.get("reason") if not chain["ok"] else None) or \
+            next(iter(state + anchors["anchor_problems"] + blobs["problems"]), "")
+        security.event("integrity_failed", tenant=tenant.slug, reason=first, broken_at=chain.get("broken_at"),
+                       throttle=300)
     return {
         **chain,
-        "ok": chain["ok"] and not state and not anchors["anchor_problems"] and not blobs["problems"],
+        "ok": ok,
         "chain_ok": chain["ok"],
         "state_ok": not state,
         "problems": state[:MAX_LISTED] + anchors["anchor_problems"][:MAX_LISTED] + blobs["problems"][:MAX_LISTED],

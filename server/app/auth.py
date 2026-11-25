@@ -14,6 +14,11 @@ Mandanten (aus dem `groups`-Claim, Keycloak-Gruppen mit vollem Pfad):
                                          /fahrzeugbuch/<mandant>/admin  = Verwalter ("admin", inkl. schreiben)
   Rangfolge admin > write > read (mehrere Gruppen → höchste Rolle).
   DEFAULT_TENANT      optional: Mandant, auf den jeder berechtigte Benutzer schreibend zugreift
+
+Härtung: Token ≤ 8 KiB; `iat` nicht in der Zukunft, `nbf` beachtet, Lebensdauer exp−iat ≤ MAX_TOKEN_LIFETIME_S
+(Default 3600, nur Access-Tokens), `jti` optional (String ≤ 255); JWKS nur über https (OIDC_ALLOW_HTTP=1 nur
+für Tests/Entwicklung), ohne Weiterleitungen, Antwortgrösse begrenzt. Fehlermeldungen generisch; der Grund
+geht ins Sicherheits-Log (auth_failed). Erfolgreiche Anmeldung: zusätzliches Rate-Limit je Benutzer.
 """
 import json
 import logging
@@ -21,6 +26,7 @@ import os
 import re
 import threading
 import time
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
 from functools import lru_cache
@@ -29,9 +35,31 @@ from typing import Annotated
 import jwt
 from fastapi import Header, HTTPException, status
 
+from . import security
+
 log = logging.getLogger("fahrzeugbuch.auth")
 
 ALGORITHMS = ["RS256", "RS384", "RS512", "ES256", "ES384", "PS256"]
+LEEWAY_S = 30
+MAX_TOKEN_BYTES = 8 * 1024
+MAX_JWKS_BYTES = 1024 * 1024
+
+
+def max_lifetime() -> int:
+    return security.env_int("MAX_TOKEN_LIFETIME_S", 3600)
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        return None
+
+
+_opener = urllib.request.build_opener(_NoRedirect())
+
+
+def _allowed_url(url: str) -> bool:
+    scheme = urllib.parse.urlsplit(url).scheme
+    return scheme == "https" or (scheme == "http" and os.environ.get("OIDC_ALLOW_HTTP") == "1")
 
 
 @dataclass(frozen=True)
@@ -84,8 +112,15 @@ class JWKSCache:
         self.lock = threading.Lock()
 
     def _get_json(self, url: str) -> dict:
-        with urllib.request.urlopen(url, timeout=self.timeout) as r:
-            return json.load(r)
+        """Nur https (Test/Entwicklung: OIDC_ALLOW_HTTP=1), keine Weiterleitungen, max. 1 MiB."""
+        if not _allowed_url(url):
+            raise ValueError("JWKS/Discovery nur über https")
+        # Schema oben auf https geprüft (bandit B310: kein file:/eigenes Schema möglich)
+        with _opener.open(url, timeout=self.timeout) as r:  # nosec B310
+            data = r.read(MAX_JWKS_BYTES + 1)
+        if len(data) > MAX_JWKS_BYTES:
+            raise ValueError("Antwort zu gross")
+        return json.loads(data)
 
     def _fetch(self) -> None:
         self.fetched = time.monotonic()   # auch bei Fehler → Rate-Limit greift
@@ -99,8 +134,8 @@ class JWKSCache:
                         keys[jwk["kid"]] = jwt.PyJWK(jwk).key
                     except jwt.PyJWKError:
                         continue
-        except (OSError, ValueError, KeyError) as e:
-            log.warning("JWKS-Abruf fehlgeschlagen: %s", e)
+        except (OSError, ValueError, KeyError, TypeError) as e:
+            log.warning("JWKS-Abruf fehlgeschlagen: %s", type(e).__name__)
             if not self.keys:
                 raise KeyServiceUnavailable from e
             return
@@ -200,7 +235,59 @@ def _unauthorized(detail: str = "Token ungültig") -> HTTPException:
     return HTTPException(status.HTTP_401_UNAUTHORIZED, detail, headers={"WWW-Authenticate": "Bearer"})
 
 
+# PyJWT-Fehler → Grund im Sicherheits-Log. "signed": Signatur war gültig (Prüfung der Claims danach) →
+# der sub ist echt und darf die 401-Serie dieses Benutzers markieren.
+_REASONS: list[tuple[type, str, bool]] = [
+    (jwt.ExpiredSignatureError, "expired", True),
+    (jwt.ImmatureSignatureError, "not_yet_valid", True),
+    (jwt.InvalidIssuerError, "wrong_issuer", True),
+    (jwt.InvalidAudienceError, "wrong_audience", True),
+    (jwt.MissingRequiredClaimError, "missing_claim", True),
+    (jwt.InvalidSignatureError, "bad_signature", False),
+    (jwt.InvalidAlgorithmError, "bad_algorithm", False),
+    (jwt.DecodeError, "malformed", False),
+]
+for _name, _reason in (("InvalidJTIError", "bad_jti"), ("InvalidSubjectError", "bad_sub"),
+                       ("InvalidIssuedAtError", "bad_time_claim")):
+    if hasattr(jwt.exceptions, _name):          # PyJWT ≥ 2.10
+        _REASONS.insert(0, (getattr(jwt.exceptions, _name), _reason, True))
+
+
+def _reject(reason: str, claims: dict | None = None) -> HTTPException:
+    sub = claims.get("sub") if isinstance(claims, dict) and isinstance(claims.get("sub"), str) else None
+    security.auth_failure(reason, sub)
+    log.debug("Token abgelehnt: %s", reason)
+    return _unauthorized()
+
+
+def _signed_claims(token: str) -> dict | None:
+    """Claims eines Tokens, dessen Signatur bereits geprüft wurde (nur für das Log)."""
+    try:
+        return jwt.decode(token, options={"verify_signature": False})
+    except jwt.InvalidTokenError:
+        return None
+
+
+def _check_times(claims: dict) -> str | None:
+    now = time.time()
+    exp, iat, nbf = claims.get("exp"), claims.get("iat"), claims.get("nbf")
+    if not all(isinstance(x, int | float) and not isinstance(x, bool) for x in (exp, iat)):
+        return "bad_time_claim"
+    if iat > now + LEEWAY_S:
+        return "iat_future"
+    if exp - iat > max_lifetime():
+        return "lifetime"
+    if nbf is not None and (not isinstance(nbf, int | float) or isinstance(nbf, bool) or nbf > now + LEEWAY_S):
+        return "not_yet_valid"
+    jti = claims.get("jti")
+    if jti is not None and (not isinstance(jti, str) or not 0 < len(jti) <= 255):
+        return "bad_jti"
+    return None
+
+
 def verify_token(token: str, cfg: OIDCConfig) -> User:
+    if not token or len(token) > MAX_TOKEN_BYTES:
+        raise _reject("oversized_token" if token else "missing_token")
     try:
         header = jwt.get_unverified_header(token)
         key = jwks(cfg.issuer).key_for(header.get("kid"))
@@ -210,22 +297,30 @@ def verify_token(token: str, cfg: OIDCConfig) -> User:
             algorithms=ALGORITHMS,
             issuer=cfg.issuer,
             audience=cfg.audience,
-            options={"verify_aud": cfg.audience is not None, "require": ["exp", "iat", "sub"]},
-            leeway=30,
+            options={"verify_aud": cfg.audience is not None, "require": ["exp", "iat", "sub"],
+                     "verify_iat": True, "verify_nbf": True},
+            leeway=LEEWAY_S,
         )
     except KeyServiceUnavailable as e:
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Anmeldedienst nicht erreichbar") from e
-    except (UnknownKey, jwt.InvalidTokenError) as e:
-        log.info("Token abgelehnt: %s", type(e).__name__)
-        raise _unauthorized() from e
+    except UnknownKey as e:
+        raise _reject("unknown_kid") from e
+    except jwt.InvalidTokenError as e:
+        reason, signed = next(((r, s) for cls, r, s in _REASONS if isinstance(e, cls)), ("invalid", False))
+        raise _reject(reason, _signed_claims(token) if signed else None) from e
 
+    if (problem := _check_times(claims)) is not None:
+        raise _reject(problem, claims)
+    if not isinstance(claims.get("sub"), str) or not 0 < len(claims["sub"]) <= 255:
+        raise _reject("bad_sub")
     # Nur Access-Tokens (Keycloak: typ=Bearer; ID-Tokens haben typ=ID) unserer Clients
     if str(claims.get("typ", "Bearer")).lower() != "bearer":
-        raise _unauthorized()
+        raise _reject("wrong_type", claims)
     if claims.get("azp") not in cfg.allowed_azp:
-        raise _unauthorized("Token wurde für einen anderen Client ausgestellt")
+        raise _reject("wrong_client", claims)
     if cfg.required_role and cfg.required_role not in _roles(claims, cfg.client_id, cfg.web_client_id):
-        raise HTTPException(status.HTTP_403_FORBIDDEN, f"Rolle {cfg.required_role} fehlt")
+        security.event("forbidden_role", status=403, reason="Rolle fehlt", sub=claims["sub"])
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Zugriff verweigert")
 
     def text(key: str) -> str | None:
         v = claims.get(key)
@@ -244,5 +339,8 @@ def verify_token(token: str, cfg: OIDCConfig) -> User:
 def require_user(authorization: Annotated[str | None, Header()] = None) -> User:
     cfg = get_config()
     if not authorization or not authorization.lower().startswith("bearer "):
+        security.auth_failure("missing_token")
         raise _unauthorized("Token fehlt")
-    return verify_token(authorization[7:].strip(), cfg)
+    user = verify_token(authorization[7:].strip(), cfg)
+    security.after_auth(user.sub)   # 401-Serie dieses Benutzers zurücksetzen, Rate-Limit je Benutzer
+    return user

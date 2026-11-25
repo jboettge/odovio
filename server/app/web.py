@@ -14,7 +14,14 @@ from fastapi.responses import FileResponse
 
 router = APIRouter(include_in_schema=False)
 
-_RESERVED = ("api/", "auth/", "health", "docs", "openapi.json")
+# Nicht vom SPA-Fallback bedient: API und die exakten Server-Pfade. /auth/callback (OIDC-Redirect des
+# Web-Frontends) und übrige /auth/*-Pfade sind Client-Routen → index.html.
+_RESERVED_PREFIXES = ("api/", "docs/")
+_RESERVED_EXACT = frozenset({"auth/config", "health", "docs", "openapi.json"})
+
+
+def _reserved(path: str) -> bool:
+    return path.startswith(_RESERVED_PREFIXES) or path in _RESERVED_EXACT
 
 
 def web_dist() -> Path | None:
@@ -68,7 +75,7 @@ class WebSecurityHeaders:
 def spa(path: str, request: Request):
     # Alle Methoden annehmen, damit unbekannte Pfade 404 (nicht 405) liefern; ausgeliefert wird nur GET/HEAD
     root = web_dist()
-    if request.method not in ("GET", "HEAD") or root is None or path.startswith(_RESERVED):
+    if request.method not in ("GET", "HEAD") or root is None or _reserved(path):
         raise HTTPException(404, "Nicht gefunden")
     base = root.resolve()
     if path:

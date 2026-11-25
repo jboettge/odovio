@@ -38,6 +38,37 @@ Auf echtem Gerät zu testen: Hintergrund-Aufzeichnung, Automatik, Wecken nach Be
 | `keycloak/` | `setup-client.sh`: Keycloak-Client anlegen (idempotent) |
 | `docker-compose.yml` | Portainer-Stack (API + Postgres) |
 | `ios/` | SwiftUI-App (iOS 17+), XcodeGen-Projekt |
+| `web/` | Web-Frontend (Vue 3, TypeScript, Vite) – wird ins API-Image gebaut und unter `/` ausgeliefert |
+| `deploy/` | `Caddyfile.example`, CrowdSec- und fail2ban-Beispiele |
+
+## Betriebsarten (App)
+
+- **Nur auf diesem iPhone**: ohne Konto/Server; Daten + lokales Hash-Ketten-Journal in Application Support, Berichte/PDF/CSV und Monatsabschluss lokal (ohne signierten Server-Anker), Sicherung per Export/Import. Später per Assistent auf einen Server übertragbar.
+- **Mit Server (gemeinsam)**: Fahrzeugbücher mit mehreren Personen, Rollen *Verwalten / Bearbeiten / Nur lesen*, „erfasst/geändert von“, Aktivität, signierte Anker, KI-Funktionen.
+- **Administration nur im Webfrontend**: Mitglieder und Steuerparameter ändert der Server nur mit Tokens des Web-Clients (`azp = fahrzeugbuch-web`); die App zeigt sie lesend an.
+
+## Web-Frontend
+
+Ansicht und Verwaltung je Rolle: Übersicht, Fahrzeuge (Fahrten, Tanken, Wartungen, km-Stände, Berichte), Monatsabschluss, Aktivität, Integrität, Stammdaten; Mitglieder nur für *Verwalten*. Keycloak-Client `fahrzeugbuch-web` (public, PKCE) legt `setup-client.sh` mit `WEB_URL=https://fahrzeugbuch.j-mb.net` an. Tokens nur in `sessionStorage`, Abmeldung nach 30 min Inaktivität. Entwicklung, Mock-Server und Tests: [web/README.md](web/README.md), Screenshots: `docs/screenshots/web/`.
+
+## Sicherheit
+
+| Massnahme | Umsetzung / Env |
+|---|---|
+| Rate-Limiting | Token-Bucket je IP (`RATE_IP_PER_MIN` 600, öffentlich 120, Web 3000) und je Benutzer (`RATE_USER_PER_MIN` 1200); 429 + `Retry-After`; dazu spezifische Limits (Sync, Scan, KI) |
+| Brute-Force | gehäufte 401 je IP bzw. 403/404 je IP+Benutzer → IP-Sperre 5/15/60 min (`BRUTE_*`); Ausnahmen `SECURITY_ALLOWLIST` |
+| Sicherheits-Log | JSON-Zeilen `fahrzeugbuch.security` (auth_failed, rate_limited, brute_force_block, forbidden_tenant, admin_action …) → CrowdSec/fail2ban (`deploy/`) |
+| CORS / CSRF | Default keine Cross-Origin-Freigabe; `CORS_ORIGINS` = exakte Allowlist; schreibende Requests mit fremder `Origin` → 403 |
+| Host / Transport | `ALLOWED_HOSTS`, HSTS hinter TLS (`FORCE_HSTS`), CSP fürs Web, nosniff/CORP/no-store, `X-Request-ID`, kein `Server`-Header |
+| Eingaben | Body-Limits, JSON-Tiefe/-Elemente (`JSON_MAX_*`), Header-/Token-Längen, Unicode-NFC, Steuer-/Bidi-Zeichen entfernt, strikte Pfadparameter |
+| Injection | nur ORM/gebundene Parameter; CSV-Formelschutz (inkl. Unicode-Varianten), PDF-Escaping, RFC-6266-Dateinamen, URL-kodierte Keycloak-Admin-Aufrufe, Log-Bereinigung |
+| Tokens | Signatur/Issuer/azp, `exp`/`iat`/`nbf`, max. Lebensdauer (`MAX_TOKEN_LIFETIME_S`), JWKS nur HTTPS |
+| Konfiguration | Startprüfung unsicherer Werte (Warnung; `STRICT_CONFIG=1` → Abbruch) |
+| Container | read-only, `cap_drop: ALL`, `init`, ulimits, Healthcheck, uvicorn 1 Worker + `--limit-concurrency` |
+| Lieferkette | Lock-Dateien mit Hashes, gepinnte Images/Actions, `pip-audit`, `bandit`, `npm audit` in der CI |
+| Keycloak (realmweit, nur per Flag) | `ENABLE_BRUTE_FORCE=1`, `SET_PASSWORD_POLICY=1`, `REQUIRE_ADMIN_OTP=1` |
+
+Hinweise: Limits/Sperren liegen im Speicher (ein Prozess, Reset bei Neustart). `FORWARDED_ALLOW_IPS` muss die Proxy-IP sein, sonst teilen sich alle Clients eine IP. Reverse Proxy: `deploy/Caddyfile.example` (TLS, Header, Body-Grössen, Logs ohne Query).
 
 ## Keycloak
 

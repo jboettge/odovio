@@ -1,0 +1,7 @@
+# CrowdSec-Acquisition: Container-Logs der Fahrzeugbuch-API (Sicherheits-Log = JSON-Zeilen auf stderr).
+# Alternative ohne Docker-Socket: Log-Treiber journald bzw. Datei und source: file / journalctl verwenden.
+source: docker
+container_name:
+  - fahrzeugbuch-api
+labels:
+  type: fahrzeugbuch-security

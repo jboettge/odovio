@@ -2,12 +2,19 @@
 #   Compose path: fahrzeugbuch/docker-compose.yml
 #   Env: siehe .env.example (DB_PASSWORD, APP_DB_PASSWORD, OIDC_ISSUER, ANCHOR_SIGNING_KEY, API_BIND …)
 x-api: &api
-  build: ./server
+  # Kontext fahrzeugbuch/: Stufe 1 baut das Web-Frontend (web/), Stufe 2 die API (server/)
+  build:
+    context: .
+    dockerfile: server/Dockerfile
   image: fahrzeugbuch-api:latest
   read_only: true
-  tmpfs: [/tmp]
+  # nur Python-Tempdateien (Uploads liegen im Volume, PDFs im Speicher): klein, nicht ausführbar
+  tmpfs: ["/tmp:size=16m,mode=1777,noexec,nosuid,nodev"]
   cap_drop: [ALL]
   security_opt: [no-new-privileges:true]
+  init: true                     # PID 1 = tini: Signale weiterleiten, Zombies einsammeln
+  ulimits:
+    nofile: {soft: 4096, hard: 8192}
 
 services:
   db:
@@ -79,6 +86,28 @@ services:
       ATTACHMENT_QUOTA_MB: ${ATTACHMENT_QUOTA_MB:-2048}
       FORWARDED_ALLOW_IPS: ${FORWARDED_ALLOW_IPS:-127.0.0.1}
       DOCS_ENABLED: ${DOCS_ENABLED:-0}
+      # ---------- Härtung (app/security.py) ----------
+      # Host-Header (127.0.0.1/localhost sind für den Healthcheck immer erlaubt); "*" → Startwarnung
+      ALLOWED_HOSTS: ${ALLOWED_HOSTS:-fahrzeugbuch.j-mb.net,localhost}
+      # exakte Cross-Origin-Origins (leer = keine; das Web-Frontend läuft same-origin)
+      CORS_ORIGINS: ${CORS_ORIGINS:-}
+      FORCE_HSTS: ${FORCE_HSTS:-0}
+      # In-Memory je Prozess → uvicorn läuft mit genau 1 Worker (Dockerfile)
+      RATE_IP_PER_MIN: ${RATE_IP_PER_MIN:-600}
+      RATE_PUBLIC_PER_MIN: ${RATE_PUBLIC_PER_MIN:-120}
+      RATE_WEB_PER_MIN: ${RATE_WEB_PER_MIN:-3000}
+      RATE_USER_PER_MIN: ${RATE_USER_PER_MIN:-1200}
+      BRUTE_401_THRESHOLD: ${BRUTE_401_THRESHOLD:-20}
+      BRUTE_403_THRESHOLD: ${BRUTE_403_THRESHOLD:-30}
+      BRUTE_WINDOW_S: ${BRUTE_WINDOW_S:-300}
+      BRUTE_BACKOFF_S: ${BRUTE_BACKOFF_S:-300,900,3600}
+      SECURITY_ALLOWLIST: ${SECURITY_ALLOWLIST:-}
+      MAX_TOKEN_LIFETIME_S: ${MAX_TOKEN_LIFETIME_S:-3600}
+      JSON_MAX_DEPTH: ${JSON_MAX_DEPTH:-32}
+      JSON_MAX_ITEMS: ${JSON_MAX_ITEMS:-100000}
+      # 1 → unsichere Konfiguration (siehe Sicherheits-Log config_warning) verhindert den Start
+      STRICT_CONFIG: ${STRICT_CONFIG:-0}
+      UVICORN_LIMIT_CONCURRENCY: ${UVICORN_LIMIT_CONCURRENCY:-200}
       # Intelligente Dienste (optional, leer = aus). OSRM/vLLM laufen beim Nutzer als eigene Container:
       # erreichbar über das default-Netz per Host-IP bzw. host.docker.internal (siehe extra_hosts).
       OSRM_URL: ${OSRM_URL:-}
@@ -117,6 +146,12 @@ services:
       - "${API_BIND:-127.0.0.1}:${API_PORT:-8085}:8000"
     mem_limit: 512m
     pids_limit: 200
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=4)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
     depends_on:
       migrate:
         condition: service_completed_successfully

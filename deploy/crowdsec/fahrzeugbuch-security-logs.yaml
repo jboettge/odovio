@@ -1,0 +1,21 @@
+# CrowdSec-Parser (s01-parse) für das Sicherheits-Log der Fahrzeugbuch-API (fahrzeugbuch.security).
+# Nur JSON-Zeilen mit "logger":"fahrzeugbuch.security"; übrige uvicorn-/App-Zeilen werden ignoriert.
+onsuccess: next_stage
+filter: "evt.Line.Labels.type == 'fahrzeugbuch-security' && evt.Line.Raw contains '\"logger\":\"fahrzeugbuch.security\"'"
+name: fahrzeugbuch/security-logs
+description: "Fahrzeugbuch API: Sicherheits-Ereignisse (JSON-Zeilen)"
+statics:
+  - parsed: json
+    expression: "UnmarshalJSON(evt.Line.Raw, evt.Unmarshaled, 'fzb')"
+  - meta: log_type
+    value: fahrzeugbuch_security
+  - meta: source_ip
+    expression: "evt.Unmarshaled.fzb.ip"
+  - meta: fzb_event
+    expression: "evt.Unmarshaled.fzb.event"
+  - meta: http_path
+    expression: "evt.Unmarshaled.fzb.path"
+  - meta: http_status
+    expression: "string(evt.Unmarshaled.fzb.status)"
+  - target: evt.StrTime
+    expression: "evt.Unmarshaled.fzb.ts"
