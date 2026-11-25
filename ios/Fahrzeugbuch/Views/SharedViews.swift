@@ -513,19 +513,23 @@ struct ActivityView: View {
         return HStack(alignment: .top, spacing: 10) {
             Image(systemName: EntityText.icon(item.entity))
                 .foregroundStyle(item.action == "delete" ? Color.dangerText : Color.infoText)
-                .frame(minWidth: 24)
+                .frame(width: 26)
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 2) {
-                (Text(actor).fontWeight(.semibold) + Text(" · " + summary))
+                HStack(alignment: .firstTextBaseline) {
+                    Text(actor).fontWeight(.semibold).lineLimit(1)
+                    Spacer(minLength: 6)
+                    Text(time)
+                        .font(.footnote.monospacedDigit())
+                        .foregroundStyle(Color.neutralText)
+                }
+                Text(summary)
+                    .font(.subheadline)
                     .fixedSize(horizontal: false, vertical: true)
                 if vehicleFilter == nil, let vid = item.vehicleId, let v = store.vehicle(id: vid) {
                     Text(v.name).font(.footnote).foregroundStyle(Color.neutralText)
                 }
             }
-            Spacer(minLength: 6)
-            Text(time)
-                .font(.footnote.monospacedDigit())
-                .foregroundStyle(Color.neutralText)
         }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("\(time), \(actor): \(summary)")
