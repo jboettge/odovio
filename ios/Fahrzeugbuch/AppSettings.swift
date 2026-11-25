@@ -2,26 +2,28 @@ import Foundation
 import Observation
 import Security
 
+@MainActor
 @Observable
 final class AppSettings {
     var serverURL: String {
         didSet { UserDefaults.standard.set(serverURL, forKey: "serverURL") }
     }
-    var token: String {
-        didSet { Keychain.set(token, for: "apiToken") }
-    }
+    let auth = AuthManager()
 
     init() {
         serverURL = UserDefaults.standard.string(forKey: "serverURL") ?? ""
-        token = Keychain.get("apiToken") ?? ""
     }
 
-    var isConfigured: Bool {
-        URL(string: serverURL)?.host != nil && !token.isEmpty
-    }
+    var isConfigured: Bool { URL(string: serverURL)?.host != nil }
+
+    var baseURL: URL { URL(string: serverURL) ?? URL(string: "http://localhost")! }
 
     var api: APIClient {
-        APIClient(baseURL: URL(string: serverURL) ?? URL(string: "http://localhost")!, token: token)
+        let url = baseURL
+        let auth = auth
+        return APIClient(baseURL: url) { force in
+            try await auth.validAccessToken(server: url, forceRefresh: force)
+        }
     }
 }
 

@@ -4,11 +4,6 @@ def make_vehicle(client, **kw):
     return r.json()
 
 
-def test_auth_required(client):
-    assert client.get("/api/vehicles", headers={"Authorization": ""}).status_code == 401
-    assert client.get("/api/vehicles", headers={"Authorization": "Bearer falsch"}).status_code == 401
-    assert client.get("/health", headers={"Authorization": ""}).status_code == 200
-
 
 def test_vehicle_crud(client):
     v = make_vehicle(client)

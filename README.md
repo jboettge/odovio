@@ -1,6 +1,6 @@
 # Fahrzeugbuch
 
-Digitales Fahrzeugbuch: iOS-App (SwiftUI) + REST-Server (FastAPI/PostgreSQL, Docker via Portainer).
+Digitales Fahrzeugbuch: iOS-App (SwiftUI) + REST-Server (FastAPI/PostgreSQL, Docker via Portainer). Anmeldung via **OIDC/Keycloak** (Authorization Code + PKCE).
 
 ## Funktionen
 
@@ -14,18 +14,44 @@ Digitales Fahrzeugbuch: iOS-App (SwiftUI) + REST-Server (FastAPI/PostgreSQL, Doc
 
 | Pfad | Inhalt |
 |---|---|
-| `server/` | FastAPI-App, Dockerfile, Tests |
+| `server/` | FastAPI-App (OIDC-Resource-Server), Dockerfile, Tests |
+| `keycloak/` | `setup-client.sh`: Keycloak-Client anlegen (idempotent) |
 | `docker-compose.yml` | Portainer-Stack (API + Postgres) |
 | `ios/` | SwiftUI-App (iOS 17+), XcodeGen-Projekt |
 
+## Keycloak
+
+```bash
+# im Keycloak-Container (Image hat kein awk/jq – Skript ist reines Bash)
+docker exec -i -e KC_URL=http://localhost:8080 -e REALM=<realm> -e KC_ADMIN=admin \
+  -e KC_ADMIN_PASSWORD=... -e ASSIGN_USERS="jakob" <keycloak-container> bash -s < keycloak/setup-client.sh
+```
+
+Legt an bzw. aktualisiert:
+- Client `fahrzeugbuch-ios`: public, nur Standard Flow, PKCE S256 erzwungen, Redirect `net.jmb.fahrzeugbuch:/oauth2redirect`
+- optionaler Scope `offline_access` → Refresh-Token übersteht SSO-Session-Timeout (kein Login alle 30 min)
+- Client-Rolle `fahrzeugbuch-user`, zugewiesen an `ASSIGN_USERS`
+
+Abmelden in der App widerruft das Offline-Token (`/revoke`).
+
 ## Server (Portainer)
 
-1. Secrets erzeugen: `openssl rand -hex 32` (je für `API_TOKEN`, `DB_PASSWORD`)
+1. DB-Passwort erzeugen: `openssl rand -hex 32`
 2. Portainer → **Stacks → Add stack → Repository**
-   - Repository: dieses Repo, Branch wählen
    - Compose path: `fahrzeugbuch/docker-compose.yml`
-   - Environment variables: `API_TOKEN`, `DB_PASSWORD`, optional `API_PORT` (Default `8085`)
-3. Prüfen: `curl http://<docker-vm>:8085/health` → `{"status":"ok"}`
+   - Environment variables:
+
+| Variable | Pflicht | Beispiel / Default |
+|---|---|---|
+| `DB_PASSWORD` | ja | – |
+| `OIDC_ISSUER` | ja | `https://id.j-mb.net/realms/<realm>` |
+| `OIDC_CLIENT_ID` | – | `fahrzeugbuch-ios` (Token wird über `azp` geprüft) |
+| `OIDC_REQUIRED_ROLE` | – | `fahrzeugbuch-user` (Realm-/Client-Rolle oder Gruppe); leer = jeder Realm-Benutzer |
+| `OIDC_AUDIENCE` | – | statt `azp` die `aud` prüfen (Audience-Mapper nötig) |
+| `API_PORT` | – | `8085` |
+
+3. Prüfen: `curl http://<docker-vm>:8085/health` und `/auth/config`
+   Der Container muss den Issuer erreichen (Discovery/JWKS).
 4. **HTTPS** über Reverse Proxy (z. B. Caddy auf OPNsense), z. B. `fahrzeugbuch.j-mb.net → <docker-vm>:8085`. iOS verlangt HTTPS ausserhalb des LAN.
 
 Optionen:
@@ -48,12 +74,14 @@ open Fahrzeugbuch.xcodeproj
 In Xcode: Target → *Signing & Capabilities* → Team wählen (ggf. Bundle-ID anpassen) → auf iPhone ausführen.
 Mit kostenlosem Apple-Account läuft die Signatur 7 Tage; für Dauerbetrieb Developer-Account oder TestFlight.
 
-Erster Start: Server-URL + `API_TOKEN` eingeben → *Verbindung testen* → *Sichern*. Token liegt in der Keychain.
+Erster Start: nur Server-URL eingeben → *Verbindung testen* (zeigt Issuer/Client) → *Sichern* → *Mit Keycloak anmelden*.
+Login läuft über `ASWebAuthenticationSession` (Safari-Session → SSO mit bestehendem Keycloak-Login). Refresh-Token in der Keychain, Access-Token nur im Speicher; bei 401 einmal Refresh + Wiederholung, bei abgelaufener Sitzung zurück zum Login.
+Andere Bundle-ID → `AuthManager.callbackScheme/redirectURI` und `REDIRECT` im Keycloak-Skript anpassen.
 HTTP ohne TLS funktioniert nur im lokalen Netz (`NSAllowsLocalNetworking`).
 
 ## API (Auszug)
 
-Alle `/api/*`-Aufrufe mit `Authorization: Bearer <API_TOKEN>`.
+Alle `/api/*`-Aufrufe mit `Authorization: Bearer <Keycloak-Access-Token>`. Öffentlich: `/health`, `/auth/config`. Alle berechtigten Benutzer sehen dieselben Fahrzeuge (Haushalt).
 
 | Methode | Pfad | Zweck |
 |---|---|---|
@@ -65,6 +93,7 @@ Alle `/api/*`-Aufrufe mit `Authorization: Bearer <API_TOKEN>`.
 | GET/POST | `/api/vehicles/{id}/maintenance` · GET/PUT/DELETE `/api/maintenance/{id}` | Wartungen inkl. Checkliste |
 | PATCH | `/api/maintenance-items/{id}` `{"done": true}` | Checkpunkt abhaken |
 | GET | `/api/checklist-templates` | Vorlagen |
+| GET | `/api/me` | angemeldeter Benutzer |
 
 ## Verbrauchsberechnung
 
@@ -75,8 +104,8 @@ Voll-zu-voll: Liter aller Tankvorgänge nach einer Volltankung bis inkl. der nä
 ```bash
 cd fahrzeugbuch/server
 pip install -r requirements-test.txt
-pytest -q                                  # SQLite
-API_TOKEN=dev uvicorn app.main:app --reload
+pytest -q                                  # SQLite, JWTs mit lokalem Testschlüssel
+OIDC_ISSUER=https://id.j-mb.net/realms/<realm> OIDC_CLIENT_ID=fahrzeugbuch-ios uvicorn app.main:app --reload
 ```
 
-CI (`.github/workflows/fahrzeugbuch.yml`): Tests gegen SQLite + PostgreSQL, Docker-Build, iOS-Simulator-Build.
+CI (`.github/workflows/fahrzeugbuch.yml`, liegt im Repo-Root unter `.github/` – beim Umzug mitnehmen und Pfade `fahrzeugbuch/` anpassen): Tests gegen SQLite + PostgreSQL, Docker-Build, iOS-Simulator-Build.

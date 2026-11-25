@@ -4,13 +4,18 @@ struct APIError: LocalizedError {
     let status: Int
     let message: String
     var errorDescription: String? {
-        status == 401 ? "Token ungültig oder fehlt." : "Serverfehler \(status): \(message)"
+        switch status {
+        case 401: "Nicht autorisiert – bitte neu anmelden."
+        case 403: "Keine Berechtigung (Rolle fehlt?)."
+        default: "Serverfehler \(status): \(message)"
+        }
     }
 }
 
 struct APIClient {
     let baseURL: URL
-    let token: String
+    /// Liefert ein Access-Token; `true` erzwingt Refresh (nach 401).
+    let tokenProvider: (_ forceRefresh: Bool) async throws -> String
 
     static let dayFormatter: DateFormatter = {
         let f = DateFormatter()
@@ -63,12 +68,19 @@ struct APIClient {
         var req = URLRequest(url: baseURL.appending(path: path))
         req.httpMethod = method
         req.timeoutInterval = 15
-        req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         if let body {
             req.setValue("application/json", forHTTPHeaderField: "Content-Type")
             req.httpBody = try Self.encoder.encode(body)
         }
-        let (data, response) = try await URLSession.shared.data(for: req)
+        let token = try await tokenProvider(false)
+        req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        var (data, response) = try await URLSession.shared.data(for: req)
+        if (response as? HTTPURLResponse)?.statusCode == 401 {
+            // Token evtl. serverseitig widerrufen/abgelaufen → einmal erneuern und wiederholen
+            let fresh = try await tokenProvider(true)
+            req.setValue("Bearer \(fresh)", forHTTPHeaderField: "Authorization")
+            (data, response) = try await URLSession.shared.data(for: req)
+        }
         guard let http = response as? HTTPURLResponse else {
             throw APIError(status: 0, message: "Keine HTTP-Antwort")
         }

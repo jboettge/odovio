@@ -1,14 +1,14 @@
 import json
 import os
-import secrets
 from contextlib import asynccontextmanager
 from typing import Annotated
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Response, status
+from fastapi import Depends, FastAPI, HTTPException, Response, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from . import models, schemas
+from .auth import get_config, require_user
 from .db import Base, engine, get_session
 from .stats import vehicle_stats
 
@@ -61,16 +61,6 @@ def load_templates() -> list[dict]:
     return DEFAULT_TEMPLATES
 
 
-def require_token(authorization: Annotated[str | None, Header()] = None) -> None:
-    token = os.environ.get("API_TOKEN", "")
-    if not token:
-        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "API_TOKEN ist nicht gesetzt")
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Token fehlt")
-    if not secrets.compare_digest(authorization[7:].encode(), token.encode()):
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Token ungültig")
-
-
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     Base.metadata.create_all(engine)
@@ -79,12 +69,24 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(title="Fahrzeugbuch", version="1.0.0", lifespan=lifespan)
 DB = Annotated[Session, Depends(get_session)]
-auth = [Depends(require_token)]
+auth = [Depends(require_user)]
 
 
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+@app.get("/auth/config", response_model=schemas.AuthConfig)
+def auth_config():
+    """Öffentlich: OIDC-Parameter für die App (nur Server-URL muss konfiguriert werden)."""
+    cfg = get_config()
+    return {"issuer": cfg.issuer, "client_id": cfg.client_id, "scopes": "openid profile offline_access"}
+
+
+@app.get("/api/me", dependencies=auth)
+def me(user=Depends(require_user)):
+    return {"sub": user.sub, "name": user.name}
 
 
 def get_or_404(db: Session, model, obj_id: int):

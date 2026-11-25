@@ -7,6 +7,12 @@ class ORM(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class AuthConfig(BaseModel):
+    issuer: str
+    client_id: str
+    scopes: str
+
+
 # Fahrzeuge
 class VehicleIn(BaseModel):
     name: str = Field(min_length=1, max_length=100)

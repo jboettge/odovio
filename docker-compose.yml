@@ -1,6 +1,6 @@
 # Portainer: Stacks → Add stack → Repository
 #   Compose path: fahrzeugbuch/docker-compose.yml
-#   Env: API_TOKEN, DB_PASSWORD (siehe .env.example)
+#   Env: DB_PASSWORD, OIDC_ISSUER, OIDC_CLIENT_ID (siehe .env.example)
 services:
   db:
     image: postgres:17-alpine
@@ -26,7 +26,10 @@ services:
     restart: unless-stopped
     environment:
       DATABASE_URL: postgresql+psycopg://fahrzeugbuch:${DB_PASSWORD}@db:5432/fahrzeugbuch
-      API_TOKEN: ${API_TOKEN:?API_TOKEN fehlt}
+      OIDC_ISSUER: ${OIDC_ISSUER:?OIDC_ISSUER fehlt}
+      OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:-fahrzeugbuch-ios}
+      OIDC_AUDIENCE: ${OIDC_AUDIENCE:-}
+      OIDC_REQUIRED_ROLE: ${OIDC_REQUIRED_ROLE:-}
       # CHECKLIST_FILE: /config/checklists.json
     # volumes:
     #   - ./checklists.json:/config/checklists.json:ro

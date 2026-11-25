@@ -4,7 +4,6 @@ struct SettingsView: View {
     @Environment(AppSettings.self) private var settings
     @Environment(\.dismiss) private var dismiss
     @State private var url = ""
-    @State private var token = ""
     @State private var status: String?
     @State private var testing = false
 
@@ -20,17 +19,26 @@ struct SettingsView: View {
                     .keyboardType(.URL)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
-                SecureField("API-Token", text: $token)
+                Button("Verbindung testen") { Task { await test() } }
+                    .disabled(parsedURL == nil || testing)
+                if let status {
+                    Text(status).font(.footnote)
+                }
             } header: {
                 Text("Server")
             } footer: {
-                Text("Token = API_TOKEN aus dem Portainer-Stack. Wird in der Keychain gespeichert.")
+                Text("Anmeldung erfolgt über Keycloak (OIDC). Issuer und Client-ID liefert der Server.")
             }
-            Section {
-                Button("Verbindung testen") { Task { await test() } }
-                    .disabled(parsedURL == nil || token.isEmpty || testing)
-                if let status {
-                    Text(status).font(.footnote)
+
+            if settings.auth.isLoggedIn {
+                Section("Konto") {
+                    LabeledContent("Angemeldet als", value: settings.auth.userName ?? "–")
+                    Button("Abmelden", role: .destructive) {
+                        Task {
+                            await settings.auth.logout(server: settings.baseURL)
+                            dismiss()
+                        }
+                    }
                 }
             }
         }
@@ -38,17 +46,17 @@ struct SettingsView: View {
         .toolbar {
             ToolbarItem(placement: .confirmationAction) {
                 Button("Sichern") {
-                    settings.serverURL = url.trimmed
-                    settings.token = token.trimmed
+                    let new = url.trimmed
+                    if new != settings.serverURL {
+                        settings.auth.clearSession()   // Tokens gehören zum alten Server
+                        settings.serverURL = new
+                    }
                     dismiss()
                 }
-                .disabled(parsedURL == nil || token.trimmed.isEmpty)
+                .disabled(parsedURL == nil)
             }
         }
-        .onAppear {
-            url = settings.serverURL
-            token = settings.token
-        }
+        .onAppear { url = settings.serverURL }
     }
 
     private func test() async {
@@ -56,8 +64,15 @@ struct SettingsView: View {
         testing = true
         defer { testing = false }
         do {
-            let vehicles: [Vehicle] = try await APIClient(baseURL: u, token: token.trimmed).get("api/vehicles")
-            status = "✅ Verbunden – \(vehicles.count) Fahrzeug(e)"
+            let (data, resp) = try await URLSession.shared.data(from: u.appending(path: "auth/config"))
+            guard (resp as? HTTPURLResponse)?.statusCode == 200 else {
+                status = "❌ Server antwortet mit \((resp as? HTTPURLResponse)?.statusCode ?? 0)"
+                return
+            }
+            let decoder = JSONDecoder()
+            decoder.keyDecodingStrategy = .convertFromSnakeCase
+            let cfg = try decoder.decode(AuthConfig.self, from: data)
+            status = "✅ Server erreichbar\nIssuer: \(cfg.issuer)\nClient: \(cfg.clientId)"
         } catch {
             status = "❌ \(error.localizedDescription)"
         }
