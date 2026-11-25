@@ -1,8 +1,9 @@
 import datetime as dt
+import re
 import uuid
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class AuthConfig(BaseModel):
@@ -40,6 +41,11 @@ class VehicleData(Payload):
     plate: str | None = Field(default=None, max_length=30)
     fuel_type: str = Field(default="benzin", max_length=20)
     initial_km: int = Field(default=0, ge=0, le=MAX_KM)
+    # Fahrtenbuch/Steuer: None = nicht erfasst (Logik nimmt ownership "private", Methode "flat")
+    purchase_price: float | None = Field(default=None, ge=0, le=10_000_000)   # exkl. MWST
+    ownership: Literal["private", "business"] | None = None
+    private_use_method: Literal["flat", "effective"] | None = None
+    annual_fixed_costs: float | None = Field(default=None, ge=0, le=1_000_000)
 
 
 class OdometerData(Payload):
@@ -99,11 +105,186 @@ class MaterialArticleData(Payload):
     note: str | None = Field(default=None, max_length=500)
 
 
+# ---------- Fahrtenbuch ----------
+TripCategory = Literal["business", "private", "commute", "field", "unknown"]
+RuleCategory = Literal["business", "private", "commute", "field"]
+TRIP_CATEGORIES = ("business", "private", "commute", "field", "unknown")
+DISTANCE_MAX = 10_000
+_HHMM = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
+_MONTH = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
+
+
+def normalize_ts(v: str | None) -> str | None:
+    """ISO-8601 mit Offset → datetime.isoformat(timespec="seconds"), Offset bleibt erhalten."""
+    if v is None:
+        return None
+    if not isinstance(v, str) or len(v) > 40:
+        raise ValueError("ISO-8601-Zeitpunkt erwartet")
+    try:
+        t = dt.datetime.fromisoformat(v.strip())
+    except ValueError as e:
+        raise ValueError("ISO-8601-Zeitpunkt erwartet") from e
+    if t.tzinfo is None or t.utcoffset() is None:
+        raise ValueError("Zeitpunkt ohne Zeitzonen-Offset")
+    if not 2000 <= t.year <= 2100:
+        raise ValueError("Jahr ausserhalb 2000–2100")
+    return t.isoformat(timespec="seconds")
+
+
+def is_month(v: str) -> bool:
+    return bool(_MONTH.match(v or ""))
+
+
+class CustomerData(Payload):
+    name: str = Field(min_length=1, max_length=150)
+    ref: str | None = Field(default=None, max_length=50)
+    note: str | None = Field(default=None, max_length=500)
+
+
+class PlaceData(Payload):
+    name: str = Field(min_length=1, max_length=100)
+    kind: Literal["home", "work", "customer", "other"]
+    lat: float | None = Field(default=None, ge=-90, le=90)
+    lon: float | None = Field(default=None, ge=-180, le=180)
+    radius_m: int = Field(default=150, ge=50, le=5000)
+    customer_id: str | None = Field(default=None, max_length=36)
+    default_category: TripCategory | None = None
+    private: bool = False
+
+    @field_validator("lat", "lon")
+    @classmethod
+    def _round(cls, v: float | None) -> float | None:   # ~100 m: Datensparsamkeit
+        return None if v is None else round(v, 3)
+
+
+class TripData(Payload):
+    vehicle_id: str = Field(max_length=36)
+    driver_sub: str | None = Field(default=None, max_length=255)
+    driver_name: str | None = Field(default=None, max_length=100)
+    start_at: str
+    end_at: str | None = None
+    km_start: int | None = Field(default=None, ge=0, le=MAX_KM)
+    km_end: int | None = Field(default=None, ge=0, le=MAX_KM)
+    distance_gps: float | None = Field(default=None, ge=0, le=DISTANCE_MAX)
+    distance_route: float | None = Field(default=None, ge=0, le=DISTANCE_MAX)
+    start_place_id: str | None = Field(default=None, max_length=36)
+    end_place_id: str | None = Field(default=None, max_length=36)
+    start_label: str | None = Field(default=None, max_length=200)
+    end_label: str | None = Field(default=None, max_length=200)
+    category: TripCategory = "unknown"
+    purpose: str | None = Field(default=None, max_length=300)
+    customer_id: str | None = Field(default=None, max_length=36)
+    status: Literal["draft", "suggested", "confirmed", "locked"] = "draft"   # "locked" setzt nur der Server
+    source: Literal["auto", "manual", "gap", "import"] = "manual"
+    suggestion_category: TripCategory | None = None
+    suggestion_purpose: str | None = Field(default=None, max_length=300)
+    suggestion_customer_id: str | None = Field(default=None, max_length=36)
+    suggestion_confidence: float | None = Field(default=None, ge=0, le=1)
+    suggestion_reason: str | None = Field(default=None, max_length=300)
+    suggestion_source: Literal["rule", "calendar", "pattern", "llm"] | None = None
+    track_hash: str | None = Field(default=None, pattern=r"^[0-9a-fA-F]{64}$")
+    split_of: str | None = Field(default=None, max_length=36)
+    private_mode: bool = False
+    note: str | None = Field(default=None, max_length=NOTE)
+
+    @field_validator("start_at", "end_at", mode="before")
+    @classmethod
+    def _ts(cls, v):
+        return normalize_ts(v)
+
+    @field_validator("track_hash")
+    @classmethod
+    def _lower(cls, v: str | None) -> str | None:
+        return None if v is None else v.lower()
+
+    @model_validator(mode="after")
+    def _order(self):
+        if self.end_at is not None and \
+                dt.datetime.fromisoformat(self.end_at) < dt.datetime.fromisoformat(self.start_at):
+            raise ValueError("end_at liegt vor start_at")
+        if self.km_start is not None and self.km_end is not None and self.km_end < self.km_start:
+            raise ValueError("km_end kleiner als km_start")
+        return self
+
+
+class PurposeRuleData(Payload):
+    priority: int = Field(default=100, ge=0, le=1000)
+    from_place_id: str | None = Field(default=None, max_length=36)
+    to_place_id: str | None = Field(default=None, max_length=36)
+    weekdays: str | None = Field(default=None, max_length=20)   # "1,2,3,4,5" (ISO: 1 = Montag)
+    time_from: str | None = None                                # "HH:MM"
+    time_to: str | None = None
+    vehicle_id: str | None = Field(default=None, max_length=36)
+    result_category: RuleCategory
+    result_purpose: str | None = Field(default=None, max_length=300)
+    result_customer_id: str | None = Field(default=None, max_length=36)
+    auto_confirm: bool = False
+    origin: Literal["user", "learned"] = "user"
+    active: bool = True
+
+    @field_validator("weekdays")
+    @classmethod
+    def _weekdays(cls, v: str | None) -> str | None:
+        if v is None or not v.strip():
+            return None
+        try:
+            days = [int(x) for x in v.split(",")]
+        except ValueError as e:
+            raise ValueError("Format 1,2,3 (ISO-Wochentage 1–7)") from e
+        if any(not 1 <= d <= 7 for d in days) or len(set(days)) != len(days):
+            raise ValueError("Format 1,2,3 (ISO-Wochentage 1–7, ohne Doppel)")
+        return ",".join(map(str, sorted(days)))
+
+    @field_validator("time_from", "time_to")
+    @classmethod
+    def _hhmm(cls, v: str | None) -> str | None:
+        if v is not None and not _HHMM.match(v):
+            raise ValueError("Format HH:MM")
+        return v
+
+
+TAX_KEYS = ("km_rate", "commute_rate", "cap_federal", "cap_canton", "private_share_pct", "min_private_month",
+            "vat_rate")
+
+
+class TaxParamData(Payload):
+    year: int = Field(ge=2000, le=2100)
+    scope: str = Field(max_length=30, pattern=r"^(federal|canton:[A-Z]{2}|tenant)$")
+    key: Literal["km_rate", "commute_rate", "cap_federal", "cap_canton", "private_share_pct",
+                 "min_private_month", "vat_rate"]
+    value: float = Field(ge=0, le=1_000_000)
+    source_url: str | None = Field(default=None, max_length=300)
+    note: str | None = Field(default=None, max_length=300)
+
+
+class TripPeriodData(Payload):
+    """Nur Server (Monatsabschluss); Client-Ops werden abgelehnt. Feldliste = Snapshot/`/changes`."""
+    vehicle_id: str
+    month: str
+    status: Literal["closed"] = "closed"
+    closed_by: str | None = None
+    closed_at: str | None = None
+    anchor_seq: int | None = None
+    km_start: int | None = None
+    km_end: int | None = None
+    trips_count: int = 0
+    business_km: float = 0
+    private_km: float = 0
+    commute_km: float = 0
+    field_km: float = 0
+    note: str | None = None
+
+
+class CloseRequest(BaseModel):
+    force: bool = False
+    reason: str | None = Field(default=None, max_length=500)
+
+
 # ---------- Sync-Protokoll ----------
 class SyncOp(BaseModel):
     op_id: str = Field(min_length=8, max_length=64)
     entity: Literal["vehicle", "odometer", "fuel", "maintenance", "maintenance_item", "maintenance_material",
-                    "material_article"]
+                    "material_article", "trip", "place", "customer", "purpose_rule", "tax_param", "trip_period"]
     id: str
     action: Literal["upsert", "delete"]
     base_version: int | None = Field(default=None, ge=0, le=2_000_000_000)  # None = neu
@@ -143,6 +324,12 @@ class Changes(BaseModel):
     maintenance_items: list[dict]
     maintenance_materials: list[dict]
     material_articles: list[dict]
+    trips: list[dict]
+    places: list[dict]
+    customers: list[dict]
+    purpose_rules: list[dict]
+    tax_params: list[dict]
+    trip_periods: list[dict]
 
 
 class ChecklistTemplate(BaseModel):

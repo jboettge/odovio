@@ -24,8 +24,14 @@ ACTIONS = {"create": "Erfasst", "update": "Geändert", "delete": "Storniert"}
 ENTITY_NAMES = {
     "vehicle": "Fahrzeug", "odometer": "km-Stand", "fuel": "Tankvorgang",
     "maintenance": "Wartung", "maintenance_item": "Checkpunkt", "maintenance_material": "Material",
-    "material_article": "Materialartikel",
+    "material_article": "Materialartikel", "trip": "Fahrt", "place": "Ort", "customer": "Kunde",
+    "purpose_rule": "Zweckregel", "tax_param": "Steuerparameter", "trip_period": "Monatsabschluss",
 }
+CATEGORY_NAMES = {"business": "geschäftlich", "private": "privat", "commute": "Arbeitsweg",
+                  "field": "Aussendienst", "unknown": "unbekannt"}
+STATUS_NAMES = {"draft": "Entwurf", "suggested": "vorgeschlagen", "confirmed": "bestätigt",
+                "locked": "abgeschlossen"}
+SOURCE_NAMES = {"auto": "automatisch", "manual": "manuell", "gap": "Lücke", "import": "Import"}
 
 
 def _num(v: float | None, d: int = 2) -> str:
@@ -88,7 +94,56 @@ def _describe(entity: str, data: dict) -> str:
                     f"CHF {_num(data.get('unit_price'))}")
         case "vehicle":
             return f"{data.get('name')} {data.get('plate') or ''}".strip()
+        case "trip":
+            km = (f"{_km(data.get('km_start'))}–{_km(data.get('km_end'))} km"
+                  if data.get("km_start") is not None or data.get("km_end") is not None else "")
+            parts = [_day(data.get("start_at")), km, CATEGORY_NAMES.get(data.get("category"), ""),
+                     STATUS_NAMES.get(data.get("status"), "")]
+            if data.get("note"):
+                parts.append(f"Notiz: {data['note']}")
+            return ", ".join(x for x in parts if x)
+        case "trip_period":
+            return f"{data.get('month')}: {data.get('status')} ({data.get('closed_by') or '–'})"
     return ""
+
+
+def integrity_section(db: Session, tenant: models.Tenant) -> tuple[list, dict, models.Anchor | None]:
+    """Integritätsvermerk (Kette, Datenstand, Anker) für alle Berichte."""
+    audit = verify_all(db, tenant)
+    anchor = db.scalar(select(models.Anchor).where(models.Anchor.tenant_id == tenant.id)
+                       .order_by(models.Anchor.seq.desc()).limit(1))
+    if audit["ok"]:
+        status = "OK"
+    elif not audit["chain_ok"]:
+        status = f"FEHLER ab Seq {audit['broken_at']}: {audit['reason']}"
+    else:
+        status = "FEHLER: " + "; ".join(audit["problems"][:3])
+    story = [
+        Paragraph("Integrität", H2),
+        _p(f"Geprüft: Hash-Kette, Abgleich der Einträge mit dem Journal, signierte Anker – {status}. "
+           f"Revisionen: {audit['count']}."),
+        _p(f"Kettenkopf (SHA-256): {audit['head_hash']}"),
+        _p(f"Signierter Anker: Seq {anchor.seq}, {anchor.created_at}, Schlüssel {anchor.key_id}, "
+           f"Signatur {anchor.signature[:32]}…" if anchor else
+           "Kein signierter Anker (ANCHOR_SIGNING_KEY nicht konfiguriert)."),
+        _p("Jede Erfassung, Änderung und Stornierung wird unveränderlich protokolliert und über eine "
+           "Hash-Kette gesichert. Der Kettenkopf-Hash dieses Berichts erlaubt den späteren Nachweis, "
+           "dass keine Einträge nachträglich verändert wurden."),
+    ]
+    return story, audit, anchor
+
+
+def footer(title: str, audit: dict, page_width: float):
+    text = f"{title} · Integrität: {'OK' if audit['ok'] else 'FEHLER'} · Kette {audit['head_hash'][:12]}…"
+
+    def on_page(canvas, doc):
+        canvas.saveState()
+        canvas.setFont("Helvetica", 7)
+        canvas.setFillColor(colors.grey)
+        canvas.drawString(15 * mm, 10 * mm, text[:180])
+        canvas.drawRightString(page_width - 15 * mm, 10 * mm, f"Seite {doc.page}")
+        canvas.restoreState()
+    return on_page
 
 
 def build_report(
@@ -117,9 +172,7 @@ def build_report(
     fuel_cost = sum(f.price_total for f in fuel)
     maint_cost = sum(data.maintenance_cost(m) for m in maint)
 
-    audit = verify_all(db, tenant)
-    anchor = db.scalar(select(models.Anchor).where(models.Anchor.tenant_id == tenant.id)
-                       .order_by(models.Anchor.seq.desc()).limit(1))
+    integrity, audit, _ = integrity_section(db, tenant)
     created = dt.datetime.now().strftime("%d.%m.%Y %H:%M")
 
     story = [
@@ -223,35 +276,8 @@ def build_report(
     else:
         story.append(_p("Keine nachträglichen Änderungen oder Stornierungen."))
 
-    if audit["ok"]:
-        status = "OK"
-    elif not audit["chain_ok"]:
-        status = f"FEHLER ab Seq {audit['broken_at']}: {audit['reason']}"
-    else:
-        status = "FEHLER: " + "; ".join(audit["problems"][:3])
-    story += [
-        Paragraph("Integrität", H2),
-        _p(f"Geprüft: Hash-Kette, Abgleich der Einträge mit dem Journal, signierte Anker – {status}. "
-           f"Revisionen: {audit['count']}."),
-        _p(f"Kettenkopf (SHA-256): {audit['head_hash']}"),
-        _p(f"Signierter Anker: Seq {anchor.seq}, {anchor.created_at}, Schlüssel {anchor.key_id}, "
-           f"Signatur {anchor.signature[:32]}…" if anchor else
-           "Kein signierter Anker (ANCHOR_SIGNING_KEY nicht konfiguriert)."),
-        _p("Jede Erfassung, Änderung und Stornierung wird unveränderlich protokolliert und über eine "
-           "Hash-Kette gesichert. Der Kettenkopf-Hash dieses Berichts erlaubt den späteren Nachweis, "
-           "dass keine Einträge nachträglich verändert wurden."),
-    ]
-
-    footer = f"Fahrzeugbuch · {tenant.name} · {v.name} · Integrität: {'OK' if audit['ok'] else 'FEHLER'} " \
-             f"· Kette {audit['head_hash'][:12]}…"
-
-    def on_page(canvas, doc):
-        canvas.saveState()
-        canvas.setFont("Helvetica", 7)
-        canvas.setFillColor(colors.grey)
-        canvas.drawString(15 * mm, 10 * mm, footer)
-        canvas.drawRightString(A4[0] - 15 * mm, 10 * mm, f"Seite {doc.page}")
-        canvas.restoreState()
+    story += integrity
+    on_page = footer(f"Fahrzeugbuch · {tenant.name} · {v.name}", audit, A4[0])
 
     buf = io.BytesIO()
     doc = SimpleDocTemplate(buf, pagesize=A4, leftMargin=15 * mm, rightMargin=15 * mm,

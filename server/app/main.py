@@ -8,20 +8,26 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Annotated
 
-from fastapi import Depends, FastAPI, HTTPException, Query, Response, status
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, Request, Response, status
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from . import models, schemas
+from . import intel, models, schemas
 from .integrity import key_id, maybe_anchor, public_key_b64, signing_key, verify_all
 from .auth import TENANT_SLUG, User, get_config, require_user
 from .db import engine, get_session
+from .logbook import build_logbook, build_year_report, trips_csv
 from .migrate import create_schema
 from .report import build_report
+from .schemas import is_month
 from .stats import load_vehicle, vehicle_stats
 from .sync import ENTITIES, apply_ops, changes_since
+from .tax import year_report
 from .templates import load_templates
+from .trips import PeriodError, check_month, close_period, month_bounds, send_webhook, webhook_url
 
 log = logging.getLogger("fahrzeugbuch")
 
@@ -87,6 +93,16 @@ app = FastAPI(title="Fahrzeugbuch", version="2.1.0", lifespan=lifespan,
               docs_url="/docs" if _docs else None, redoc_url=None,
               openapi_url="/openapi.json" if _docs else None)
 app.add_middleware(RequestGuard, max_body=int(os.environ.get("MAX_BODY_BYTES", str(1024 * 1024))))
+app.include_router(intel.router)
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_error(_: Request, exc: RequestValidationError):
+    """422 ohne Rückspiegelung der Eingabe: NaN/inf würden sonst die JSON-Antwort sprengen (500)
+    und Eingaben (z. B. Koordinaten) landeten in Fehlertexten."""
+    errors = [{"loc": list(e.get("loc", [])), "msg": e.get("msg", ""), "type": e.get("type", "")}
+              for e in exc.errors()]
+    return JSONResponse(status_code=422, content={"detail": errors})
 DB = Annotated[Session, Depends(get_session)]
 CurrentUser = Annotated[User, Depends(require_user)]
 
@@ -128,6 +144,41 @@ def _vehicle_or_404(db: Session, access: Access, vid: str):
     if data is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Fahrzeug nicht gefunden")
     return data
+
+
+def _require_write(access: Access) -> None:
+    if access.role != "write":
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Nur Lesezugriff auf diesen Mandanten")
+
+
+def _locked_tenant(db: Session, access: Access) -> models.Tenant:
+    """Mandantenzeile sperren → Revisionskette wird strikt sequenziell fortgeschrieben.
+    populate_existing: frisch lesen statt veraltetem Stand aus der Identity-Map."""
+    return db.scalar(select(models.Tenant).where(models.Tenant.id == access.tenant.id)
+                     .with_for_update().execution_options(populate_existing=True))
+
+
+def _anchored_tenant(db: Session, access: Access) -> models.Tenant:
+    tenant = _locked_tenant(db, access)
+    if maybe_anchor(db, tenant, force=True):   # Bericht referenziert einen signierten Anker
+        db.commit()
+    return tenant
+
+
+def _month(month: str) -> str:
+    if not is_month(month):
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Monat im Format YYYY-MM erwartet")
+    return month
+
+
+def _period(date_from: dt.date | None, date_to: dt.date | None, month: str | None = None) -> tuple[dt.date, dt.date]:
+    if month is not None:
+        return month_bounds(_month(month))
+    date_to = date_to or dt.date.today()
+    date_from = date_from or date_to.replace(month=1, day=1)
+    if date_from > date_to or (date_to - date_from).days > 3700:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Zeitraum ungültig")
+    return date_from, date_to
 
 
 def content_disposition(filename: str) -> str:
@@ -174,14 +225,8 @@ def get_changes(access: TenantAccess, db: DB, since: Annotated[int, Query(ge=0)]
 
 @app.post("/api/t/{tenant}/sync", response_model=schemas.SyncResponse)
 def post_sync(req: schemas.SyncRequest, access: TenantAccess, db: DB):
-    if access.role != "write":
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "Nur Lesezugriff auf diesen Mandanten")
-    # Mandantenzeile sperren → Revisionskette wird strikt sequenziell fortgeschrieben
-    # populate_existing: frisch lesen statt veraltetem Stand aus der Identity-Map
-    tenant = db.scalar(
-        select(models.Tenant).where(models.Tenant.id == access.tenant.id)
-        .with_for_update().execution_options(populate_existing=True)
-    )
+    _require_write(access)
+    tenant = _locked_tenant(db, access)
     results = apply_ops(db, tenant, access.user, req.ops)
     maybe_anchor(db, tenant)
     db.commit()
@@ -213,18 +258,91 @@ def get_report(
     date_to: Annotated[dt.date | None, Query(alias="to")] = None,
 ):
     data = _vehicle_or_404(db, access, vid)
-    date_to = date_to or dt.date.today()
-    date_from = date_from or date_to.replace(month=1, day=1)
-    if date_from > date_to:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Zeitraum ungültig")
-    tenant = db.scalar(select(models.Tenant).where(models.Tenant.id == access.tenant.id)
-                       .with_for_update().execution_options(populate_existing=True))
-    if maybe_anchor(db, tenant, force=True):   # Bericht referenziert einen signierten Anker
-        db.commit()
+    date_from, date_to = _period(date_from, date_to)
+    tenant = _anchored_tenant(db, access)
     pdf = build_report(db, tenant, data, date_from, date_to, access.user.name)
     return Response(pdf, media_type="application/pdf",
                     headers={"Content-Disposition": content_disposition(
                         f"Fahrzeugbuch_{data.vehicle.name}_{date_from}_{date_to}.pdf")})
+
+
+# ---------- Fahrtenbuch ----------
+DateFrom = Annotated[dt.date | None, Query(alias="from")]
+DateTo = Annotated[dt.date | None, Query(alias="to")]
+MonthQ = Annotated[str | None, Query(max_length=7)]
+
+
+@app.get("/api/t/{tenant}/vehicles/{vid}/trips/check")
+def trips_check(vid: str, access: TenantAccess, db: DB, month: Annotated[str, Query(max_length=7)]):
+    """km-Kette, Plausibilität und Odometer-Abgleich eines Monats."""
+    data = _vehicle_or_404(db, access, vid)
+    return check_month(db, access.tenant, data, _month(month))
+
+
+@app.post("/api/t/{tenant}/vehicles/{vid}/periods/{month}/close")
+def period_close(vid: str, month: str, req: schemas.CloseRequest, access: TenantAccess, db: DB,
+                 background: BackgroundTasks):
+    """Monatsabschluss: Fahrten sperren, Abschluss ins Journal, signierten Anker erzwingen."""
+    _require_write(access)
+    _month(month)
+    if month > f"{dt.date.today():%Y-%m}":
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Zukünftiger Monat kann nicht abgeschlossen werden")
+    tenant = _locked_tenant(db, access)
+    data = _vehicle_or_404(db, access, vid)
+    try:
+        result = close_period(db, tenant, access.user, data, month, req.force, req.reason)
+    except PeriodError as e:
+        db.rollback()
+        raise HTTPException(status.HTTP_409_CONFLICT, e.detail) from e
+    db.commit()
+    if url := webhook_url():
+        background.add_task(send_webhook, url, {
+            "tenant": tenant.slug, "vehicle_id": vid, "month": month, "period": result["period"],
+            "logbook_pdf_url": f"/api/t/{tenant.slug}/vehicles/{vid}/logbook.pdf?month={month}",
+        })
+    return result
+
+
+@app.get("/api/t/{tenant}/vehicles/{vid}/logbook.pdf", response_class=Response)
+def get_logbook(vid: str, access: TenantAccess, db: DB, month: MonthQ = None,
+                date_from: DateFrom = None, date_to: DateTo = None):
+    data = _vehicle_or_404(db, access, vid)
+    if month is None and date_from is None and date_to is None:
+        month = f"{dt.date.today():%Y-%m}"
+    date_from, date_to = _period(date_from, date_to, month)
+    tenant = _anchored_tenant(db, access)
+    pdf = build_logbook(db, tenant, data, date_from, date_to, access.user.name,
+                        mask_private=access.role != "write")
+    return Response(pdf, media_type="application/pdf", headers={"Content-Disposition": content_disposition(
+        f"Fahrtenbuch_{data.vehicle.name}_{month or f'{date_from}_{date_to}'}.pdf")})
+
+
+@app.get("/api/t/{tenant}/vehicles/{vid}/trips.csv", response_class=Response)
+def get_trips_csv(vid: str, access: TenantAccess, db: DB, date_from: DateFrom = None, date_to: DateTo = None):
+    data = _vehicle_or_404(db, access, vid)
+    date_from, date_to = _period(date_from, date_to)
+    body = trips_csv(db, access.tenant, data, date_from, date_to, mask_private=access.role != "write")
+    return Response(body, media_type="text/csv; charset=utf-8", headers={"Content-Disposition": content_disposition(
+        f"Fahrten_{data.vehicle.name}_{date_from}_{date_to}.csv")})
+
+
+YearQ = Annotated[int | None, Query(ge=2000, le=2100)]
+
+
+@app.get("/api/t/{tenant}/vehicles/{vid}/year-report")
+def get_year_report(vid: str, access: TenantAccess, db: DB, year: YearQ = None):
+    data = _vehicle_or_404(db, access, vid)
+    return year_report(db, access.tenant, data, year or dt.date.today().year)
+
+
+@app.get("/api/t/{tenant}/vehicles/{vid}/year-report.pdf", response_class=Response)
+def get_year_report_pdf(vid: str, access: TenantAccess, db: DB, year: YearQ = None):
+    data = _vehicle_or_404(db, access, vid)
+    year = year or dt.date.today().year
+    tenant = _anchored_tenant(db, access)
+    pdf = build_year_report(db, tenant, year_report(db, tenant, data, year), access.user.name)
+    return Response(pdf, media_type="application/pdf", headers={"Content-Disposition": content_disposition(
+        f"Jahresbericht_{data.vehicle.name}_{year}.pdf")})
 
 
 # ---------- Revisionssicherheit ----------

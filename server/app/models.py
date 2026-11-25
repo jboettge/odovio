@@ -44,6 +44,11 @@ class Vehicle(Synced, Base):
     plate: Mapped[str | None] = mapped_column(String(30))
     fuel_type: Mapped[str] = mapped_column(String(20), default="benzin")
     initial_km: Mapped[int] = mapped_column(Integer, default=0)
+    # Fahrtenbuch/Steuer (nachgerüstet, nullable; None → Default in der Logik: private / flat)
+    purchase_price: Mapped[float | None] = mapped_column(Float)          # Kaufpreis exkl. MWST
+    ownership: Mapped[str | None] = mapped_column(String(20))            # private | business
+    private_use_method: Mapped[str | None] = mapped_column(String(20))   # flat | effective
+    annual_fixed_costs: Mapped[float | None] = mapped_column(Float)      # Versicherung, Steuer, Leasing, AfA
 
 
 class OdometerReading(Synced, Base):
@@ -127,6 +132,116 @@ class MaterialArticle(Synced, Base):
     category: Mapped[str | None] = mapped_column(String(50))
     vehicle_id: Mapped[str | None] = mapped_column(ForeignKey("vehicles.id"), index=True)
     note: Mapped[str | None] = mapped_column(Text)
+
+
+# ---------- Fahrtenbuch ----------
+class Customer(Synced, Base):
+    __tablename__ = "customers"
+
+    name: Mapped[str] = mapped_column(String(150))
+    ref: Mapped[str | None] = mapped_column(String(50))
+    note: Mapped[str | None] = mapped_column(String(500))
+
+
+class Place(Synced, Base):
+    """Bekannter Ort. Wohnort-Koordinaten bleiben auf dem Gerät (Server lehnt sie ab)."""
+
+    __tablename__ = "places"
+
+    name: Mapped[str] = mapped_column(String(100))
+    kind: Mapped[str] = mapped_column(String(20))
+    lat: Mapped[float | None] = mapped_column(Float)
+    lon: Mapped[float | None] = mapped_column(Float)
+    radius_m: Mapped[int] = mapped_column(Integer, default=150)
+    customer_id: Mapped[str | None] = mapped_column(ForeignKey("customers.id"), index=True)
+    default_category: Mapped[str | None] = mapped_column(String(20))
+    private: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+class Trip(Synced, Base):
+    """Fahrt. Zeitpunkte als ISO-8601-Text (mit Offset) → Snapshots hash-stabil."""
+
+    __tablename__ = "trips"
+
+    vehicle_id: Mapped[str] = mapped_column(ForeignKey("vehicles.id"), index=True)
+    driver_sub: Mapped[str | None] = mapped_column(String(255))
+    driver_name: Mapped[str | None] = mapped_column(String(100))
+    start_at: Mapped[str] = mapped_column(String(40), index=True)
+    end_at: Mapped[str | None] = mapped_column(String(40))
+    km_start: Mapped[int | None] = mapped_column(Integer)
+    km_end: Mapped[int | None] = mapped_column(Integer)
+    distance_gps: Mapped[float | None] = mapped_column(Float)
+    distance_route: Mapped[float | None] = mapped_column(Float)
+    start_place_id: Mapped[str | None] = mapped_column(ForeignKey("places.id"))
+    end_place_id: Mapped[str | None] = mapped_column(ForeignKey("places.id"))
+    start_label: Mapped[str | None] = mapped_column(String(200))
+    end_label: Mapped[str | None] = mapped_column(String(200))
+    category: Mapped[str] = mapped_column(String(20), default="unknown")
+    purpose: Mapped[str | None] = mapped_column(String(300))
+    customer_id: Mapped[str | None] = mapped_column(ForeignKey("customers.id"))
+    status: Mapped[str] = mapped_column(String(20), default="draft")
+    source: Mapped[str] = mapped_column(String(20), default="manual")
+    suggestion_category: Mapped[str | None] = mapped_column(String(20))
+    suggestion_purpose: Mapped[str | None] = mapped_column(String(300))
+    suggestion_customer_id: Mapped[str | None] = mapped_column(String(36))
+    suggestion_confidence: Mapped[float | None] = mapped_column(Float)
+    suggestion_reason: Mapped[str | None] = mapped_column(String(300))
+    suggestion_source: Mapped[str | None] = mapped_column(String(20))
+    track_hash: Mapped[str | None] = mapped_column(String(64))
+    split_of: Mapped[str | None] = mapped_column(ForeignKey("trips.id"))
+    private_mode: Mapped[bool] = mapped_column(Boolean, default=False)
+    note: Mapped[str | None] = mapped_column(Text)
+
+
+class PurposeRule(Synced, Base):
+    __tablename__ = "purpose_rules"
+
+    priority: Mapped[int] = mapped_column(Integer, default=100)
+    from_place_id: Mapped[str | None] = mapped_column(ForeignKey("places.id"))
+    to_place_id: Mapped[str | None] = mapped_column(ForeignKey("places.id"))
+    weekdays: Mapped[str | None] = mapped_column(String(20))
+    time_from: Mapped[str | None] = mapped_column(String(5))
+    time_to: Mapped[str | None] = mapped_column(String(5))
+    vehicle_id: Mapped[str | None] = mapped_column(ForeignKey("vehicles.id"))
+    result_category: Mapped[str] = mapped_column(String(20))
+    result_purpose: Mapped[str | None] = mapped_column(String(300))
+    result_customer_id: Mapped[str | None] = mapped_column(ForeignKey("customers.id"))
+    auto_confirm: Mapped[bool] = mapped_column(Boolean, default=False)
+    origin: Mapped[str] = mapped_column(String(20), default="user")
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+
+
+class TaxParam(Synced, Base):
+    __tablename__ = "tax_params"
+
+    year: Mapped[int] = mapped_column(Integer)
+    scope: Mapped[str] = mapped_column(String(30))
+    key: Mapped[str] = mapped_column(String(30))
+    value: Mapped[float] = mapped_column(Float)
+    source_url: Mapped[str | None] = mapped_column(String(300))
+    note: Mapped[str | None] = mapped_column(String(300))
+
+
+class TripPeriod(Synced, Base):
+    """Monatsabschluss je Fahrzeug. Nur serverseitig geschrieben (Journal wie alle Entitäten)."""
+
+    __tablename__ = "trip_periods"
+    __table_args__ = (UniqueConstraint("vehicle_id", "month", name="uq_trip_period_month"),)
+
+    vehicle_id: Mapped[str] = mapped_column(ForeignKey("vehicles.id"), index=True)
+    month: Mapped[str] = mapped_column(String(7))
+    status: Mapped[str] = mapped_column(String(10), default="closed")
+    closed_by: Mapped[str | None] = mapped_column(String(255))
+    closed_at: Mapped[str | None] = mapped_column(String(32))
+    anchor_seq: Mapped[int | None] = mapped_column(Integer)
+    km_start: Mapped[int | None] = mapped_column(Integer)
+    km_end: Mapped[int | None] = mapped_column(Integer)
+    trips_count: Mapped[int] = mapped_column(Integer, default=0)
+    business_km: Mapped[float] = mapped_column(Float, default=0)
+    private_km: Mapped[float] = mapped_column(Float, default=0)
+    commute_km: Mapped[float] = mapped_column(Float, default=0)
+    field_km: Mapped[float] = mapped_column(Float, default=0)
+    note: Mapped[str | None] = mapped_column(String(500))   # Begründung bei erzwungenem Abschluss
 
 
 class Revision(Base):

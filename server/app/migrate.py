@@ -10,6 +10,7 @@ Revisionen nicht ändern/löschen und keine Datensätze physisch löschen.
 
 Aufruf: python -m app.migrate
 """
+import logging
 import os
 import re
 import sys
@@ -21,26 +22,35 @@ from . import models  # noqa: F401  (Tabellen registrieren)
 from .audit import IMMUTABLE_TABLES, install_triggers
 from .db import Base
 
-DML_TABLES = ("tenants", "vehicles", "odometer_readings", "fuel_entries", "maintenance", "maintenance_items",
-              "maintenance_materials", "material_articles")
+log = logging.getLogger("fahrzeugbuch.migrate")
+
+# Alle Fachtabellen (inkl. Fahrtenbuch): App-Rolle darf SELECT/INSERT/UPDATE, nie DELETE.
+DML_TABLES = tuple(t.name for t in Base.metadata.sorted_tables if t.name not in IMMUTABLE_TABLES)
 ROLE = re.compile(r"^[a-z_][a-z0-9_]{0,62}$")
 
 
-# Spalten, die nach dem ersten Deploy ergänzt wurden (create_all ergänzt keine Spalten in
-# bestehenden Tabellen): (Tabelle, Spalte, DDL-Typ). Nur nullable, ohne Fremdschlüssel.
-ADDED_COLUMNS = (
-    ("maintenance_materials", "article_id", "VARCHAR(36)"),
-)
-
-
 def add_missing_columns(engine: Engine) -> None:
-    """Idempotente Nachrüstung fehlender Spalten (SQLite und PostgreSQL)."""
+    """Idempotente Nachrüstung fehlender Spalten für ALLE Modelle (SQLite und PostgreSQL).
+
+    `create_all` legt nur fehlende Tabellen an, ergänzt aber keine Spalten bestehender Tabellen.
+    Nachgerüstet werden nullable Spalten (ohne Fremdschlüssel-Constraint, Verweise prüft der Sync);
+    nicht-nullable Spalten ohne Server-Default lassen sich nicht nachrüsten → Warnung."""
     with engine.begin() as conn:
         insp = inspect(conn)
         tables = set(insp.get_table_names())
-        for table, column, ddl in ADDED_COLUMNS:
-            if table in tables and column not in {c["name"] for c in insp.get_columns(table)}:
-                conn.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+        for table in Base.metadata.sorted_tables:
+            if table.name not in tables:
+                continue
+            present = {c["name"] for c in insp.get_columns(table.name)}
+            for col in table.columns:
+                if col.name in present:
+                    continue
+                if not col.nullable or col.primary_key:
+                    log.warning("Spalte %s.%s fehlt und ist nicht nullable – manuelle Migration nötig",
+                                table.name, col.name)
+                    continue
+                ddl = col.type.compile(dialect=conn.dialect)
+                conn.exec_driver_sql(f'ALTER TABLE {table.name} ADD COLUMN "{col.name}" {ddl}')
 
 
 def create_schema(engine: Engine) -> None:

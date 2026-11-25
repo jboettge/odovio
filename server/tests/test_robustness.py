@@ -52,3 +52,10 @@ def test_duplicate_op_from_other_tenant_leaks_nothing(client):
     r = client.post("/api/t/firma/sync", headers=hb, json={"ops": [o]}).json()["results"][0]
     assert r["status"] == "rejected" and r["error"] == "ID bereits vergeben"
     assert json.dumps(r).count("Golf") == 0
+
+
+def test_validation_error_with_nan_is_422_without_echo(client):
+    body = '{"ops":[{"op_id":"%s","entity":"fuel","id":"%s","action":"upsert","base_version":Infinity}]}' % (uid(), uid())
+    r = client.post(f"{T}/sync", content=body, headers={"Content-Type": "application/json"})
+    assert r.status_code == 422
+    assert "input" not in r.text and "Infinity" not in r.text
