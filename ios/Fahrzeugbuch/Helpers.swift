@@ -252,6 +252,9 @@ struct SyncStatusButton: View {
             VStack(alignment: .leading, spacing: 8) {
                 Text("Synchronisation").font(.headline)
                 Text("Ausstehend: \(store.outbox.count) Änderung(en)")
+                if !store.pendingBlobs.isEmpty {
+                    Text("Beleg-Fotos ausstehend: \(store.pendingBlobs.count)")
+                }
                 if let last = store.lastSync {
                     Text("Zuletzt: \(last.formatted(date: .abbreviated, time: .shortened))")
                 }

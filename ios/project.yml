@@ -47,4 +47,36 @@ targets:
           Termine werden nur auf dem iPhone gelesen, um zu einer Fahrt den passenden Termin als Zweck
           vorzuschlagen. Kalenderinhalte werden nicht übertragen – übernommen wird höchstens der Termintitel
           als Zweckvorschlag der jeweiligen Fahrt. Der Kalender wird nie verändert.
+        # Scan von Zapfsäule, Quittung und Tacho (ios/Fahrzeugbuch/Scan)
+        NSCameraUsageDescription: >-
+          Die Kamera wird nur verwendet, um Zapfsäule, Tankquittung oder Tacho zu fotografieren. Die
+          Texterkennung läuft auf diesem iPhone. Ein Foto verlässt das Gerät nur, wenn du es als Beleg
+          speicherst (Übertragung auf deinen Fahrzeugbuch-Server) oder ausdrücklich „Mit KI auswerten“ wählst.
         UIBackgroundModes: [location]
+  FahrzeugbuchTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources: [Tests/FahrzeugbuchTests]
+    dependencies:
+      - target: Fahrzeugbuch
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: "YES"
+        PRODUCT_BUNDLE_IDENTIFIER: net.jmb.fahrzeugbuch.tests
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/Fahrzeugbuch.app/Fahrzeugbuch"
+        BUNDLE_LOADER: "$(TEST_HOST)"
+        CODE_SIGN_STYLE: Automatic
+schemes:
+  Fahrzeugbuch:
+    build:
+      targets:
+        Fahrzeugbuch: all
+        FahrzeugbuchTests: [test]
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets:
+        - FahrzeugbuchTests
+    archive:
+      config: Release

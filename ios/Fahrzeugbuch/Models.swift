@@ -96,6 +96,43 @@ struct FuelEntry: SyncEntity {
     var pricePerLiter: Double { liters > 0 ? priceTotal / liters : 0 }
 }
 
+/// Beleg/Foto (Tankquittung, Zapfsäule, Tacho). Metadaten werden synchronisiert, das JPEG danach
+/// separat hochgeladen (`PUT …/attachments/{id}/blob`). sha256/mime/size sind danach unveränderlich.
+struct Attachment: SyncEntity {
+    static let entityName = "attachment"
+    /// Grenze wie Server (8 MiB)
+    static let maxSize = 8 * 1024 * 1024
+    static let kinds = ["receipt", "pump", "odometer", "other"]
+
+    var id = UUID().uuidString.lowercased()
+    var version = 0
+    var deleted = false
+    var fuelId: String?
+    var maintenanceId: String?
+    /// Pflicht für Tacho-Fotos ohne Tankung/Wartung; sonst passend zum verknüpften Eintrag
+    var vehicleId: String?
+    /// "receipt" | "pump" | "odometer" | "other"
+    var kind: String
+    /// SHA-256 des JPEG (64 Hex-Zeichen, klein)
+    var sha256: String
+    var mime: String = "image/jpeg"
+    var size: Int
+    /// ISO-8601 mit Offset
+    var takenAt: String?
+    var note: String?
+
+    var kindLabel: String {
+        switch kind {
+        case "receipt": "Quittung"
+        case "pump": "Zapfsäule"
+        case "odometer": "Tacho"
+        default: "Beleg"
+        }
+    }
+
+    var takenDate: Date? { takenAt.flatMap { Trip.parseISO($0) } }
+}
+
 struct Maintenance: SyncEntity {
     static let entityName = "maintenance"
     var id = UUID().uuidString.lowercased()
@@ -288,6 +325,8 @@ struct ChangesResponse: Decodable {
     var purposeRules: [PurposeRule]?
     var taxParams: [TaxParam]?
     var tripPeriods: [TripPeriod]?
+    /// Belege – optional, damit ältere Server ohne Belegablage weiter funktionieren
+    var attachments: [Attachment]?
 }
 
 struct OpResult: Decodable {

@@ -99,6 +99,22 @@ struct FuelFormView: View {
     @State private var fullTank = true
     @State private var station = ""
     @State private var note = ""
+    @State private var didPrefill = false
+    /// Scan (Zapfsäule/Quittung bzw. Tacho)
+    @State private var scan: ScanRequest?
+    /// Belege, die beim Sichern angelegt werden (nach der Tankung → Reihenfolge in der Outbox)
+    @State private var newAttachments: [PendingAttachment] = []
+
+    private var savedAttachments: [Attachment] {
+        entry.map { store.attachments(forFuel: $0.id) } ?? []
+    }
+
+    /// Plausibilität des Tacho-Scans: höchster bekannter Stand (nur bei neuer Tankung)
+    private var lastKmForScan: Int? {
+        guard entry == nil else { return nil }
+        let last = store.lastKnownKm(for: vehicle.id)
+        return last > 0 ? last : nil
+    }
 
     private var pricePerLiter: Double? {
         guard let l = liters.asDouble, l > 0, let p = price.asDouble else { return nil }
@@ -141,13 +157,32 @@ struct FuelFormView: View {
             Form {
                 Section {
                     DatePicker("Datum", selection: $date, displayedComponents: .date)
-                    UnitField("Kilometerstand", text: $km, unit: "km", keyboard: .numberPad).focused($focus, equals: .km)
+                    HStack(spacing: 8) {
+                        UnitField("Kilometerstand", text: $km, unit: "km", keyboard: .numberPad)
+                            .focused($focus, equals: .km)
+                        if store.canWrite {
+                            Button { scan = ScanRequest(kind: .odometer) } label: {
+                                Image(systemName: "camera")
+                            }
+                            .buttonStyle(.borderless)
+                            .accessibilityLabel("Kilometerstand vom Tacho scannen")
+                        }
+                    }
                     UnitField("Liter", text: $liters, unit: "l", placeholder: "0.00").focused($focus, equals: .liters)
                     UnitField("Betrag", text: $price, unit: "CHF", placeholder: "0.00").focused($focus, equals: .price)
                     if let ppl = pricePerLiter {
                         LabeledContent("Preis pro Liter", value: "CHF \(Fmt.num(ppl, 3))")
                     }
                     Toggle("Vollgetankt", isOn: $fullTank)
+                } header: {
+                    if store.canWrite {
+                        Button { scan = ScanRequest(kind: .pump) } label: {
+                            Label("Zapfsäule/Quittung scannen", systemImage: "camera.viewfinder")
+                                .font(.subheadline.weight(.semibold))
+                        }
+                        .textCase(nil)
+                        .accessibilityHint("Liter, Betrag und Preis pro Liter per Kamera erfassen")
+                    }
                 } footer: {
                     if !missing.isEmpty && (!liters.isEmpty || !price.isEmpty) {
                         Text("Erforderlich: \(missing.joined(separator: ", "))").foregroundStyle(.orange)
@@ -166,6 +201,21 @@ struct FuelFormView: View {
                     TextField("Tankstelle", text: $station)
                     TextField("Notiz", text: $note, axis: .vertical)
                 }
+                if !savedAttachments.isEmpty || !newAttachments.isEmpty {
+                    Section {
+                        AttachmentStrip(attachments: savedAttachments, pending: newAttachments) { p in
+                            newAttachments.removeAll { $0.id == p.id }
+                        }
+                    } header: {
+                        Text("Belege")
+                    } footer: {
+                        if !newAttachments.isEmpty {
+                            Text("Neue Belege werden beim Sichern gespeichert. Gedrückt halten zum Entfernen bzw. Stornieren.")
+                        } else {
+                            Text("Tippen zum Anzeigen, gedrückt halten zum Stornieren.")
+                        }
+                    }
+                }
                 if let e = entry {
                     HistorySection(entity: FuelEntry.entityName, id: e.id)
                 }
@@ -176,10 +226,32 @@ struct FuelFormView: View {
             .navigationTitle(entry == nil ? "Tankvorgang" : "Tankvorgang bearbeiten")
             .formToolbar(canSave: store.canWrite && missing.isEmpty, save: save)
             .onAppear(perform: prefill)
+            .sheet(item: $scan) { request in
+                ScannerView(kinds: request.kind == .odometer ? [.odometer] : [.pump, .receipt],
+                            initialKind: request.kind,
+                            lastKnownKm: request.kind == .odometer ? lastKmForScan : nil) { outcome in
+                    apply(outcome)
+                }
+            }
+        }
+    }
+
+    /// Scan-Ergebnis übernehmen; die Plausibilitätswarnungen greifen danach wie bei manueller Eingabe.
+    private func apply(_ outcome: ScanOutcome) {
+        if let l = outcome.liters { liters = Fmt.edit(l) }
+        if let a = outcome.amount { price = Fmt.edit(a) }
+        if let k = outcome.km { km = String(k) }
+        if let d = outcome.date { date = d }
+        if let s = outcome.station?.nilIfEmpty { station = s }
+        if let data = outcome.attachmentJPEG {
+            newAttachments.append(PendingAttachment(kind: outcome.kind, data: data))
         }
     }
 
     private func prefill() {
+        // nur einmal (Vollbild-Ansichten lösen onAppear erneut aus)
+        guard !didPrefill else { return }
+        didPrefill = true
         guard let e = entry else {
             let current = store.currentKm(store.vehicle(id: vehicle.id) ?? vehicle)
             if current > 0 { km = String(current) }
@@ -206,5 +278,11 @@ struct FuelFormView: View {
         e.station = station.nilIfEmpty
         e.note = note.nilIfEmpty
         store.save(e)
+        // Belege erst nach der Tankung anlegen (Server kennt fuel_id dann bereits)
+        for attachment in newAttachments {
+            store.addAttachment(imageData: attachment.data, kind: attachment.kind.rawValue, fuelId: e.id,
+                                maintenanceId: nil, vehicleId: vehicle.id)
+        }
+        newAttachments = []
     }
 }

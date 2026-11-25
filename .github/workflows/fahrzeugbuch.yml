@@ -48,9 +48,13 @@ jobs:
       - uses: actions/checkout@v4
       - run: brew install xcodegen
       - run: xcodegen generate
-      - name: Build (Simulator, ohne Signierung)
+      - name: Build + Unit-Tests (Simulator, ohne Signierung)
         run: |
-          xcodebuild -project Fahrzeugbuch.xcodeproj -target Fahrzeugbuch \
-            -sdk iphonesimulator -configuration Debug \
-            CODE_SIGNING_ALLOWED=NO build | tail -40
+          DEST=$(xcrun simctl list devices available -j | python3 -c '
+          import json, sys
+          devs = [d for rt, ds in json.load(sys.stdin)["devices"].items() if "iOS" in rt for d in ds]
+          pick = next((d for d in devs if d["name"] == "iPhone 16 Pro"), None) or next(d for d in devs if d["name"].startswith("iPhone"))
+          print(pick["udid"])')
+          xcodebuild test -project Fahrzeugbuch.xcodeproj -scheme Fahrzeugbuch \
+            -destination "id=$DEST" CODE_SIGNING_ALLOWED=NO | tail -60
           exit ${PIPESTATUS[0]}

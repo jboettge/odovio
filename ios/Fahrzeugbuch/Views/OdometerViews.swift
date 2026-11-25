@@ -94,14 +94,38 @@ struct OdometerFormView: View {
     @State private var date = Date()
     @State private var km = ""
     @State private var note = ""
+    @State private var didPrefill = false
+    @State private var scan: ScanRequest?
+    /// Tacho-Foto, das beim Sichern als Beleg (mit vehicle_id) angelegt wird
+    @State private var newAttachments: [PendingAttachment] = []
 
     var body: some View {
         NavigationStack {
             Form {
                 Section {
                     DatePicker("Datum", selection: $date, displayedComponents: .date)
-                    UnitField("Kilometerstand", text: $km, unit: "km", keyboard: .numberPad)
+                    HStack(spacing: 8) {
+                        UnitField("Kilometerstand", text: $km, unit: "km", keyboard: .numberPad)
+                        if store.canWrite {
+                            Button { scan = ScanRequest(kind: .odometer) } label: {
+                                Image(systemName: "camera")
+                            }
+                            .buttonStyle(.borderless)
+                            .accessibilityLabel("Kilometerstand vom Tacho scannen")
+                        }
+                    }
                     TextField("Notiz (optional)", text: $note, axis: .vertical)
+                } footer: {
+                    if !newAttachments.isEmpty {
+                        Text("Das Tacho-Foto wird beim Sichern als Beleg gespeichert.")
+                    }
+                }
+                if !newAttachments.isEmpty {
+                    Section("Belege") {
+                        AttachmentStrip(attachments: [], pending: newAttachments) { p in
+                            newAttachments.removeAll { $0.id == p.id }
+                        }
+                    }
                 }
                 if let r = reading {
                     HistorySection(entity: OdometerReading.entityName, id: r.id)
@@ -109,7 +133,18 @@ struct OdometerFormView: View {
             }
             .navigationTitle(reading == nil ? "Kilometerstand" : "Kilometerstand bearbeiten")
             .formToolbar(canSave: store.canWrite && km.asInt != nil, save: save)
+            .sheet(item: $scan) { request in
+                ScannerView(kinds: [.odometer], initialKind: request.kind, lastKnownKm: lastKmForScan) { outcome in
+                    if let k = outcome.km { km = String(k) }
+                    if let data = outcome.attachmentJPEG {
+                        newAttachments.append(PendingAttachment(kind: .odometer, data: data))
+                    }
+                }
+            }
             .onAppear {
+                // nur einmal (Vollbild-Ansichten lösen onAppear erneut aus)
+                guard !didPrefill else { return }
+                didPrefill = true
                 if let r = reading {
                     date = r.date
                     km = String(r.km)
@@ -129,5 +164,17 @@ struct OdometerFormView: View {
         r.km = kmValue
         r.note = note.nilIfEmpty
         store.save(r)
+        for attachment in newAttachments {
+            store.addAttachment(imageData: attachment.data, kind: attachment.kind.rawValue, fuelId: nil,
+                                maintenanceId: nil, vehicleId: vehicle.id)
+        }
+        newAttachments = []
+    }
+
+    /// Plausibilität des Tacho-Scans (nur bei neuem Kilometerstand)
+    private var lastKmForScan: Int? {
+        guard reading == nil else { return nil }
+        let last = store.lastKnownKm(for: vehicle.id)
+        return last > 0 ? last : nil
     }
 }

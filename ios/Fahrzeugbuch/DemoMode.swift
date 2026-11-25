@@ -1,5 +1,6 @@
 #if DEBUG
 import SwiftUI
+import UIKit
 
 /// Nur Debug-Builds: Start mit `-demo [-screen <name>]` zeigt Beispieldaten ohne Server/Login
 /// (für Screenshots im Simulator, siehe .github/workflows/fahrzeugbuch-screenshots.yml).
@@ -15,6 +16,8 @@ enum Demo {
     static let vehicleId = "11111111-1111-4111-8111-111111111111"
     static let serviceId = "22222222-2222-4222-8222-222222222222"
     static let busId = "33333333-3333-4333-8333-333333333333"
+    static let pendingFuelId = "55555555-5555-4555-8555-555555555555"
+    static let receiptAttachmentId = "56565656-5656-4565-8565-565656565656"
 
     static func articleId(_ n: Int) -> String { String(format: "dddddddd-dddd-4ddd-8ddd-%012ld", n) }
     static func tripId(_ n: Int) -> String { String(format: "eeeeeeee-eeee-4eee-8eee-%012ld", n) }
@@ -63,7 +66,7 @@ enum Demo {
             FuelEntry(id: String(format: "44444444-4444-4444-8444-%012ld", n), version: 1, vehicleId: vehicleId,
                       date: day(f.0), km: f.1, liters: f.2, priceTotal: f.3, fullTank: f.4, station: f.5)
         }
-        let pendingFuel = FuelEntry(id: "55555555-5555-4555-8555-555555555555", vehicleId: vehicleId,
+        let pendingFuel = FuelEntry(id: pendingFuelId, vehicleId: vehicleId,
                                     date: day("2026-11-24"), km: 53410, liters: 43.6, priceTotal: 77.80,
                                     station: "Tamoil Landquart")
         fuelEntries.append(pendingFuel)
@@ -127,6 +130,116 @@ enum Demo {
                        maintenance: maintenance, items: items, materials: materials, articles: articles,
                        pending: [pendingFuel])
         seedTrips(store)
+        seedAttachments(store)
+    }
+
+    // MARK: Belege / Scan (Bilder werden gezeichnet, keine Binärdateien)
+
+    /// Gezeichnete Aufnahme mit den Textzeilen, die die Erkennung liefern würde.
+    struct ScanSample {
+        let image: UIImage
+        let lines: [RecognizedLine]
+    }
+
+    /// Quittung zur Demo-Tankung (Tamoil Landquart, 43.60 l, CHF 77.80) als lokaler Beleg.
+    @MainActor
+    static func seedAttachments(_ store: TenantStore) {
+        guard let data = receiptSample().image.jpegData(compressionQuality: 0.7) else { return }
+        let receipt = Attachment(id: receiptAttachmentId, version: 1, fuelId: pendingFuelId, vehicleId: vehicleId,
+                                 kind: "receipt", sha256: AttachmentFiles.sha256(data), size: data.count,
+                                 takenAt: at("2026-11-24", 17, 42))
+        store.demoAddAttachment(receipt, data: data)
+    }
+
+    @MainActor
+    private static func drawText(_ text: String, font: UIFont, color: UIColor, at point: CGPoint,
+                                 rightEdge: CGFloat? = nil) -> CGRect {
+        let attributes: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: color]
+        let string = text as NSString
+        let size = string.size(withAttributes: attributes)
+        let origin = CGPoint(x: rightEdge.map { $0 - size.width } ?? point.x, y: point.y)
+        string.draw(at: origin, withAttributes: attributes)
+        return CGRect(origin: origin, size: size)
+    }
+
+    @MainActor
+    private static func line(_ text: String, _ rect: CGRect, in size: CGSize, confidence: Double) -> RecognizedLine {
+        RecognizedLine(text: text, confidence: confidence,
+                       box: TextBox(x: Double(rect.minX / size.width), y: Double(rect.minY / size.height),
+                                    width: Double(rect.width / size.width), height: Double(rect.height / size.height)))
+    }
+
+    /// Anzeige einer Zapfsäule (Betrag, Liter, Preis pro Liter).
+    @MainActor
+    static func pumpSample() -> ScanSample {
+        let size = CGSize(width: 900, height: 1200)
+        var lines: [RecognizedLine] = []
+        let format = UIGraphicsImageRendererFormat.default()
+        format.scale = 1
+        let image = UIGraphicsImageRenderer(size: size, format: format).image { ctx in
+            UIColor(white: 0.2, alpha: 1).setFill()
+            ctx.fill(CGRect(origin: .zero, size: size))
+            UIColor(red: 0.86, green: 0.87, blue: 0.89, alpha: 1).setFill()
+            UIBezierPath(roundedRect: CGRect(x: 50, y: 50, width: 800, height: 1100), cornerRadius: 40).fill()
+            UIColor(red: 0.8, green: 0.1, blue: 0.1, alpha: 1).setFill()
+            UIBezierPath(roundedRect: CGRect(x: 50, y: 50, width: 800, height: 110), cornerRadius: 40).fill()
+            let header = drawText("Säule 4 · Bleifrei 95", font: .systemFont(ofSize: 44, weight: .bold),
+                                  color: .white, at: CGPoint(x: 100, y: 75))
+            lines.append(line("Säule 4 · Bleifrei 95", header, in: size, confidence: 0.95))
+
+            let labelFont = UIFont.systemFont(ofSize: 40, weight: .semibold)
+            let lcdColor = UIColor(red: 0.55, green: 1.0, blue: 0.45, alpha: 1)
+            // Beschriftung, Wert, oberer Rand, Höhe der Anzeige, Schriftgrösse
+            let rows: [(String, String, CGFloat, CGFloat, CGFloat)] = [
+                ("Betrag CHF", "77.80", 200, 200, 160),
+                ("Liter", "43.60", 480, 200, 160),
+                ("CHF/Liter", "1.784", 760, 150, 110),
+            ]
+            for row in rows {
+                let label = drawText(row.0, font: labelFont, color: .darkGray, at: CGPoint(x: 110, y: row.2))
+                lines.append(line(row.0, label, in: size, confidence: 0.95))
+                let display = CGRect(x: 100, y: row.2 + 55, width: 700, height: row.3)
+                UIColor.black.setFill()
+                UIBezierPath(roundedRect: display, cornerRadius: 14).fill()
+                let font = UIFont.monospacedDigitSystemFont(ofSize: row.4, weight: .bold)
+                let valueHeight = (row.1 as NSString).size(withAttributes: [.font: font]).height
+                let value = drawText(row.1, font: font, color: lcdColor,
+                                     at: CGPoint(x: 0, y: display.midY - valueHeight / 2), rightEdge: display.maxX - 30)
+                lines.append(line(row.1, value, in: size, confidence: 0.9))
+            }
+            let footer = drawText("Bitte Zapfhahn einhängen", font: .systemFont(ofSize: 34), color: .darkGray,
+                                  at: CGPoint(x: 110, y: 1010))
+            lines.append(line("Bitte Zapfhahn einhängen", footer, in: size, confidence: 0.9))
+        }
+        return ScanSample(image: image, lines: lines)
+    }
+
+    /// Tankquittung (für die Belegablage).
+    @MainActor
+    static func receiptSample() -> ScanSample {
+        let size = CGSize(width: 700, height: 1000)
+        var lines: [RecognizedLine] = []
+        let format = UIGraphicsImageRendererFormat.default()
+        format.scale = 1
+        let texts = [
+            "TAMOIL", "Tamoil Landquart", "Kantonsstrasse 12", "7302 Landquart", "",
+            "24.11.2026  17:42", "Säule 2   Bleifrei 95", "43.60 l x 1.784 CHF/l", "",
+            "Total CHF          77.80", "MWST 8.1%  CHF      5.83", "Visa              77.80", "",
+            "Vielen Dank – gute Fahrt!",
+        ]
+        let image = UIGraphicsImageRenderer(size: size, format: format).image { ctx in
+            UIColor(white: 0.75, alpha: 1).setFill()
+            ctx.fill(CGRect(origin: .zero, size: size))
+            UIColor(white: 0.99, alpha: 1).setFill()
+            ctx.fill(CGRect(x: 90, y: 40, width: 520, height: 920))
+            let font = UIFont.monospacedSystemFont(ofSize: 26, weight: .regular)
+            for (n, text) in texts.enumerated() where !text.isEmpty {
+                let rect = drawText(text, font: n == 0 ? .monospacedSystemFont(ofSize: 40, weight: .bold) : font,
+                                    color: .black, at: CGPoint(x: 120, y: 80 + CGFloat(n) * 58))
+                lines.append(line(text, rect, in: size, confidence: 0.9))
+            }
+        }
+        return ScanSample(image: image, lines: lines)
     }
 
     /// Lokale Zeit eines Tages als ISO-8601 mit Offset (unabhängig von der Zeitzone des Simulators).
@@ -249,6 +362,26 @@ enum Demo {
     }
 }
 
+/// Scan-Ergebnis einer gezeichneten Zapfsäule (ohne Kamera/Vision: Zeilen sind vorgegeben).
+struct DemoScanScreen: View {
+    let sample: Demo.ScanSample
+
+    var body: some View {
+        NavigationStack {
+            ScanResultView(image: sample.image, kind: .pump,
+                           reading: ReadingParser.parse(sample.lines, kind: .pump),
+                           onApply: { _ in })
+                .navigationTitle("Zapfsäule scannen")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("Abbrechen") {}
+                    }
+                }
+        }
+    }
+}
+
 /// Zeigt einen einzelnen Screen für Screenshots.
 struct DemoScreen: View {
     @Environment(AppSettings.self) private var settings
@@ -264,6 +397,8 @@ struct DemoScreen: View {
                 case "maintenance-detail":
                     NavigationStack { MaintenanceDetailView(maintenanceId: Demo.serviceId, vehicle: v) }
                 case "fuel-form": FuelFormView(vehicle: v, entry: nil)
+                case "fuel-scan": DemoScanScreen(sample: Demo.pumpSample())
+                case "fuel-attachments": FuelFormView(vehicle: v, entry: store.fuelEntry(id: Demo.pendingFuelId))
                 case "maintenance-form": MaintenanceFormView(vehicle: v, maintenance: nil)
                 case "maintenance-edit":
                     MaintenanceFormView(vehicle: v, maintenance: store.maintenance(id: Demo.serviceId))

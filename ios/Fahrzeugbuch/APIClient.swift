@@ -55,14 +55,32 @@ struct APIClient {
         try await raw("GET", path, query: query, body: nil)
     }
 
-    private func raw(_ method: String, _ path: String, query: [URLQueryItem], body: Data?) async throws -> Data {
-        var comps = URLComponents(url: baseURL.appending(path: path), resolvingAgainstBaseURL: false)!
+    /// Rohdaten hochladen (z. B. Beleg-JPEG per PUT). Gleiche Token-/401-Logik wie alle Aufrufe.
+    @discardableResult
+    func upload(path: String, data: Data, contentType: String, method: String = "PUT") async throws -> Data {
+        let response = try await rawResponse(method, path, body: data, contentType: contentType, timeout: 60)
+        return try Self.check(response)
+    }
+
+    /// Antwort eines Requests ohne Statusprüfung.
+    struct RawResponse {
+        var data: Data
+        var status: Int
+    }
+
+    /// Request ohne Statusprüfung (für tolerante Aufrufe mit 204/503 usw.), inkl. einmaligem Refresh nach 401.
+    func rawResponse(_ method: String, _ path: String, query: [URLQueryItem] = [], body: Data? = nil,
+                     contentType: String = "application/json", timeout: TimeInterval = 20) async throws -> RawResponse {
+        guard var comps = URLComponents(url: baseURL.appending(path: path), resolvingAgainstBaseURL: false) else {
+            throw URLError(.badURL)
+        }
         if !query.isEmpty { comps.queryItems = query }
-        var req = URLRequest(url: comps.url!)
+        guard let url = comps.url else { throw URLError(.badURL) }
+        var req = URLRequest(url: url)
         req.httpMethod = method
-        req.timeoutInterval = 20
+        req.timeoutInterval = timeout
         if let body {
-            req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            req.setValue(contentType, forHTTPHeaderField: "Content-Type")
             req.httpBody = body
         }
         let token = try await tokenProvider(false)
@@ -77,11 +95,20 @@ struct APIClient {
         guard let http = response as? HTTPURLResponse else {
             throw APIError(status: 0, message: "Keine HTTP-Antwort")
         }
-        guard (200..<300).contains(http.statusCode) else {
-            let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-            let detail = json?["detail"] as? String ?? String(data: data, encoding: .utf8) ?? ""
-            throw APIError(status: http.statusCode, message: detail)
+        return RawResponse(data: data, status: http.statusCode)
+    }
+
+    private func raw(_ method: String, _ path: String, query: [URLQueryItem], body: Data?) async throws -> Data {
+        try Self.check(try await rawResponse(method, path, query: query, body: body))
+    }
+
+    /// 2xx → Daten, sonst `APIError` mit Detailtext des Servers.
+    private static func check(_ response: RawResponse) throws -> Data {
+        guard (200..<300).contains(response.status) else {
+            let json = try? JSONSerialization.jsonObject(with: response.data) as? [String: Any]
+            let detail = json?["detail"] as? String ?? String(data: response.data, encoding: .utf8) ?? ""
+            throw APIError(status: response.status, message: detail)
         }
-        return data
+        return response.data
     }
 }

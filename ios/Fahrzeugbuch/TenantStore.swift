@@ -29,6 +29,10 @@ final class TenantStore {
     private(set) var taxParams: [String: TaxParam] = [:]
     /// Monatsabschlüsse (nur vom Server, nie in der Outbox)
     private(set) var periods: [String: TripPeriod] = [:]
+    /// Belege (Metadaten); die JPEGs liegen in `AttachmentFiles`
+    private(set) var attachments: [String: Attachment] = [:]
+    /// Belege, deren Datei noch hochgeladen werden muss (nach dem Sync der Metadaten)
+    private(set) var pendingBlobs: [String] = []
     private(set) var outbox: [PendingOp] = []
     private(set) var cursor = 0
     private(set) var lastSync: Date?
@@ -41,6 +45,9 @@ final class TenantStore {
     @ObservationIgnored private var rerunRequested = false
 
     var canWrite: Bool { tenant.canWrite }
+
+    /// API-Client des angemeldeten Benutzers (für Aufrufe ausserhalb des Syncs, z. B. Scan)
+    var api: APIClient { apiProvider() }
 
     init(tenant: TenantInfo, api: @escaping @MainActor () -> APIClient) {
         self.tenant = tenant
@@ -86,6 +93,38 @@ final class TenantStore {
     }
 
     func maintenance(id: String) -> Maintenance? { maintenance[id] }
+    func fuelEntry(id: String) -> FuelEntry? { fuel[id] }
+
+    // MARK: Belege – Lesen
+
+    /// Nicht stornierte Belege einer Tankung, älteste zuerst.
+    func attachments(forFuel fuelId: String) -> [Attachment] {
+        attachments.values.filter { $0.fuelId == fuelId && !$0.deleted }
+            .sorted { ($0.takenAt ?? "", $0.id) < ($1.takenAt ?? "", $1.id) }
+    }
+
+    /// Nicht stornierte Belege einer Wartung, älteste zuerst.
+    func attachments(forMaintenance maintenanceId: String) -> [Attachment] {
+        attachments.values.filter { $0.maintenanceId == maintenanceId && !$0.deleted }
+            .sorted { ($0.takenAt ?? "", $0.id) < ($1.takenAt ?? "", $1.id) }
+    }
+
+    func isBlobPending(_ id: String) -> Bool { pendingBlobs.contains(id) }
+
+    /// JPEG eines Belegs: lokal bzw. vom Server (danach lokal zwischengespeichert). `nil` offline/fehlend.
+    func attachmentData(_ a: Attachment) async -> Data? {
+        if let local = AttachmentFiles.read(a.id) { return local }
+        #if DEBUG
+        if Demo.isActive { return nil }
+        #endif
+        guard !isBlobPending(a.id) else { return nil }   // noch nicht hochgeladen (anderes Gerät?)
+        guard let data = try? await apiProvider().download("api/t/\(tenant.slug)/attachments/\(a.id)/blob"),
+              !data.isEmpty else { return nil }
+        if AttachmentFiles.sha256(data) == a.sha256.lowercased() {
+            try? AttachmentFiles.write(data, id: a.id)
+        }
+        return data
+    }
     func article(id: String) -> MaterialArticle? { articles[id] }
 
     /// Nicht stornierte Stammartikel, die für das Fahrzeug gelten (Artikel ohne Fahrzeug gelten für alle).
@@ -457,6 +496,40 @@ final class TenantStore {
         }
     }
 
+    // MARK: Belege – Schreiben
+
+    /// Beleg anlegen: JPEG lokal speichern, Metadaten in die Outbox, Datei nach dem Sync hochladen.
+    /// Bei neuen Einträgen erst nach `save(…)` des Eintrags aufrufen (Reihenfolge in der Outbox).
+    @discardableResult
+    func addAttachment(imageData: Data, kind: String, fuelId: String?, maintenanceId: String?,
+                       vehicleId: String?, note: String? = nil) -> Attachment? {
+        guard canWrite else { return nil }
+        guard !imageData.isEmpty, imageData.count <= Attachment.maxSize else {
+            notices.append("Beleg nicht gespeichert: Das Foto ist grösser als 8 MB.")
+            return nil
+        }
+        let a = Attachment(fuelId: fuelId, maintenanceId: maintenanceId, vehicleId: vehicleId,
+                           kind: Attachment.kinds.contains(kind) ? kind : "other",
+                           sha256: AttachmentFiles.sha256(imageData), mime: "image/jpeg", size: imageData.count,
+                           takenAt: Trip.isoString(Date()), note: note?.nilIfEmpty)
+        do {
+            try AttachmentFiles.write(imageData, id: a.id)
+        } catch {
+            notices.append("Beleg konnte nicht lokal gespeichert werden: \(error.localizedDescription)")
+            return nil
+        }
+        pendingBlobs.append(a.id)
+        upsert(a, in: \.attachments)
+        return attachments[a.id]
+    }
+
+    /// Beleg stornieren (Metadaten bleiben im Änderungsprotokoll).
+    func delete(_ a: Attachment) {
+        guard canWrite else { return }
+        pendingBlobs.removeAll { $0 == a.id }
+        remove(a, in: \.attachments)
+    }
+
     func toggle(_ item: MaintenanceItem) {
         guard var current = items[item.id] else { return }
         current.done.toggle()
@@ -505,6 +578,7 @@ final class TenantStore {
             do {
                 let needsFullPull = try await push()
                 try await pull(full: needsFullPull)
+                await uploadPendingBlobs()
                 syncError = nil
                 lastSync = Date()
                 persist()
@@ -545,6 +619,7 @@ final class TenantStore {
                 case "rejected":
                     rejected = true
                     notices.append("\(Self.entityLabel(r.entity)) abgelehnt: \(r.error ?? "unbekannt")")
+                    if r.entity == Attachment.entityName { pendingBlobs.removeAll { $0 == r.id } }
                 default:
                     break
                 }
@@ -575,6 +650,7 @@ final class TenantStore {
             rules = rules.filter { isPending($0.key) }
             taxParams = taxParams.filter { isPending($0.key) }
             if ch.tripPeriods != nil { periods = [:] }
+            if ch.attachments != nil { attachments = attachments.filter { isPending($0.key) } }
         }
         merge(ch.vehicles, into: \.vehicles)
         merge(ch.odometer, into: \.odometer)
@@ -588,6 +664,7 @@ final class TenantStore {
         merge(ch.trips ?? [], into: \.trips)
         merge(ch.purposeRules ?? [], into: \.rules)
         merge(ch.taxParams ?? [], into: \.taxParams)
+        merge(ch.attachments ?? [], into: \.attachments)
         for p in ch.tripPeriods ?? [] {
             for (key, old) in periods where old.vehicleId == p.vehicleId && old.month == p.month && key != p.id {
                 periods.removeValue(forKey: key)
@@ -595,6 +672,57 @@ final class TenantStore {
             periods[p.id] = p
         }
         cursor = ch.cursor
+    }
+
+    /// Lädt Beleg-Dateien hoch, deren Metadaten bereits beim Server sind (nicht mehr in der Outbox).
+    /// 404 (Metadaten fehlen noch), 5xx, 429 und offline → später erneut; endgültige Fehler → Hinweis.
+    private func uploadPendingBlobs() async {
+        guard !pendingBlobs.isEmpty else { return }
+        var changed = false
+        blobs: for id in pendingBlobs {
+            if isPending(id) { continue }
+            guard let a = attachments[id], !a.deleted else {
+                pendingBlobs.removeAll { $0 == id }
+                changed = true
+                continue
+            }
+            guard let data = AttachmentFiles.read(id) else {
+                pendingBlobs.removeAll { $0 == id }
+                changed = true
+                notices.append("Beleg-Foto ist nicht mehr auf dem Gerät und konnte nicht hochgeladen werden.")
+                continue
+            }
+            do {
+                try await apiProvider().upload(path: "api/t/\(tenant.slug)/attachments/\(id)/blob",
+                                               data: data, contentType: a.mime)
+                pendingBlobs.removeAll { $0 == id }   // 200 (bereits vorhanden) oder 201 (neu)
+                changed = true
+            } catch let error as APIError {
+                let message: String?
+                switch error.status {
+                case 404, 429, 500...599:   // inkl. 507 Speicherfehler
+                    message = nil   // Metadaten noch nicht da bzw. Server vorübergehend → später erneut
+                case 409:
+                    message = "Beleg-Foto nicht übertragen: Beleg storniert oder anderer Inhalt vorhanden."
+                case 413:
+                    message = "Beleg-Foto zu gross (max. 8 MB) – nicht übertragen."
+                case 415, 422:
+                    message = "Beleg-Foto vom Server abgelehnt (Format/Prüfsumme): \(error.message)"
+                case 403:
+                    message = "Keine Berechtigung, Beleg-Fotos hochzuladen."
+                default:
+                    message = nil
+                }
+                if let message {
+                    pendingBlobs.removeAll { $0 == id }
+                    changed = true
+                    notices.append(message)
+                }
+            } catch {
+                break blobs   // offline → beim nächsten Sync
+            }
+        }
+        if changed { persist() }
     }
 
     private func merge<T: SyncEntity>(_ list: [T], into kp: ReferenceWritableKeyPath<TenantStore, [String: T]>) {
@@ -633,6 +761,7 @@ final class TenantStore {
         case Customer.entityName: customers[id]?.version = v
         case PurposeRule.entityName: rules[id]?.version = v
         case TaxParam.entityName: taxParams[id]?.version = v
+        case Attachment.entityName: attachments[id]?.version = v
         default: break
         }
     }
@@ -662,6 +791,12 @@ final class TenantStore {
         taxParams = Dictionary(uniqueKeysWithValues: tp.map { ($0.id, $0) })
         periods = Dictionary(uniqueKeysWithValues: pe.map { ($0.id, $0) })
     }
+
+    /// Demo-Beleg: Datei lokal ablegen, ohne Outbox/Upload.
+    func demoAddAttachment(_ a: Attachment, data: Data) {
+        try? AttachmentFiles.write(data, id: a.id)
+        attachments[a.id] = a
+    }
     #endif
 
     // MARK: Persistenz
@@ -683,6 +818,9 @@ final class TenantStore {
         var rules: [String: PurposeRule]?
         var taxParams: [String: TaxParam]?
         var periods: [String: TripPeriod]?
+        /// Belege – optional, damit Dateien älterer App-Versionen weiter laden
+        var attachments: [String: Attachment]?
+        var pendingBlobs: [String]?
         var outbox: [PendingOp]
         var cursor: Int
         var lastSync: Date?
@@ -705,6 +843,7 @@ final class TenantStore {
                             items: items, materials: materials, articles: articles,
                             trips: trips, places: places, customers: customers, rules: rules,
                             taxParams: taxParams, periods: periods,
+                            attachments: attachments, pendingBlobs: pendingBlobs,
                             outbox: outbox, cursor: cursor, lastSync: lastSync)
         do {
             let data = try Self.fileEncoder.encode(snap)
@@ -730,10 +869,13 @@ final class TenantStore {
         rules = snap.rules ?? [:]
         taxParams = snap.taxParams ?? [:]
         periods = snap.periods ?? [:]
+        attachments = snap.attachments ?? [:]
+        pendingBlobs = snap.pendingBlobs ?? []
         outbox = snap.outbox
-        // Datei ohne Material, Materialstamm bzw. Fahrtenbuch (ältere App-Version): ab 0 holen,
-        // damit bereits erfasste Positionen/Artikel/Fahrten ankommen
-        cursor = (snap.materials == nil || snap.articles == nil || snap.trips == nil) ? 0 : snap.cursor
+        // Datei ohne Material, Materialstamm, Fahrtenbuch bzw. Belege (ältere App-Version): ab 0 holen,
+        // damit bereits erfasste Positionen/Artikel/Fahrten/Belege ankommen
+        cursor = (snap.materials == nil || snap.articles == nil || snap.trips == nil || snap.attachments == nil)
+            ? 0 : snap.cursor
         lastSync = snap.lastSync
     }
 
@@ -751,6 +893,7 @@ final class TenantStore {
     /// Löscht alle lokalen Mandantendaten (Abmelden / Serverwechsel).
     static func deleteAll() {
         try? FileManager.default.removeItem(at: directory())
+        AttachmentFiles.deleteAll()
     }
 
     /// Anzahl unsynchronisierter Änderungen über alle Mandanten (für Warnung beim Abmelden).
@@ -759,7 +902,7 @@ final class TenantStore {
         return files.reduce(0) { sum, url in
             guard let data = try? Data(contentsOf: url),
                   let snap = try? fileDecoder.decode(Snapshot.self, from: data) else { return sum }
-            return sum + snap.outbox.count
+            return sum + snap.outbox.count + (snap.pendingBlobs?.count ?? 0)
         }
     }
 
@@ -784,6 +927,7 @@ final class TenantStore {
         case PurposeRule.entityName: "Zweckregel"
         case TaxParam.entityName: "Steuerparameter"
         case "trip_period": "Monatsabschluss"
+        case Attachment.entityName: "Beleg"
         default: entity
         }
     }
