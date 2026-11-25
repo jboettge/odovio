@@ -468,7 +468,11 @@ class AuditResult(BaseModel):
     anchors: int
     blobs_checked: int = 0  # Belegdateien mit geprüfter SHA-256
     blobs_missing: int = 0  # Belege ohne (hochgeladene) Datei – kein Fehler
-    incremental_from: int | None = None   # Kette ab dieser Seq geprüft (davor bereits bestätigt); None = voll
+    # Inkrementell: Kette, geänderte Datensätze und Anker ab dieser Seq geprüft (davor bestätigt); None = voll
+    incremental_from: int | None = None
+    full_seq: int | None = None           # Stand (Revisionen) der letzten Vollprüfung
+    full_at: str | None = None            # Zeitpunkt der letzten Vollprüfung (UTC ISO-8601)
+    anchors_checked: int | None = None    # davon in dieser Prüfung verifizierte Anker
 
 
 class AnchorOut(BaseModel):

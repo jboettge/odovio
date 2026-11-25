@@ -32,7 +32,7 @@ import pytest  # noqa: E402
 from cryptography.hazmat.primitives.asymmetric import rsa  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
-from app import attachments, auth, geo, integrity, intel, members, security  # noqa: E402
+from app import attachments, auth, geo, intel, members, security  # noqa: E402
 from app.db import Base, engine  # noqa: E402
 from app.main import app  # noqa: E402
 
@@ -69,7 +69,7 @@ def reset_db() -> None:
     Base.metadata.drop_all(engine)
     with engine.begin() as conn:
         conn.exec_driver_sql("DROP TABLE IF EXISTS alembic_version")
-    for reset in (intel.limiter.reset, geo.reset_upstreams, integrity.clear_verify_cache,
+    for reset in (intel.limiter.reset, geo.reset_upstreams,
                   attachments.clear_hash_cache, members.reset_clients, security.reset):
         reset()
 

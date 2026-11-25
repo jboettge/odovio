@@ -63,7 +63,7 @@ def test_legacy_database_is_stamped_and_upgraded():
                                  "'2026-01-01T08:00:00+01:00', 'business', 'confirmed', 'manual', false)")
         assert "alembic_version" not in inspect(engine).get_table_names()
         create_schema(engine)
-        assert _version() == _head() == "0003" and BASELINE == "0001"
+        assert _version() == _head() == "0004" and BASELINE == "0001"
         assert _diff() == []
         with engine.connect() as conn:
             row = conn.execute(text("SELECT km_estimated, customer_name FROM trips WHERE id = 't1'")).one()
@@ -86,7 +86,7 @@ def test_upgrade_0001_to_0002_keeps_data():
             conn.exec_driver_sql("INSERT INTO vehicles (id, tenant_id, version, deleted, last_seq, name, fuel_type, "
                                  "initial_km) VALUES ('v1', 1, 1, false, 1, 'Golf', 'benzin', 0)")
         create_schema(engine)
-        assert _version() == _head() == "0003"
+        assert _version() == _head() == "0004"
         assert _diff() == []
         with engine.connect() as conn:
             row = conn.execute(text("SELECT name, created_by, updated_by FROM vehicles WHERE id = 'v1'")).one()

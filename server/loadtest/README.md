@@ -101,11 +101,36 @@ Mandantenzeile strikt sequenziell laufen (Hash-Kette) – bei 3 Mandanten ist da
 Auf dem Ziel-Host (32 Kerne) skaliert der Lese-Anteil etwa linear mit den Workern, solange PostgreSQL genug
 Kerne/Verbindungen hat (`.env.example`, Tabelle 8/16/32 GB).
 
-PDF (`pdf`, 4 Worker, 6 gleichzeitig): ≈ 0.2 PDF/s, p50 ≈ 28 s. Jeder Bericht enthält den Integritätsabschnitt
-(Abgleich ALLER Datensätze mit dem Journal, ≈ 6.5 s bei 67 000 Fahrten je Mandant; der erste Bericht je Worker
-prüft zusätzlich die ganze Kette, ≈ 7 s) – PDF_CONCURRENCY (2 je Worker) begrenzt die Speicherspitzen, darüber
-nach PDF_WAIT_S 503 mit Retry-After. Die Testdaten sind dafür ungünstig (jede Fahrt viermal geändert →
-langes Änderungsprotokoll im PDF).
+PDF (`pdf`, 4 Worker, 6 gleichzeitig), vor der inkrementellen Prüfung: ≈ 0.2 PDF/s, p50 ≈ 28 s. Jeder Bericht
+enthielt den Integritätsabschnitt mit Abgleich ALLER Datensätze mit dem Journal (≈ 6.5 s bei 67 000 Fahrten je
+Mandant; der erste Bericht je Worker prüfte zusätzlich die ganze Kette, ≈ 7 s). PDF_CONCURRENCY (2 je Worker)
+begrenzt die Speicherspitzen, darüber nach PDF_WAIT_S 503 mit Retry-After. Die Testdaten sind ungünstig (jede
+Fahrt viermal geändert → langes Änderungsprotokoll im PDF).
+
+### Inkrementelle Integritätsprüfung (Alembic 0004, 2026-11-25)
+
+PDFs prüfen nur noch ab dem bestätigten Prüfstand je Mandant (`verify_checkpoints`, `app/integrity.py`). Messung
+in einer zweiten Sandbox (4 vCPU / 15 GB, PostgreSQL 16 lokal, Redis, API `python -m app.serve` mit
+`WEB_CONCURRENCY=4` per `taskset` auf 2 Kerne, Lastgenerator auf den anderen 2; Mandant `last1`, 335 500
+Revisionen, 66 661 Fahrten). In-Process (`verify_all` bzw. `build_logbook` eines Monats, je eigener Snapshot):
+
+| | vorher | nachher |
+|---|---:|---:|
+| Prüfung, erster Aufruf je Prozess | 8.45 s | 0.04 s (Prüfstand in der DB; nur einmalig je Mandant voll: 7.7 s) |
+| Prüfung, weitere Aufrufe | 3.67 s | 0.04 s (keine neuen Revisionen) · 0.26 s (3 865 neue Revisionen) |
+| Vollprüfung `full=True` | 8.34 s | 7.79 s |
+| Fahrtenbuch-PDF 1 Monat | 5.1 s | 1.3 s (Rest = Laden + Rendern) |
+
+HTTP (`loadtest.run`, 60 s, 6 gleichzeitig, nur `pdf`, warm) bzw. Mix (40 s, 32 VU, alle Szenarien inkl. `pdf`):
+
+| | vorher | nachher |
+|---|---|---|
+| nur PDF | 0.4 PDF/s, p50 14.9 s, p95 20.8 s | 1.3 PDF/s, p50 4.2 s, p95 6.7 s, 0 Fehler |
+| Mix gesamt | 14.5 RPS, p50 292 ms, 16 Fehler (503) | 18.4 RPS, p50 374 ms, 5 Fehler (503) |
+| Mix `pdf` | 0.6 PDF/s, p50 26.5 s | 1.1 PDF/s, p50 13.8 s |
+
+Im Mix bestimmen jetzt CPU (Rendern ≈ 1.3 s/PDF bei 2 Kernen für alles) und das Warten auf die Mandantensperre für
+den Anker vor dem PDF (`_anchor_and_release`, hinter seriellen Syncs) die PDF-Latenz, nicht mehr die Prüfung.
 
 ## Hot-Queries (loadtest.explain, 1 Mio. Revisionen)
 

@@ -270,7 +270,7 @@ def test_verify_state_detects_trip_tampering(client):
     assert client.get(f"{T}/audit/verify").json()["ok"]
     with engine.begin() as conn:
         conn.execute(text("UPDATE trips SET category = 'private' WHERE id = :i"), {"i": tid})
-    v = client.get(f"{T}/audit/verify").json()
+    v = client.get(f"{T}/audit/verify?full=1").json()
     assert v["chain_ok"] and not v["state_ok"] and any(tid in p and "trip" in p for p in v["problems"])
     with engine.begin() as conn:
         conn.execute(text("UPDATE trips SET category = 'business', start_at = '2026-03-02T09:00:00+01:00' "

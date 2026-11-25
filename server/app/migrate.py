@@ -12,7 +12,8 @@ Revisionen nicht ändern/löschen und keine Datensätze physisch löschen.
 
 Schema-Versionen: Alembic (server/alembic, Baseline-Revision 0001 = Schema inkl. Indizes;
   0002 = created_by/updated_by aller synchronisierten Tabellen, idempotent; 0003 = Index anchors(tenant_id, seq),
-  auf PostgreSQL CONCURRENTLY).
+  auf PostgreSQL CONCURRENTLY; 0004 = Tabelle verify_checkpoints (Prüfstand der inkrementellen Integritätsprüfung),
+  idempotent).
   neue DB                      → alembic upgrade head
   Bestand ohne alembic_version → fehlende Spalten/Tabellen/Indizes nachrüsten, auf Baseline stempeln,
                                  dann upgrade head

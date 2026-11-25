@@ -14,8 +14,9 @@ from sqlalchemy.orm import Session
 
 from . import models
 from .attachments import fuel_with_receipt
-from .integrity import verify_all
+from .integrity import full_interval, verify_all
 from .stats import VehicleData, consumption_points, summarize
+from .timeutil import local
 
 STYLES = getSampleStyleSheet()
 SMALL = ParagraphStyle("small", parent=STYLES["Normal"], fontSize=8, leading=10)
@@ -126,10 +127,36 @@ def _describe_data(entity: str, data: dict) -> str:
     return ""
 
 
+def _when(ts: str | None) -> str:
+    try:
+        return f"{local(ts):%d.%m.%Y %H:%M}" if ts else "–"
+    except ValueError:
+        return "–"
+
+
+def checked_scope(audit: dict) -> tuple[str, str | None]:
+    """Was diese Prüfung abgedeckt hat – ehrlich vollständig oder inkrementell ab dem bestätigten Stand –
+    und (inkrementell) der Hinweis auf die Grenze."""
+    if audit.get("incremental_from") is None:
+        return (f"vollständig am {_when(audit.get('full_at'))} – Hash-Kette aller Revisionen, Abgleich aller "
+                "Einträge mit dem Journal, signierte Anker"), None
+    since, count = audit["incremental_from"], audit["count"]
+    scope = (f"Hash-Kette, Abgleich der Einträge mit dem Journal und signierte Anker vollständig am "
+             f"{_when(audit.get('full_at'))} (Revision 1–{audit.get('full_seq')}), seither inkrementell bis "
+             f"Revision {count}")
+    scope += (f" (diese Prüfung: Kette, geänderte Einträge und Anker ab Revision {since + 1}, Anzahl Einträge "
+              "je Typ)" if count > since else " (seit der letzten Prüfung keine neuen Revisionen)")
+    note = ("Inkrementelle Prüfung: bereits bestätigte Revisionen und seither unveränderte Einträge werden erst "
+            f"bei der nächsten Vollprüfung erneut abgeglichen (fällig {full_interval() / 3600:g} h nach der "
+            "letzten, jederzeit auf Anforderung).")
+    return scope, note
+
+
 def integrity_section(db: Session, tenant: models.Tenant) -> tuple[list, dict, models.Anchor | None]:
     """Integritätsvermerk (Kette, Datenstand, Anker) für alle Berichte. `db` ist der Snapshot des
     Berichts (main: snapshot_session) → Prüfung und Berichtsinhalt zeigen denselben Stand."""
     audit = verify_all(db, tenant)
+    scope, note = checked_scope(audit)
     anchor = db.scalar(select(models.Anchor).where(models.Anchor.tenant_id == tenant.id)
                        .order_by(models.Anchor.seq.desc()).limit(1))
     if audit["ok"]:
@@ -140,8 +167,8 @@ def integrity_section(db: Session, tenant: models.Tenant) -> tuple[list, dict, m
         status = "FEHLER: " + "; ".join(audit["problems"][:3])
     story = [
         Paragraph("Integrität", H2),
-        _p(f"Geprüft: Hash-Kette, Abgleich der Einträge mit dem Journal, signierte Anker – {status}. "
-           f"Revisionen: {audit['count']}."),
+        _p(f"Geprüft: {scope} – {status}. Revisionen: {audit['count']}."),
+        *([_p(note, SMALL)] if note else []),
         _p(f"Kettenkopf (SHA-256): {audit['head_hash']}"),
         _p(f"Signierter Anker: Seq {anchor.seq}, {anchor.created_at}, Schlüssel {anchor.key_id}, "
            f"Signatur {anchor.signature[:32]}…" if anchor else
