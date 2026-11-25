@@ -1,0 +1,38 @@
+name: fahrzeugbuch-web
+on:
+  push:
+    paths: ["fahrzeugbuch/web/**", ".github/workflows/fahrzeugbuch-web.yml"]
+  pull_request:
+    paths: ["fahrzeugbuch/web/**", ".github/workflows/fahrzeugbuch-web.yml"]
+
+permissions:
+  contents: read
+
+jobs:
+  web:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: fahrzeugbuch/web
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Node-Version
+        run: node --version && npm --version
+      - name: Abhängigkeiten (Lockfile, ohne Install-Skripte)
+        run: npm ci --ignore-scripts
+      - name: Lint
+        run: npm run lint
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Unit-Tests
+        run: npm test
+      - name: Build
+        run: npm run build
+      - name: Abhängigkeiten auf Schwachstellen prüfen
+        run: npm run audit
+      - name: Playwright-Browser
+        run: npx playwright install --with-deps chromium
+      - name: E2E-Tests (Mock, Produktions-CSP)
+        run: npm run e2e

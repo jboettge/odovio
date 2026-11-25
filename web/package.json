@@ -1,0 +1,46 @@
+{
+  "name": "fahrzeugbuch-web",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Web-Frontend für das Fahrzeugbuch (Vue 3 + TypeScript + Vite)",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev": "vite",
+    "mock": "node mock/server.mjs",
+    "dev:mock": "node mock/server.mjs --port 8787 & vite",
+    "build": "vite build",
+    "preview": "node mock/server.mjs --static dist --port 4319",
+    "lint": "eslint . --max-warnings 0",
+    "typecheck": "vue-tsc --noEmit -p tsconfig.app.json && tsc --noEmit -p tsconfig.node.json",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "e2e": "playwright test --trace off",
+    "screenshots": "node tests/e2e/screenshots.mjs",
+    "audit": "npm audit --omit=dev --audit-level=high"
+  },
+  "dependencies": {
+    "oidc-client-ts": "3.5.0",
+    "vue": "3.5.46",
+    "vue-router": "4.6.5"
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "@playwright/test": "1.63.0",
+    "@types/node": "22.20.7",
+    "@vitejs/plugin-vue": "6.0.11",
+    "eslint": "10.15.0",
+    "eslint-plugin-security": "4.2.1",
+    "eslint-plugin-vue": "10.12.1",
+    "globals": "17.14.0",
+    "jsdom": "26.1.0",
+    "typescript": "5.9.3",
+    "typescript-eslint": "8.74.0",
+    "vite": "7.3.8",
+    "vitest": "4.1.12",
+    "vue-eslint-parser": "10.4.2",
+    "vue-tsc": "3.3.14"
+  }
+}
