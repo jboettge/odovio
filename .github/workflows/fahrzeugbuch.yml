@@ -55,6 +55,12 @@ jobs:
           devs = [d for rt, ds in json.load(sys.stdin)["devices"].items() if "iOS" in rt for d in ds]
           pick = next((d for d in devs if d["name"] == "iPhone 16 Pro"), None) or next(d for d in devs if d["name"].startswith("iPhone"))
           print(pick["udid"])')
+          set +e
           xcodebuild test -project Fahrzeugbuch.xcodeproj -scheme Fahrzeugbuch \
-            -destination "id=$DEST" CODE_SIGNING_ALLOWED=NO | tail -60
-          exit ${PIPESTATUS[0]}
+            -destination "id=$DEST" CODE_SIGNING_ALLOWED=NO > build.log 2>&1
+          rc=$?
+          tail -40 build.log
+          echo "::group::Compiler-/Testfehler"
+          grep -E "error:|: error|Test Case .* failed|XCTAssert" build.log | sort -u | head -150
+          echo "::endgroup::"
+          exit $rc
