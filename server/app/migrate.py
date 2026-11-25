@@ -21,7 +21,8 @@ from . import models  # noqa: F401  (Tabellen registrieren)
 from .audit import IMMUTABLE_TABLES, install_triggers
 from .db import Base
 
-DML_TABLES = ("tenants", "vehicles", "odometer_readings", "fuel_entries", "maintenance", "maintenance_items")
+DML_TABLES = ("tenants", "vehicles", "odometer_readings", "fuel_entries", "maintenance", "maintenance_items",
+              "maintenance_materials")
 ROLE = re.compile(r"^[a-z_][a-z0-9_]{0,62}$")
 
 

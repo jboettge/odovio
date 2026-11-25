@@ -94,6 +94,24 @@ class MaintenanceItem(Synced, Base):
     position: Mapped[int] = mapped_column(Integer, default=0)
 
 
+class MaintenanceMaterial(Synced, Base):
+    """Verbautes Material/Ersatzteil einer Wartung."""
+
+    __tablename__ = "maintenance_materials"
+
+    maintenance_id: Mapped[str] = mapped_column(ForeignKey("maintenance.id"), index=True)
+    name: Mapped[str] = mapped_column(String(150))
+    part_number: Mapped[str | None] = mapped_column(String(60))
+    quantity: Mapped[float] = mapped_column(Float)
+    unit: Mapped[str] = mapped_column(String(20), default="Stk")
+    unit_price: Mapped[float | None] = mapped_column(Float)
+    position: Mapped[int] = mapped_column(Integer, default=0)
+
+    @property
+    def total(self) -> float | None:
+        return None if self.unit_price is None else self.quantity * self.unit_price
+
+
 class Revision(Base):
     """Append-only Journal (Hash-Kette je Mandant). UPDATE/DELETE per DB-Trigger gesperrt."""
 

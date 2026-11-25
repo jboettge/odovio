@@ -26,12 +26,15 @@ ENTITIES: dict[str, tuple[type, type[BaseModel], tuple[str, type] | None]] = {
     "fuel": (models.FuelEntry, schemas.FuelData, ("vehicle_id", models.Vehicle)),
     "maintenance": (models.Maintenance, schemas.MaintenanceData, ("vehicle_id", models.Vehicle)),
     "maintenance_item": (models.MaintenanceItem, schemas.MaintenanceItemData, ("maintenance_id", models.Maintenance)),
+    "maintenance_material": (models.MaintenanceMaterial, schemas.MaintenanceMaterialData,
+                             ("maintenance_id", models.Maintenance)),
 }
 log = logging.getLogger("fahrzeugbuch.sync")
 
 CHANGE_KEYS = {
     "vehicle": "vehicles", "odometer": "odometer", "fuel": "fuel",
     "maintenance": "maintenance", "maintenance_item": "maintenance_items",
+    "maintenance_material": "maintenance_materials",
 }
 
 

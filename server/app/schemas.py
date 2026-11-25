@@ -78,10 +78,20 @@ class MaintenanceItemData(Payload):
     position: int = Field(default=0, ge=0, le=10_000)
 
 
+class MaintenanceMaterialData(Payload):
+    maintenance_id: str = Field(max_length=36)
+    name: str = Field(min_length=1, max_length=150)
+    part_number: str | None = Field(default=None, max_length=60)
+    quantity: float = Field(gt=0, le=100_000)
+    unit: str = Field(default="Stk", min_length=1, max_length=20)
+    unit_price: float | None = Field(default=None, ge=0, le=100_000)
+    position: int = Field(default=0, ge=0, le=10_000)
+
+
 # ---------- Sync-Protokoll ----------
 class SyncOp(BaseModel):
     op_id: str = Field(min_length=8, max_length=64)
-    entity: Literal["vehicle", "odometer", "fuel", "maintenance", "maintenance_item"]
+    entity: Literal["vehicle", "odometer", "fuel", "maintenance", "maintenance_item", "maintenance_material"]
     id: str
     action: Literal["upsert", "delete"]
     base_version: int | None = Field(default=None, ge=0, le=2_000_000_000)  # None = neu
@@ -119,6 +129,7 @@ class Changes(BaseModel):
     fuel: list[dict]
     maintenance: list[dict]
     maintenance_items: list[dict]
+    maintenance_materials: list[dict]
 
 
 class ChecklistTemplate(BaseModel):

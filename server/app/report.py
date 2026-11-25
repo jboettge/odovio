@@ -18,11 +18,12 @@ from .stats import VehicleData, consumption_points, summarize
 
 STYLES = getSampleStyleSheet()
 SMALL = ParagraphStyle("small", parent=STYLES["Normal"], fontSize=8, leading=10)
+BOLD = ParagraphStyle("bold", parent=SMALL, fontName="Helvetica-Bold")
 H2 = ParagraphStyle("h2", parent=STYLES["Heading2"], spaceBefore=10, spaceAfter=4)
 ACTIONS = {"create": "Erfasst", "update": "Geändert", "delete": "Storniert"}
 ENTITY_NAMES = {
     "vehicle": "Fahrzeug", "odometer": "km-Stand", "fuel": "Tankvorgang",
-    "maintenance": "Wartung", "maintenance_item": "Checkpunkt",
+    "maintenance": "Wartung", "maintenance_item": "Checkpunkt", "maintenance_material": "Material",
 }
 
 
@@ -30,6 +31,12 @@ def _num(v: float | None, d: int = 2) -> str:
     if v is None:
         return "–"
     return f"{v:,.{d}f}".replace(",", "'")
+
+
+def _qty(v: float | None) -> str:
+    if v is None:
+        return "–"
+    return f"{v:,.3f}".rstrip("0").rstrip(".").replace(",", "'")
 
 
 def _km(v: int | None) -> str:
@@ -50,7 +57,7 @@ def _p(text: str, style=SMALL, limit: int = 3000) -> Paragraph:
 
 
 def _table(header: list[str], rows: list[list], widths: list[float]) -> Table:
-    data = [[_p(h, ParagraphStyle("th", parent=SMALL, fontName="Helvetica-Bold")) for h in header]]
+    data = [[_p(h, BOLD) for h in header]]
     data += [[c if isinstance(c, Paragraph) else _p(str(c)) for c in r] for r in rows]
     t = Table(data, colWidths=[w * mm for w in widths], repeatRows=1, splitInRow=1)
     t.setStyle(TableStyle([
@@ -74,6 +81,10 @@ def _describe(entity: str, data: dict) -> str:
             return f"{_day(data.get('date'))}, {data.get('title')}, CHF {_num(data.get('cost'))}"
         case "maintenance_item":
             return f"{data.get('label')}: {'erledigt' if data.get('done') else 'offen'}"
+        case "maintenance_material":
+            pn = f" ({data['part_number']})" if data.get("part_number") else ""
+            return (f"{data.get('name')}{pn}, {_qty(data.get('quantity'))} {data.get('unit') or ''}, "
+                    f"CHF {_num(data.get('unit_price'))}")
         case "vehicle":
             return f"{data.get('name')} {data.get('plate') or ''}".strip()
     return ""
@@ -103,7 +114,7 @@ def build_report(
     km_end = max([km_start, *kms(date_to, strict=False)])
     summary = summarize(points)
     fuel_cost = sum(f.price_total for f in fuel)
-    maint_cost = sum(m.cost or 0 for m in maint)
+    maint_cost = sum(data.maintenance_cost(m) for m in maint)
 
     audit = verify_all(db, tenant)
     anchor = db.scalar(select(models.Anchor).where(models.Anchor.tenant_id == tenant.id)
@@ -148,12 +159,37 @@ def build_report(
                 f"{_km(m.next_due_km)} km" if m.next_due_km else "",
                 _day(m.next_due_date) if m.next_due_date else "",
             ] if x)
-            rows.append([_day(m.date), _km(m.km), m.title, _num(m.cost), due or "–",
+            if m.cost is not None:
+                cost = _num(m.cost)
+            elif any(x.unit_price is not None for x in data.materials.get(m.id, [])):
+                cost = f"{_num(data.material_sum(m.id))} (Material)"
+            else:
+                cost = "–"
+            rows.append([_day(m.date), _km(m.km), m.title, cost, due or "–",
                          checklist + (f"\nNotiz: {m.note}" if m.note else "")])
         story.append(_table(["Datum", "km-Stand", "Titel", "Kosten CHF", "Nächste", "Checkliste [x] erledigt"],
                             rows, [20, 18, 28, 18, 22, 64]))
     else:
         story.append(_p("Keine Wartungen im Zeitraum."))
+
+    # Material je Wartung (eine Zeile je Position, Materialsumme je Wartung)
+    with_mat = [m for m in maint if data.materials.get(m.id)]
+    if with_mat:
+        rows, total_all = [], 0.0
+        for m in with_mat:
+            mats = data.materials[m.id]
+            for n, x in enumerate(mats):
+                rows.append([f"{_day(m.date)}\n{m.title}" if n == 0 else "", x.name, x.part_number or "",
+                             f"{_qty(x.quantity)} {x.unit}", _num(x.unit_price), _num(x.total)])
+            priced = any(x.unit_price is not None for x in mats)
+            msum = data.material_sum(m.id)
+            total_all += msum
+            rows.append(["", _p("Materialsumme", BOLD), "", "", "", _p(_num(msum if priced else None), BOLD)])
+        if len(with_mat) > 1:
+            rows.append([_p("Total Material", BOLD), "", "", "", "", _p(_num(total_all), BOLD)])
+        story += [Paragraph(f"Material ({sum(len(data.materials[m.id]) for m in with_mat)})", H2),
+                  _table(["Wartung", "Material", "Art.-Nr.", "Menge", "Einzelpreis CHF", "Total CHF"],
+                         rows, [30, 54, 26, 20, 20, 20])]
 
     story += [Paragraph(f"Kilometerstände ({len(odo)})", H2)]
     story += [_table(["Datum", "km-Stand", "Notiz"], [[_day(o.date), _km(o.km), o.note or ""] for o in odo],
@@ -164,7 +200,9 @@ def build_report(
     for model in (models.OdometerReading, models.FuelEntry, models.Maintenance):
         q = select(model.id, model.date).where(model.vehicle_id == v.id)
         ids |= {i for i, d in db.execute(q) if in_period(d)}
-    ids |= set(db.scalars(select(models.MaintenanceItem.id).where(models.MaintenanceItem.maintenance_id.in_(list(ids)))))
+    parents = list(ids)
+    for child in (models.MaintenanceItem, models.MaintenanceMaterial):
+        ids |= set(db.scalars(select(child.id).where(child.maintenance_id.in_(parents))))
     revs = list(db.scalars(
         select(models.Revision)
         .where(models.Revision.tenant_id == tenant.id, models.Revision.entity_id.in_(ids),

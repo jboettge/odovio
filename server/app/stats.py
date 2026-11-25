@@ -1,10 +1,13 @@
 """Verbrauch (Voll-zu-voll), Kosten, Fälligkeiten. Stornierte Einträge zählen nicht.
 
+Wartungskosten: `Maintenance.cost` ist der erfasste Rechnungsbetrag. Fehlt er, zählt die
+Materialsumme (Σ Menge × Einzelpreis der nicht stornierten Materialien mit Preis).
+
 Verbrauch einer Etappe = alle seit der letzten Volltankung getankten Liter
 (inkl. Teilbetankungen) / gefahrene km seit der letzten Volltankung.
 """
 import datetime as dt
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -19,6 +22,14 @@ class VehicleData:
     fuel: list[models.FuelEntry]
     maintenance: list[models.Maintenance]
     items: dict[str, list[models.MaintenanceItem]]
+    materials: dict[str, list[models.MaintenanceMaterial]] = field(default_factory=dict)
+
+    def material_sum(self, maintenance_id: str) -> float:
+        return material_sum(self.materials.get(maintenance_id, []))
+
+    def maintenance_cost(self, m: models.Maintenance) -> float:
+        """Rechnungsbetrag, sonst Materialsumme."""
+        return m.cost if m.cost is not None else self.material_sum(m.id)
 
     @property
     def current_km(self) -> int:
@@ -37,14 +48,23 @@ def load_vehicle(db: Session, tenant_id: int, vehicle_id: str) -> VehicleData | 
         return list(db.scalars(select(model).where(model.vehicle_id == vehicle_id, model.deleted.is_(False))))
 
     maint = rows(models.Maintenance)
-    items: dict[str, list[models.MaintenanceItem]] = {m.id: [] for m in maint}
-    if maint:
-        q = select(models.MaintenanceItem).where(
-            models.MaintenanceItem.maintenance_id.in_(items.keys()), models.MaintenanceItem.deleted.is_(False)
-        ).order_by(models.MaintenanceItem.position)
-        for it in db.scalars(q):
-            items[it.maintenance_id].append(it)
-    return VehicleData(v, rows(models.OdometerReading), rows(models.FuelEntry), maint, items)
+
+    def children(model) -> dict[str, list]:
+        out: dict[str, list] = {m.id: [] for m in maint}
+        if maint:
+            q = select(model).where(
+                model.maintenance_id.in_(list(out.keys())), model.deleted.is_(False)
+            ).order_by(model.position, model.id)
+            for c in db.scalars(q):
+                out[c.maintenance_id].append(c)
+        return out
+
+    return VehicleData(v, rows(models.OdometerReading), rows(models.FuelEntry), maint,
+                       children(models.MaintenanceItem), children(models.MaintenanceMaterial))
+
+
+def material_sum(materials: list[models.MaintenanceMaterial]) -> float:
+    return sum(t for mat in materials if not mat.deleted and (t := mat.total) is not None)
 
 
 def consumption_points(entries: list[models.FuelEntry]) -> list[dict]:
@@ -113,7 +133,7 @@ def vehicle_stats(data: VehicleData) -> dict:
         **summarize(points),
         "total_liters": round(sum(f.liters for f in data.fuel), 2),
         "total_fuel_cost": round(sum(f.price_total for f in data.fuel), 2),
-        "total_maintenance_cost": round(sum(m.cost or 0 for m in data.maintenance), 2),
+        "total_maintenance_cost": round(sum(data.maintenance_cost(m) for m in data.maintenance), 2),
         "points": points,
         "due": due_items(data),
     }
