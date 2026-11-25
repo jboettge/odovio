@@ -214,3 +214,24 @@ Fix: Schätzwerte kennzeichnen („ca.“), Tachostand mindestens bei der letzte
 10. **S8 + S9 + S10** Issuer-Pin-Sackgasse beheben, URL-Cache abschalten, Abhängigkeiten aktualisieren und pinnen (S–M).
 
 Danach: S6/S7 (Rate-Limits, Upstream-Semaphore), E8 (Indizes, Alembic), E12 (iOS-Tests), U4/U5 (Navigation, Kontrast).
+
+
+---
+
+## Umsetzungsstand (25.11.2026)
+
+Alle Befunde umgesetzt (Server: Commit `acc24f3`, iOS: `2c23f28` + `0bb9132`). CI grün: Server SQLite/PostgreSQL (203/206 Tests), ruff, Lock-Datei mit Hashes, Docker-Build, iOS-Build + 63 Unit-Tests.
+
+| Bereich | Befunde | Status |
+|---|---|---|
+| Sicherheit Server | S1, S2 (Server), S3a–g, S4, S5, S6, S7, S9, S10, S14–S17, S20 | ✅ |
+| Sicherheit iOS | S2 (Client), S8, S9, S11, S12, S13, S18, S19 | ✅ |
+| Effizienz/Code | E1–E18 | ✅ (E2: gebündelte Persistenz statt SQLite/GRDB – bei Bedarf später) |
+| UX | U1–U13 | ✅ |
+
+Offen/zu beobachten:
+- Nur auf echtem iPhone prüfbar: Hintergrund-Aufzeichnung, Mitteilungs-Aktionen, Quick Actions/Intents, QR-Live-Scan, Dynamic Type in AX-Grössen.
+- Reverse Proxy: Query-Strings nicht loggen; GET `/api/geo/reverse` im nächsten Release entfernen.
+- Inkrementelle Integritätsprüfung: Manipulation an bereits bestätigten alten Revisionen erkennt die Vollprüfung (`?full=1`, automatisch alle 24 h).
+- CVE-Nummer der Starlette-Range-Schwachstelle nicht gegengeprüft (Verhalten gemessen behoben).
+- Dependabot/Renovate noch nicht eingerichtet.

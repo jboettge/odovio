@@ -92,7 +92,14 @@ Dienste: `db` (PostgreSQL), `migrate` (einmalig je Deploy: Schema, Trigger, App-
 
 3. Prüfen: `curl http://<docker-vm>:8085/health` und `/auth/config`
    Der Container muss den Issuer erreichen (Discovery/JWKS).
-4. **HTTPS** über Reverse Proxy (z. B. Caddy auf OPNsense), z. B. `fahrzeugbuch.j-mb.net → <docker-vm>:8085`. iOS verlangt HTTPS ausserhalb des LAN.
+4. **HTTPS** über Reverse Proxy (z. B. Caddy auf OPNsense), z. B. `fahrzeugbuch.j-mb.net → <docker-vm>:8085`. Die App akzeptiert nur HTTPS.
+   - Request-Grössen: `…/blob` bis 8 MiB (Belege), `…/scan` bis ~3 MB, sonst 1 MiB
+   - Access-Logs des Proxys ohne Query-Strings (Datenschutz)
+5. **Backup**: Datenbank **und** Volume `fahrzeugbuch-files` (Belege) gemeinsam sichern; `ANCHOR_SIGNING_KEY` separat aufbewahren.
+
+Alle Variablen mit Kommentaren: `.env.example` (u. a. Rate-Limits `RATE_*`/`INTEL_RATE_*`, `UPSTREAM_*`, `ATTACHMENT_QUOTA_MB`, `ANCHOR_PUBLIC_KEYS` für Schlüsselwechsel, `N8N_WEBHOOK_SECRET` für HMAC-signierte Webhooks, `APP_TIMEZONE`).
+
+**Schema-Migrationen**: Alembic (`server/alembic/`). Der Dienst `migrate` bringt neue und bestehende Datenbanken bei jedem Deploy auf den aktuellen Stand (bestehende ohne Alembic-Version werden automatisch nachgerüstet und gestempelt).
 
 Optionen:
 - **Bestehende PostgreSQL** statt eigener DB: Service `db` entfernen, `DATABASE_URL=postgresql+psycopg://user:pw@host:5432/fahrzeugbuch` setzen.
@@ -119,7 +126,7 @@ Erster Start: nur Server-URL eingeben → *Verbindung testen* (zeigt Issuer/Clie
 Sicherheit: nur HTTPS (Debug: zusätzlich `http://localhost`); Issuer/Client werden nach der ersten Anmeldung gepinnt und die Discovery geprüft (Issuer gleich, Endpoints HTTPS auf dem Issuer-Host). Anmeldung in ephemerer Browser-Sitzung (kein geteiltes SSO-Cookie). Refresh-Token in der Keychain „nur dieses Gerät“. Meldet sich ein anderer Benutzer an, werden lokale Daten des Vorgängers vorher entfernt.
 
 Offline: Daten liegen je Mandant lokal (Application Support, Dateischutz `completeUnlessOpen`). Neue Einträge erhalten sofort eine UUID, ausstehende Änderungen zeigt das Wolken-Symbol (Zahl = Outbox). Abmelden oder Serverwechsel löscht lokale Daten (mit Warnung bei ausstehenden Änderungen). PDF und Verlauf benötigen eine Verbindung.
-Bedienung: Fahrzeug nach rechts wischen oder lange drücken → direkt tanken; Übersicht mit Schnellerfassung (Tanken, km-Stand, Wartung); Plausibilitätswarnungen beim Tanken; Fälligkeiten als Badges und lokale Erinnerungen (14 Tage vorher, am Stichtag). Mandantenwechsel über das Menü oben links (bei mehreren Mandanten); Lesezugriff wird angezeigt und blendet Erfassen aus. Screenshots: `docs/screenshots/`, Review: `docs/REVIEW.md`.
+Bedienung: Fahrzeug nach rechts wischen oder lange drücken → direkt tanken; Übersicht mit Schnellerfassung (Tanken, km-Stand, Wartung); Plausibilitätswarnungen beim Tanken; Fälligkeiten als Badges und lokale Erinnerungen (14 Tage vorher, am Stichtag). Mandantenwechsel über das Menü oben links (bei mehreren Mandanten); Lesezugriff wird angezeigt und blendet Erfassen aus. Screenshots: `docs/screenshots/`, Reviews: `docs/REVIEW.md`, `docs/REVIEW-FABLE.md`.
 
 Login läuft über `ASWebAuthenticationSession` (Safari-Session → SSO mit bestehendem Keycloak-Login). Refresh-Token in der Keychain, Access-Token nur im Speicher; bei 401 einmal Refresh + Wiederholung, bei abgelaufener Sitzung zurück zum Login.
 Andere Bundle-ID → `AuthManager.callbackScheme/redirectURI` und `REDIRECT` im Keycloak-Skript anpassen.
@@ -174,7 +181,8 @@ Voll-zu-voll: Liter aller Tankvorgänge nach einer Volltankung bis inkl. der nä
 
 ```bash
 cd fahrzeugbuch/server
-pip install -r requirements-test.txt
+pip install --require-hashes --no-deps -r requirements.txt && pip install -r requirements-test.txt   # Lock-Datei mit Hashes
+ruff check app tests alembic
 pytest -q                                  # SQLite, JWTs mit lokalem Testschlüssel
 FZB_TEST_DATABASE_URL=postgresql+psycopg://u:p@localhost/db pytest -q   # PostgreSQL (Trigger, Locks)
 OIDC_ISSUER=https://id.j-mb.net/realms/<realm> OIDC_CLIENT_ID=fahrzeugbuch-ios uvicorn app.main:app --reload
