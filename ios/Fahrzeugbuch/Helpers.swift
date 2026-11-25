@@ -23,6 +23,144 @@ enum Fmt {
     static func editQty(_ v: Double) -> String {
         v.formatted(.number.grouping(.never).precision(.fractionLength(0...3)))
     }
+    /// km mit höchstens einer Nachkommastelle (18 km, 18.4 km)
+    static func kmD(_ v: Double) -> String { v.formatted(.number.precision(.fractionLength(0...1))) + " km" }
+    static func pct(_ v: Double) -> String { v.formatted(.number.precision(.fractionLength(0))) + " %" }
+    static func time(_ d: Date) -> String { d.formatted(date: .omitted, time: .shortened) }
+    /// "Di. 24.11."
+    static func weekdayDay(_ d: Date) -> String {
+        d.formatted(.dateTime.weekday(.abbreviated).day().month(.twoDigits))
+    }
+    static func dateTime(_ d: Date) -> String { d.formatted(date: .abbreviated, time: .shortened) }
+}
+
+/// Demo-Modus (nur Debug): Geräte-Funktionen (GPS, Bewegung) nicht starten.
+enum AppMode {
+    static var isDemo: Bool {
+        #if DEBUG
+        return Demo.isActive
+        #else
+        return false
+        #endif
+    }
+}
+
+/// Monatsschlüssel "YYYY-MM" (wie Server) und Anzeige.
+enum TripMonth {
+    static func key(_ date: Date) -> String {
+        let c = Calendar.current.dateComponents([.year, .month], from: date)
+        return String(format: "%04ld-%02ld", c.year ?? 2000, c.month ?? 1)
+    }
+
+    static func date(_ key: String) -> Date? {
+        let parts = key.split(separator: "-").compactMap { Int($0) }
+        guard parts.count == 2 else { return nil }
+        return Calendar.current.date(from: DateComponents(year: parts[0], month: parts[1], day: 1))
+    }
+
+    /// "November 2026"
+    static func label(_ key: String) -> String {
+        guard let d = date(key) else { return key }
+        return d.formatted(.dateTime.month(.wide).year())
+    }
+
+    static func current() -> String { key(Date()) }
+
+    static func previous(_ from: Date = Date()) -> String {
+        key(Calendar.current.date(byAdding: .month, value: -1, to: from) ?? from)
+    }
+
+    /// Aktueller und die `count - 1` vorherigen Monate, neueste zuerst.
+    static func recent(_ count: Int, from: Date = Date()) -> [String] {
+        (0..<max(count, 1)).compactMap { i in
+            Calendar.current.date(byAdding: .month, value: -i, to: from).map { key($0) }
+        }
+    }
+
+    /// Erster und letzter Tag des Monats.
+    static func bounds(_ key: String) -> (first: Date, last: Date)? {
+        guard let first = date(key),
+              let next = Calendar.current.date(byAdding: .month, value: 1, to: first),
+              let last = Calendar.current.date(byAdding: .day, value: -1, to: next) else { return nil }
+        return (first: first, last: last)
+    }
+}
+
+/// Uhrzeit "HH:MM" ↔ Date (heutiges Datum).
+enum TimeOfDay {
+    static func date(_ value: String?, fallback: String = "08:00") -> Date {
+        let text = value ?? fallback
+        let parts = text.split(separator: ":").compactMap { Int($0) }
+        let hour = parts.count > 0 ? parts[0] : 8
+        let minute = parts.count > 1 ? parts[1] : 0
+        return Calendar.current.date(bySettingHour: min(max(hour, 0), 23), minute: min(max(minute, 0), 59),
+                                     second: 0, of: Date()) ?? Date()
+    }
+
+    static func string(_ date: Date) -> String {
+        let c = Calendar.current.dateComponents([.hour, .minute], from: date)
+        return String(format: "%02ld:%02ld", c.hour ?? 0, c.minute ?? 0)
+    }
+}
+
+/// Exportdateien (PDF/CSV) im temporären Verzeichnis.
+enum ExportFile {
+    static func write(_ data: Data, name: String) throws -> URL {
+        let safe = name.replacingOccurrences(of: "/", with: "-").replacingOccurrences(of: " ", with: "_")
+        let url = FileManager.default.temporaryDirectory.appending(path: safe)
+        try data.write(to: url, options: .atomic)
+        return url
+    }
+}
+
+extension APIError {
+    /// Detail-Objekt des Servers (z. B. 409 beim Monatsabschluss: {message, gaps, trips}).
+    var detailObject: [String: Any]? {
+        guard let data = message.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+        if let detail = obj["detail"] as? [String: Any] { return detail }
+        return obj["message"] != nil ? obj : nil
+    }
+
+    /// Lesbare Meldung inkl. Anzahl offener Fahrten bzw. Lücken.
+    var detailText: String {
+        guard let d = detailObject else { return message }
+        var text = d["message"] as? String ?? message
+        if let trips = d["trips"] as? [Any], !trips.isEmpty {
+            text += " (\(trips.count) Fahrt(en))"
+        }
+        if let gaps = d["gaps"] as? [[String: Any]], !gaps.isEmpty {
+            let km = gaps.compactMap { ($0["km"] as? NSNumber)?.intValue }.reduce(0, +)
+            text += " – \(gaps.count) Lücke(n), \(km) km"
+        }
+        return text
+    }
+
+    var detailHasGaps: Bool {
+        guard let gaps = detailObject?["gaps"] as? [Any] else { return false }
+        return !gaps.isEmpty
+    }
+}
+
+/// Inhalt eines Sheets mit eigenem NavigationStack und „Fertig“-Knopf.
+struct ModalNavigation<Content: View>: View {
+    @Environment(\.dismiss) private var dismiss
+    let content: () -> Content
+
+    init(@ViewBuilder content: @escaping () -> Content) {
+        self.content = content
+    }
+
+    var body: some View {
+        NavigationStack {
+            content()
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("Fertig") { dismiss() }
+                    }
+                }
+        }
+    }
 }
 
 /// Wrapper für `.sheet(item:)` – `value == nil` bedeutet "neu anlegen".

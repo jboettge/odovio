@@ -174,6 +174,25 @@ struct VehicleFormView: View {
     @State private var plate = ""
     @State private var fuelType = FuelType.benzin.rawValue
     @State private var initialKm = ""
+    @State private var ownership = "private"
+    @State private var method = "flat"
+    @State private var purchasePrice = ""
+    @State private var fixedCosts = ""
+
+    private var titleText: String { vehicle == nil ? "Neues Fahrzeug" : "Fahrzeug bearbeiten" }
+
+    private var costsValid: Bool {
+        let price = purchasePrice.trimmed.isEmpty || (purchasePrice.asDouble.map { $0 >= 0 } ?? false)
+        let fixed = fixedCosts.trimmed.isEmpty || (fixedCosts.asDouble.map { $0 >= 0 } ?? false)
+        return price && fixed
+    }
+
+    private var taxFooter: String {
+        ownership == "business"
+            ? "Geschäftsfahrzeug: Privatanteil pauschal (0.9 % des Kaufpreises pro Monat) oder effektiv mit "
+                + "Fahrtenbuch. Der Jahresbericht rechnet beides zum Vergleich – Annahmen mit Treuhand prüfen."
+            : "Privatfahrzeug: Geschäftsfahrten ergeben eine Kilometerentschädigung, der Arbeitsweg einen Abzug."
+    }
 
     var body: some View {
         NavigationStack {
@@ -195,9 +214,31 @@ struct VehicleFormView: View {
                 } footer: {
                     Text("Stand bei Beginn der Erfassung.")
                 }
+                Section {
+                    Picker("Halter", selection: $ownership) {
+                        Text("Privat").tag("private")
+                        Text("Geschäftlich").tag("business")
+                    }
+                    if ownership == "business" {
+                        Picker("Privatanteil", selection: $method) {
+                            Text("Pauschal").tag("flat")
+                            Text("Effektiv (Fahrtenbuch)").tag("effective")
+                        }
+                    }
+                    UnitField("Kaufpreis exkl. MWST", text: $purchasePrice, unit: "CHF", placeholder: "optional")
+                    UnitField("Fixkosten pro Jahr", text: $fixedCosts, unit: "CHF", placeholder: "optional")
+                } header: {
+                    Text("Steuer & Kosten")
+                } footer: {
+                    if costsValid {
+                        Text(taxFooter)
+                    } else {
+                        Text("Beträge ungültig.").foregroundStyle(.red)
+                    }
+                }
             }
-            .navigationTitle(vehicle == nil ? "Neues Fahrzeug" : "Fahrzeug bearbeiten")
-            .formToolbar(canSave: store.canWrite && !name.trimmed.isEmpty, save: save)
+            .navigationTitle(titleText)
+            .formToolbar(canSave: store.canWrite && !name.trimmed.isEmpty && costsValid, save: save)
             .onAppear {
                 guard let v = vehicle else { return }
                 name = v.name
@@ -206,6 +247,10 @@ struct VehicleFormView: View {
                 plate = v.plate ?? ""
                 fuelType = v.fuelType
                 initialKm = String(v.initialKm)
+                ownership = v.ownership ?? "private"
+                method = v.privateUseMethod ?? "flat"
+                purchasePrice = v.purchasePrice.map { Fmt.edit($0) } ?? ""
+                fixedCosts = v.annualFixedCosts.map { Fmt.edit($0) } ?? ""
             }
         }
     }
@@ -218,6 +263,13 @@ struct VehicleFormView: View {
         v.plate = plate.nilIfEmpty
         v.fuelType = fuelType
         v.initialKm = initialKm.asInt ?? 0
+        // nil bleibt nil, solange der Standard (privat/pauschal) nicht geändert wird
+        if !(v.ownership == nil && ownership == "private") { v.ownership = ownership }
+        if ownership == "business" {
+            if !(v.privateUseMethod == nil && method == "flat") { v.privateUseMethod = method }
+        }
+        v.purchasePrice = purchasePrice.asDouble
+        v.annualFixedCosts = fixedCosts.asDouble
         store.save(v)
     }
 }

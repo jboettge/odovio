@@ -6,9 +6,10 @@ struct VehicleDetailView: View {
 
     enum Pane: String, CaseIterable, Identifiable {
         case overview = "Übersicht"
+        case trips = "Fahrten"
         case fuel = "Tanken"
         case maintenance = "Wartung"
-        case odometer = "km-Stand"
+        case odometer = "km"
         var id: Self { self }
     }
 
@@ -31,6 +32,7 @@ struct VehicleDetailView: View {
 
             switch pane {
             case .overview: OverviewView(vehicle: vehicle)
+            case .trips: TripsListView(vehicle: vehicle)
             case .fuel: FuelListView(vehicle: vehicle)
             case .maintenance: MaintenanceListView(vehicle: vehicle)
             case .odometer: OdometerListView(vehicle: vehicle)
@@ -47,5 +49,6 @@ struct VehicleDetailView: View {
         .sheet(isPresented: $showReport) {
             ReportView(vehicle: vehicle)
         }
+        .onAppear { store.defaultVehicleId = vehicle.id }   // zuletzt gewählt → Start/Automatik
     }
 }

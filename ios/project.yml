@@ -29,3 +29,22 @@ targets:
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
         NSAppTransportSecurity:
           NSAllowsLocalNetworking: true
+        # Intelligentes Fahrtenbuch (ios/Fahrzeugbuch/Trips)
+        NSLocationWhenInUseUsageDescription: >-
+          Das Fahrtenbuch nutzt deinen Standort nur während einer Fahrt, um Distanz sowie Start- und Zielort
+          zu erfassen. Die GPS-Rohdaten bleiben auf diesem iPhone und werden 30 Tage nach Bestätigung der
+          Fahrt gelöscht. Im Privatmodus wird kein Track gespeichert.
+        NSLocationAlwaysAndWhenInUseUsageDescription: >-
+          Mit „Immer“ erkennt das Fahrtenbuch Fahrten automatisch und zeichnet sie auch bei gesperrtem iPhone
+          auf. Ausserhalb von Fahrten wird nur grob erkannt, ob du losfährst (bekannte Orte, wesentliche
+          Standortänderungen) – kein Bewegungsprofil. Die Rohdaten bleiben auf dem Gerät; dein
+          Fahrzeugbuch-Server erhält Start/Ziel als Adresse, die Distanz und zur Strassendistanz-Berechnung
+          den reduzierten Track (dort nicht gespeichert).
+        NSMotionUsageDescription: >-
+          Bewegungsdaten („im Auto“, „stillstehend“, „gehend“) werden nur auf dem iPhone ausgewertet, um
+          Beginn und Ende einer Fahrt automatisch zu erkennen. Sie verlassen das Gerät nicht.
+        NSCalendarsFullAccessUsageDescription: >-
+          Termine werden nur auf dem iPhone gelesen, um zu einer Fahrt den passenden Termin als Zweck
+          vorzuschlagen. Kalenderinhalte werden nicht übertragen – übernommen wird höchstens der Termintitel
+          als Zweckvorschlag der jeweiligen Fahrt. Der Kalender wird nie verändert.
+        UIBackgroundModes: [location]

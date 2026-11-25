@@ -21,6 +21,14 @@ final class TenantStore {
     private(set) var materials: [String: MaintenanceMaterial] = [:]
     /// Materialstamm (mandantenweit)
     private(set) var articles: [String: MaterialArticle] = [:]
+    /// Fahrtenbuch
+    private(set) var trips: [String: Trip] = [:]
+    private(set) var places: [String: Place] = [:]
+    private(set) var customers: [String: Customer] = [:]
+    private(set) var rules: [String: PurposeRule] = [:]
+    private(set) var taxParams: [String: TaxParam] = [:]
+    /// Monatsabschlüsse (nur vom Server, nie in der Outbox)
+    private(set) var periods: [String: TripPeriod] = [:]
     private(set) var outbox: [PendingOp] = []
     private(set) var cursor = 0
     private(set) var lastSync: Date?
@@ -140,6 +148,196 @@ final class TenantStore {
     }
     func vehicle(id: String) -> Vehicle? { vehicles[id] }
 
+    // MARK: Fahrtenbuch – Lesen
+
+    /// Chronologisch (Start aufsteigend, bei Gleichstand id).
+    static func chronological(_ a: Trip, _ b: Trip) -> Bool {
+        let da = a.startDate ?? Date.distantPast
+        let db = b.startDate ?? Date.distantPast
+        if da != db { return da < db }
+        return a.id < b.id
+    }
+
+    /// Nicht stornierte Fahrten des Fahrzeugs, neueste zuerst.
+    func trips(for vehicleId: String) -> [Trip] {
+        trips.values.filter { $0.vehicleId == vehicleId && !$0.deleted }
+            .sorted { Self.chronological($1, $0) }
+    }
+
+    /// Nicht stornierte Fahrten eines Monats ("YYYY-MM"), chronologisch.
+    func trips(for vehicleId: String, month: String) -> [Trip] {
+        trips.values.filter { $0.vehicleId == vehicleId && !$0.deleted && $0.monthKey == month }
+            .sorted(by: Self.chronological)
+    }
+
+    /// Zu bestätigende Fahrten (Entwurf/vorgeschlagen/ohne Kategorie, nicht gesperrt), älteste zuerst.
+    func reviewTrips(for vehicleId: String) -> [Trip] {
+        trips.values.filter { $0.vehicleId == vehicleId && !$0.deleted && $0.needsReview }
+            .sorted(by: Self.chronological)
+    }
+
+    func trip(id: String) -> Trip? { trips[id] }
+
+    /// Höchster bekannter km-Stand: Tank/Odometer/Wartung sowie km-Ende der Fahrten.
+    func lastKnownKm(for vehicleId: String) -> Int {
+        let base = vehicles[vehicleId].map { currentKm($0) } ?? 0
+        let tripMax = trips.values
+            .filter { $0.vehicleId == vehicleId && !$0.deleted }
+            .compactMap { $0.kmEnd ?? $0.kmStart }
+            .max() ?? 0
+        return max(base, tripMax)
+    }
+
+    /// Lokale Lückenerkennung über die km-Kette (km-Ende Fahrt n ≠ km-Beginn Fahrt n+1).
+    /// `month` filtert auf Lücken vor Fahrten dieses Monats (Kette inkl. letzter Fahrt des Vormonats).
+    func gaps(for vehicleId: String, month: String?) -> [TripGap] {
+        let chain = trips.values.filter { $0.vehicleId == vehicleId && !$0.deleted }
+            .sorted(by: Self.chronological)
+        var result: [TripGap] = []
+        for (a, b) in zip(chain, chain.dropFirst()) {
+            guard let from = a.kmEnd, let to = b.kmStart, from != to else { continue }
+            if let month, b.monthKey != month { continue }
+            result.append(TripGap(afterTripId: a.id, beforeTripId: b.id, kmFrom: from, kmTo: to))
+        }
+        return result
+    }
+
+    /// Nicht stornierte Orte, nach Art (Wohnort, Arbeit, Kunde, andere) und Name.
+    var placeList: [Place] {
+        let order = Dictionary(uniqueKeysWithValues: PlaceKind.allCases.enumerated().map { ($0.element.rawValue, $0.offset) })
+        return places.values.filter { !$0.deleted }.sorted { a, b in
+            let ka = order[a.kind] ?? 99
+            let kb = order[b.kind] ?? 99
+            if ka != kb { return ka < kb }
+            let n = a.name.localizedStandardCompare(b.name)
+            if n != .orderedSame { return n == .orderedAscending }
+            return a.id < b.id
+        }
+    }
+
+    func place(id: String) -> Place? { places[id] }
+
+    var customerList: [Customer] {
+        customers.values.filter { !$0.deleted }.sorted { a, b in
+            let n = a.name.localizedStandardCompare(b.name)
+            if n != .orderedSame { return n == .orderedAscending }
+            return a.id < b.id
+        }
+    }
+
+    func customer(id: String) -> Customer? { customers[id] }
+
+    /// Alle nicht stornierten Regeln (auch inaktive), nach Priorität.
+    var allRules: [PurposeRule] {
+        rules.values.filter { !$0.deleted }.sorted { ($0.priority, $0.id) < ($1.priority, $1.id) }
+    }
+
+    /// Aktive, nicht stornierte Regeln nach Priorität (kleiner = zuerst).
+    var ruleList: [PurposeRule] { allRules.filter(\.active) }
+
+    var taxParamList: [TaxParam] {
+        taxParams.values.filter { !$0.deleted }.sorted { a, b in
+            if a.year != b.year { return a.year > b.year }
+            if a.scope != b.scope { return a.scope < b.scope }
+            let ia = TaxParam.keys.firstIndex(of: a.key) ?? 99
+            let ib = TaxParam.keys.firstIndex(of: b.key) ?? 99
+            if ia != ib { return ia < ib }
+            return a.id < b.id
+        }
+    }
+
+    /// Monatsabschlüsse des Fahrzeugs, neueste zuerst.
+    func periods(for vehicleId: String) -> [TripPeriod] {
+        periods.values.filter { $0.vehicleId == vehicleId && !$0.deleted }
+            .sorted { ($0.month, $0.id) > ($1.month, $1.id) }
+    }
+
+    func period(vehicleId: String, month: String) -> TripPeriod? {
+        periods.values.first { $0.vehicleId == vehicleId && $0.month == month && $0.isClosed }
+    }
+
+    func isMonthClosed(vehicleId: String, month: String) -> Bool {
+        period(vehicleId: vehicleId, month: month) != nil
+    }
+
+    /// Zuletzt gewähltes Fahrzeug je Mandant (für Start/Automatik); sonst erstes Fahrzeug.
+    var defaultVehicleId: String? {
+        get {
+            if let id = UserDefaults.standard.string(forKey: defaultVehicleKey),
+               let v = vehicles[id], !v.deleted {
+                return id
+            }
+            return vehicleList.first?.id
+        }
+        set {
+            UserDefaults.standard.set(newValue, forKey: defaultVehicleKey)
+        }
+    }
+
+    private var defaultVehicleKey: String { "defaultVehicle-\(tenant.slug)" }
+
+    /// Anzeigename eines Orts: benannter Ort, sonst gespeicherte Bezeichnung.
+    func placeName(id: String?, label: String?) -> String? {
+        if let id, let p = places[id] { return p.name }
+        return label?.nilIfEmpty
+    }
+
+    func startText(_ t: Trip) -> String {
+        if t.privateMode { return "Privat" }
+        return placeName(id: t.startPlaceId, label: t.startLabel) ?? "Start unbekannt"
+    }
+
+    func endText(_ t: Trip) -> String {
+        if t.privateMode { return "Privat" }
+        return placeName(id: t.endPlaceId, label: t.endLabel) ?? "Ziel unbekannt"
+    }
+
+    /// "Wohnort → Büro" bzw. "Privatfahrt" im Privatmodus.
+    func routeText(_ t: Trip) -> String {
+        if t.privateMode { return "Privatfahrt" }
+        let a = placeName(id: t.startPlaceId, label: t.startLabel) ?? "?"
+        let b = placeName(id: t.endPlaceId, label: t.endLabel) ?? "?"
+        return "\(a) → \(b)"
+    }
+
+    /// Bedingungen einer Regel als Text: "Wohnort → Büro · Mo–Fr · 06:00–09:30".
+    func ruleConditionText(_ r: PurposeRule) -> String {
+        var parts: [String] = []
+        let from = r.fromPlaceId.map { placeName(id: $0, label: nil) ?? "Unbekannter Ort" } ?? "überall"
+        let to = r.toPlaceId.map { placeName(id: $0, label: nil) ?? "Unbekannter Ort" } ?? "überall"
+        if r.fromPlaceId != nil || r.toPlaceId != nil { parts.append("\(from) → \(to)") }
+        parts.append(PurposeRule.weekdayText(r.weekdaySet))
+        if r.timeFrom != nil || r.timeTo != nil {
+            parts.append("\(r.timeFrom ?? "00:00")–\(r.timeTo ?? "23:59")")
+        }
+        if let vid = r.vehicleId { parts.append(vehicles[vid]?.name ?? "Unbekanntes Fahrzeug") }
+        return parts.joined(separator: " · ")
+    }
+
+    /// Ergebnis einer Regel als Text: "Geschäftlich · Kundentermin · Meier AG".
+    func ruleResultText(_ r: PurposeRule) -> String {
+        var parts = [TripCategory.of(r.resultCategory).label]
+        if let p = r.resultPurpose?.nilIfEmpty { parts.append(p) }
+        if let c = r.resultCustomerId { parts.append(customers[c]?.name ?? "Unbekannter Kunde") }
+        return parts.joined(separator: " · ")
+    }
+
+    /// Gleiche Bedingungen + Ergebniskategorie (zur Vermeidung doppelter Regelvorschläge).
+    static func ruleSignature(_ r: PurposeRule) -> String {
+        [r.fromPlaceId ?? "-", r.toPlaceId ?? "-", PurposeRule.weekdayString(r.weekdaySet) ?? "-",
+         r.timeFrom ?? "-", r.timeTo ?? "-", r.vehicleId ?? "-", r.resultCategory].joined(separator: "|")
+    }
+
+    func hasSimilarRule(_ r: PurposeRule) -> Bool {
+        let sig = Self.ruleSignature(r)
+        return allRules.contains { $0.id == r.id || Self.ruleSignature($0) == sig }
+    }
+
+    /// Anzahl nicht stornierter Fahrten je Kunde (für Listen).
+    func tripCount(customerId: String) -> Int {
+        trips.values.filter { !$0.deleted && $0.customerId == customerId }.count
+    }
+
     func stats(for v: Vehicle) -> VehicleStats {
         let list = maintenance(for: v.id)
         let ids = Set(list.map(\.id))
@@ -177,6 +375,53 @@ final class TenantStore {
     func delete(_ m: Maintenance) { remove(m, in: \.maintenance) }
     func save(_ a: MaterialArticle) { upsert(a, in: \.articles) }
     func delete(_ a: MaterialArticle) { remove(a, in: \.articles) }
+    func save(_ p: Place) { upsert(p, in: \.places) }
+    func delete(_ p: Place) { remove(p, in: \.places) }
+    func save(_ c: Customer) { upsert(c, in: \.customers) }
+    func delete(_ c: Customer) { remove(c, in: \.customers) }
+    func save(_ r: PurposeRule) { upsert(r, in: \.rules) }
+    func delete(_ r: PurposeRule) { remove(r, in: \.rules) }
+    func save(_ p: TaxParam) { upsert(p, in: \.taxParams) }
+    func delete(_ p: TaxParam) { remove(p, in: \.taxParams) }
+
+    /// Fahrt speichern. Gesperrte Fahrten (abgeschlossener Monat) sind unveränderlich – nur Storno.
+    func save(_ t: Trip) {
+        if let existing = trips[t.id], existing.isLocked {
+            notices.append("Die Fahrt gehört zu einem abgeschlossenen Monat und kann nicht geändert werden. "
+                           + "Stornieren und mit Korrekturbegründung neu erfassen.")
+            return
+        }
+        var e = t
+        if e.status == "locked" { e.status = "confirmed" }   // „locked“ setzt nur der Server
+        upsert(e, in: \.trips)
+    }
+
+    /// Storno ist auch bei gesperrten Fahrten erlaubt (wird protokolliert).
+    func delete(_ t: Trip) { remove(t, in: \.trips) }
+
+    /// Fahrt bestätigen (Kategorie setzen). `purpose`/`customerId` = nil → unverändert.
+    func confirm(_ trip: Trip, as category: TripCategory, purpose: String? = nil, customerId: String? = nil) {
+        var t = trips[trip.id] ?? trip
+        guard !t.isLocked, category != .unknown else { return }
+        t.category = category.rawValue
+        t.status = "confirmed"
+        if let purpose { t.purpose = purpose.nilIfEmpty }
+        if category == .personal {
+            t.customerId = nil
+        } else if let customerId {
+            t.customerId = customerId
+        }
+        save(t)
+    }
+
+    /// Monatsabschluss aus der Server-Antwort übernehmen (POST …/close).
+    func storePeriod(_ p: TripPeriod) {
+        for (key, old) in periods where old.vehicleId == p.vehicleId && old.month == p.month && key != p.id {
+            periods.removeValue(forKey: key)
+        }
+        periods[p.id] = p
+        persist()
+    }
 
     /// Wartung inkl. Checkliste und Material speichern; entfernte Punkte/Positionen werden storniert,
     /// unveränderte nicht erneut gesendet.
@@ -313,6 +558,7 @@ final class TenantStore {
 
     private func pull(full: Bool) async throws {
         let since = full ? 0 : cursor
+        let previousPlaces = places   // Wohnort-Koordinaten bleiben lokal
         let ch: ChangesResponse = try await apiProvider().get(
             "api/t/\(tenant.slug)/changes", query: [URLQueryItem(name: "since", value: String(since))])
         if full {
@@ -323,6 +569,12 @@ final class TenantStore {
             items = items.filter { isPending($0.key) }
             materials = materials.filter { isPending($0.key) }
             articles = articles.filter { isPending($0.key) }
+            trips = trips.filter { isPending($0.key) }
+            places = places.filter { isPending($0.key) }
+            customers = customers.filter { isPending($0.key) }
+            rules = rules.filter { isPending($0.key) }
+            taxParams = taxParams.filter { isPending($0.key) }
+            if ch.tripPeriods != nil { periods = [:] }
         }
         merge(ch.vehicles, into: \.vehicles)
         merge(ch.odometer, into: \.odometer)
@@ -331,6 +583,17 @@ final class TenantStore {
         merge(ch.maintenanceItems, into: \.items)
         merge(ch.maintenanceMaterials, into: \.materials)
         merge(ch.materialArticles ?? [], into: \.articles)
+        merge(ch.customers ?? [], into: \.customers)
+        mergePlaces(ch.places ?? [], previous: previousPlaces)
+        merge(ch.trips ?? [], into: \.trips)
+        merge(ch.purposeRules ?? [], into: \.rules)
+        merge(ch.taxParams ?? [], into: \.taxParams)
+        for p in ch.tripPeriods ?? [] {
+            for (key, old) in periods where old.vehicleId == p.vehicleId && old.month == p.month && key != p.id {
+                periods.removeValue(forKey: key)
+            }
+            periods[p.id] = p
+        }
         cursor = ch.cursor
     }
 
@@ -339,6 +602,20 @@ final class TenantStore {
         var dict = self[keyPath: kp]
         for e in list where !isPending(e.id) { dict[e.id] = e }
         self[keyPath: kp] = dict
+    }
+
+    /// Orte übernehmen; ohne Koordinaten vom Server (Wohnort: App sendet sie nie) → lokale behalten.
+    private func mergePlaces(_ list: [Place], previous: [String: Place]) {
+        guard !list.isEmpty else { return }
+        var dict = places
+        for var p in list where !isPending(p.id) {
+            if p.lat == nil, p.lon == nil, let old = previous[p.id], old.hasCoordinate {
+                p.lat = old.lat
+                p.lon = old.lon
+            }
+            dict[p.id] = p
+        }
+        places = dict
     }
 
     private func setVersion(_ entity: String, _ id: String, _ v: Int) {
@@ -351,6 +628,11 @@ final class TenantStore {
         case MaintenanceItem.entityName: items[id]?.version = v
         case MaintenanceMaterial.entityName: materials[id]?.version = v
         case MaterialArticle.entityName: articles[id]?.version = v
+        case Trip.entityName: trips[id]?.version = v
+        case Place.entityName: places[id]?.version = v
+        case Customer.entityName: customers[id]?.version = v
+        case PurposeRule.entityName: rules[id]?.version = v
+        case TaxParam.entityName: taxParams[id]?.version = v
         default: break
         }
     }
@@ -370,6 +652,16 @@ final class TenantStore {
                                          baseVersion: nil, data: nil, clientTs: "") }
         lastSync = Date().addingTimeInterval(-600)
     }
+
+    func demoSeedTrips(trips t: [Trip], places p: [Place], customers c: [Customer], rules r: [PurposeRule],
+                       taxParams tp: [TaxParam], periods pe: [TripPeriod]) {
+        trips = Dictionary(uniqueKeysWithValues: t.map { ($0.id, $0) })
+        places = Dictionary(uniqueKeysWithValues: p.map { ($0.id, $0) })
+        customers = Dictionary(uniqueKeysWithValues: c.map { ($0.id, $0) })
+        rules = Dictionary(uniqueKeysWithValues: r.map { ($0.id, $0) })
+        taxParams = Dictionary(uniqueKeysWithValues: tp.map { ($0.id, $0) })
+        periods = Dictionary(uniqueKeysWithValues: pe.map { ($0.id, $0) })
+    }
     #endif
 
     // MARK: Persistenz
@@ -384,6 +676,13 @@ final class TenantStore {
         var materials: [String: MaintenanceMaterial]?
         /// Optional, damit Dateien älterer App-Versionen (ohne Materialstamm) weiter laden
         var articles: [String: MaterialArticle]?
+        /// Fahrtenbuch – optional, damit Dateien älterer App-Versionen weiter laden
+        var trips: [String: Trip]?
+        var places: [String: Place]?
+        var customers: [String: Customer]?
+        var rules: [String: PurposeRule]?
+        var taxParams: [String: TaxParam]?
+        var periods: [String: TripPeriod]?
         var outbox: [PendingOp]
         var cursor: Int
         var lastSync: Date?
@@ -403,7 +702,10 @@ final class TenantStore {
 
     private func persist() {
         let snap = Snapshot(vehicles: vehicles, odometer: odometer, fuel: fuel, maintenance: maintenance,
-                            items: items, materials: materials, articles: articles, outbox: outbox, cursor: cursor, lastSync: lastSync)
+                            items: items, materials: materials, articles: articles,
+                            trips: trips, places: places, customers: customers, rules: rules,
+                            taxParams: taxParams, periods: periods,
+                            outbox: outbox, cursor: cursor, lastSync: lastSync)
         do {
             let data = try Self.fileEncoder.encode(snap)
             try data.write(to: fileURL, options: [.atomic, .completeFileProtectionUnlessOpen])
@@ -422,10 +724,16 @@ final class TenantStore {
         items = snap.items
         materials = snap.materials ?? [:]
         articles = snap.articles ?? [:]
+        trips = snap.trips ?? [:]
+        places = snap.places ?? [:]
+        customers = snap.customers ?? [:]
+        rules = snap.rules ?? [:]
+        taxParams = snap.taxParams ?? [:]
+        periods = snap.periods ?? [:]
         outbox = snap.outbox
-        // Datei ohne Material bzw. Materialstamm (ältere App-Version): ab 0 holen,
-        // damit bereits erfasste Positionen/Artikel ankommen
-        cursor = (snap.materials == nil || snap.articles == nil) ? 0 : snap.cursor
+        // Datei ohne Material, Materialstamm bzw. Fahrtenbuch (ältere App-Version): ab 0 holen,
+        // damit bereits erfasste Positionen/Artikel/Fahrten ankommen
+        cursor = (snap.materials == nil || snap.articles == nil || snap.trips == nil) ? 0 : snap.cursor
         lastSync = snap.lastSync
     }
 
@@ -470,6 +778,12 @@ final class TenantStore {
         case MaintenanceItem.entityName: "Checkpunkt"
         case MaintenanceMaterial.entityName: "Material"
         case MaterialArticle.entityName: "Materialstamm"
+        case Trip.entityName: "Fahrt"
+        case Place.entityName: "Ort"
+        case Customer.entityName: "Kunde"
+        case PurposeRule.entityName: "Zweckregel"
+        case TaxParam.entityName: "Steuerparameter"
+        case "trip_period": "Monatsabschluss"
         default: entity
         }
     }

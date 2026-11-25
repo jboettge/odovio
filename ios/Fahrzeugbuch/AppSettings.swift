@@ -120,6 +120,7 @@ final class AppSettings {
     }
 
     func resetLocalData() {
+        TripCoordinator.shared.resetLocalData()   // laufende Aufzeichnung verwerfen, Tracks löschen
         store = nil
         tenants = []
         tenantsLoaded = false

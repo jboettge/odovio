@@ -3,13 +3,24 @@ import SwiftUI
 @main
 @MainActor
 struct FahrzeugbuchApp: App {
-    @State private var settings = AppSettings()
+    @State private var settings: AppSettings
     @Environment(\.scenePhase) private var scenePhase
+
+    init() {
+        let initial = AppSettings()
+        _settings = State(initialValue: initial)
+        // Früh konfigurieren: Start im Hintergrund durch Standort-Ereignisse/Kurzbefehl (Demo: nur Anzeige)
+        TripCoordinator.shared.configure(settings: initial)
+    }
 
     var body: some Scene {
         WindowGroup {
             RootView()
                 .environment(settings)
+                .environment(TripCoordinator.shared)
+                .onChange(of: settings.store?.tenant.slug) { _, _ in
+                    TripCoordinator.shared.configure(settings: settings)   // Mandantenwechsel
+                }
                 .alert("Hinweis", isPresented: Binding(
                     get: { settings.loginNotice != nil },
                     set: { if !$0 { settings.loginNotice = nil } })) {

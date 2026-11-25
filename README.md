@@ -14,6 +14,22 @@ Digitales Fahrzeugbuch: iOS-App (SwiftUI) + REST-Server (FastAPI/PostgreSQL, Doc
 - **Mandanten**: über Keycloak-Gruppen, Rollen Schreiben/Lesen, strikt getrennte Daten und Revisionsketten
 - **PDF-Export** je Fahrzeug und Zeitraum: Übersicht, Tankvorgänge, Wartungen inkl. Checkliste, km-Stände, Änderungsprotokoll, Kettenkopf-Hash
 
+## Fahrtenbuch
+
+Konzept und Entscheidungen: [docs/KONZEPT-FAHRTENBUCH.md](docs/KONZEPT-FAHRTENBUCH.md) (Empfehlungen Kap. 9 umgesetzt).
+
+- **Erfassung**: Start/Stopp-Knopf, Siri/Kurzbefehle („Fahrt starten/beenden“, Automation „CarPlay verbunden“), optional Automatik (Bewegung + Standort); manuell und Lücken als Fahrt
+- **Tacho massgebend**: km-Kette je Fahrzeug, GPS/OSRM nur Kontrolle; Lückenerkennung + Abgleich mit km-Ständen/Tankungen
+- **Vorschläge** (immer bestätigen): Regeln → Kalender → Muster → lokales LLM (vLLM, nie Privatfahrten, nie Koordinaten); Orte und Regeln werden gelernt
+- **Review**: Karte für Karte, „alle Arbeitswege bestätigen“
+- **Monatsabschluss**: sperrt Fahrten, signierter Anker, Fahrtenbuch-PDF, optional n8n-Webhook → Paperless; danach nur Storno/Korrektur mit Begründung
+- **Berichte**: Fahrtenbuch-PDF, CSV, Jahresbericht (Privatanteil pauschal 0.9 %/Monat vs. effektiv, Kilometerentschädigung, Arbeitsweg-Abzug Bund/Kanton) – Parameter je Jahr/Kanton/Mandant, als Annahmen markiert
+- **Datenschutz**: Privatmodus (nur km/Zeit, Gemeinde optional), GPS-Tracks nur auf dem iPhone (30 Tage nach Bestätigung gelöscht, nur Hash im Journal), Wohnort-Koordinaten nie auf dem Server
+
+Server-Umgebung zusätzlich: `OSRM_URL`, `PHOTON_URL` (optionaler Dienst `photon`, Profil `geo`), `VLLM_URL`, `VLLM_MODEL`, `N8N_WEBHOOK_URL`, `TAX_CANTON` (z. B. `ZH`). Ohne diese Dienste funktioniert alles ausser Distanz-/Adress-Kontrolle und LLM-Vorschlag.
+
+Auf echtem Gerät zu testen: Hintergrund-Aufzeichnung, Automatik, Wecken nach Beenden, Kurzbefehle, Akku.
+
 ## Struktur
 
 | Pfad | Inhalt |

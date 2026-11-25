@@ -2,6 +2,7 @@ import SwiftUI
 
 struct SettingsView: View {
     @Environment(AppSettings.self) private var settings
+    @Environment(TripCoordinator.self) private var coordinator
     @Environment(\.dismiss) private var dismiss
     @State private var url = ""
     @State private var status: String?
@@ -51,11 +52,37 @@ struct SettingsView: View {
                         } label: {
                             Label("Materialstamm (\(store.articles(for: nil).count))", systemImage: "shippingbox")
                         }
+                        NavigationLink {
+                            PlacesView()
+                                .environment(store)
+                        } label: {
+                            Label("Orte (\(store.placeList.count))", systemImage: "mappin.and.ellipse")
+                        }
+                        NavigationLink {
+                            CustomersView()
+                                .environment(store)
+                        } label: {
+                            Label("Kunden (\(store.customerList.count))", systemImage: "person.2")
+                        }
+                        NavigationLink {
+                            RulesView()
+                                .environment(store)
+                        } label: {
+                            Label("Zweckregeln (\(store.allRules.count))", systemImage: "wand.and.stars")
+                        }
+                        NavigationLink {
+                            TaxParamsView()
+                                .environment(store)
+                        } label: {
+                            Label("Steuerparameter (\(store.taxParamList.count))", systemImage: "percent")
+                        }
                     } header: {
                         Text("Stammdaten")
                     } footer: {
                         Text(catalogFooter(store))
                     }
+
+                    tripSection
 
                     Section {
                         LabeledContent("Mandant", value: store.tenant.slug)
@@ -104,7 +131,7 @@ struct SettingsView: View {
         .confirmationDialog("Abmelden?", isPresented: $confirmLogout, titleVisibility: .visible) {
             Button("Abmelden und lokale Daten löschen", role: .destructive) {
                 Task {
-                    await settings.logout()
+                    await settings.logout()   // inkl. Tracks löschen (AppSettings.resetLocalData)
                     dismiss()
                 }
             }
@@ -116,8 +143,38 @@ struct SettingsView: View {
 
     private func catalogFooter(_ store: TenantStore) -> String {
         store.canWrite
-            ? "Artikel für die Materialerfassung bei Wartungen."
+            ? "Artikel für die Materialerfassung bei Wartungen; Orte, Kunden, Regeln und Steuerparameter "
+                + "für das Fahrtenbuch."
             : "Nur ansehen – dein Zugang für diesen Mandanten ist schreibgeschützt."
+    }
+
+    /// Fahrtenbuch: Automatik, Berechtigungen, Datenschutz.
+    private var tripSection: some View {
+        Section {
+            Toggle(isOn: Binding(
+                get: { coordinator.autoDetectEnabled },
+                set: { value in if !AppMode.isDemo { coordinator.autoDetectEnabled = value } })) {
+                Label("Fahrten automatisch erkennen", systemImage: "car.side.arrowtriangle.up.arrowtriangle.down")
+            }
+            .disabled(AppMode.isDemo)
+            Button {
+                Task { await coordinator.requestPermissions() }
+            } label: {
+                Label("Berechtigungen anfragen", systemImage: "location.circle")
+            }
+            .disabled(AppMode.isDemo)
+            if let err = coordinator.lastError {
+                Text(err).font(.caption).foregroundStyle(.orange)
+            }
+        } header: {
+            Text("Fahrtenbuch")
+        } footer: {
+            Text("Datenschutz: GPS wird nur während einer Fahrt aufgezeichnet. Die Rohdaten (Tracks) bleiben "
+                 + "verschlüsselt auf diesem Gerät und werden 30 Tage nach der Bestätigung gelöscht; ins "
+                 + "Änderungsprotokoll gelangt nur eine Prüfsumme. Im Privatmodus werden nur Zeit und Kilometer "
+                 + "gespeichert – keine Orte, kein Track. Automatik benötigt Standort «Immer» und "
+                 + "«Bewegung & Fitness»; Vorschläge werden nie ohne deine Bestätigung übernommen.")
+        }
     }
 
     private var pendingWarning: String {

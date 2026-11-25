@@ -1,4 +1,5 @@
 import Foundation
+import SwiftUI
 
 enum FuelType: String, CaseIterable, Identifiable {
     case benzin, diesel, hybrid, lpg
@@ -20,14 +21,21 @@ protocol SyncEntity: Codable, Identifiable, Hashable where ID == String {
     var id: String { get }
     var version: Int { get set }
     var deleted: Bool { get set }
+    /// Nutzdaten für `/sync` (Standard: alle Felder ausser id/version/deleted; `Place` überschreibt)
+    func payload() throws -> Data
 }
 
 extension SyncEntity {
     /// Nutzdaten für den Server (snake_case, ohne id/version/deleted).
     func payload() throws -> Data {
+        try payload(omitting: [])
+    }
+
+    /// Wie `payload()`, lässt zusätzlich die genannten (snake_case-)Felder weg.
+    func payload(omitting extra: [String]) throws -> Data {
         let data = try APIClient.encoder.encode(self)
         var dict = try JSONSerialization.jsonObject(with: data) as? [String: Any] ?? [:]
-        for key in ["id", "version", "deleted"] { dict.removeValue(forKey: key) }
+        for key in ["id", "version", "deleted"] + extra { dict.removeValue(forKey: key) }
         return try JSONSerialization.data(withJSONObject: dict)
     }
 }
@@ -43,6 +51,16 @@ struct Vehicle: SyncEntity {
     var plate: String?
     var fuelType: String = FuelType.benzin.rawValue
     var initialKm: Int = 0
+    /// Kaufpreis exkl. MWST (Basis Privatanteil pauschal)
+    var purchasePrice: Double?
+    /// "private" | "business"; `nil` = privat
+    var ownership: String?
+    /// "flat" | "effective"; `nil` = pauschal
+    var privateUseMethod: String?
+    /// Fixkosten pro Jahr (Versicherung, Steuer, Abschreibung, Leasing …)
+    var annualFixedCosts: Double?
+
+    var isBusiness: Bool { ownership == "business" }
 
     var subtitle: String {
         [[make, model].compactMap { $0 }.joined(separator: " "), plate ?? ""]
@@ -263,6 +281,13 @@ struct ChangesResponse: Decodable {
     var maintenanceMaterials: [MaintenanceMaterial]
     /// Optional, damit ältere Server ohne Materialstamm weiter funktionieren
     var materialArticles: [MaterialArticle]?
+    /// Fahrtenbuch – optional, damit ältere Server ohne Fahrtenbuch weiter funktionieren
+    var trips: [Trip]?
+    var places: [Place]?
+    var customers: [Customer]?
+    var purposeRules: [PurposeRule]?
+    var taxParams: [TaxParam]?
+    var tripPeriods: [TripPeriod]?
 }
 
 struct OpResult: Decodable {
@@ -352,4 +377,717 @@ struct PendingOp: Codable, Identifiable {
     var data: Data?
     var clientTs: String
     var id: String { opId }
+}
+
+// MARK: - Fahrtenbuch
+
+/// Kategorie einer Fahrt. Rohwerte wie Server (`private` ist in Swift ein Schlüsselwort → `personal`).
+enum TripCategory: String, CaseIterable, Identifiable {
+    case business, personal = "private", commute, field, unknown
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .business: "Geschäftlich"
+        case .personal: "Privat"
+        case .commute: "Arbeitsweg"
+        case .field: "Aussendienst"
+        case .unknown: "Unbekannt"
+        }
+    }
+
+    var color: Color {
+        switch self {
+        case .business: .orange
+        case .personal: .gray
+        case .commute: .blue
+        case .field: .purple
+        case .unknown: .yellow
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .business: "briefcase.fill"
+        case .personal: "person.fill"
+        case .commute: "building.2.fill"
+        case .field: "map.fill"
+        case .unknown: "questionmark.circle.fill"
+        }
+    }
+
+    /// Wählbare Kategorien (ohne „Unbekannt“)
+    static let selectable: [TripCategory] = [.business, .personal, .commute, .field]
+
+    static func of(_ raw: String?) -> TripCategory {
+        guard let raw, let c = TripCategory(rawValue: raw) else { return .unknown }
+        return c
+    }
+}
+
+/// Fahrt (Fahrtenbuch). Zeitpunkte als ISO-8601 mit Offset (wie Server), km-Stand massgebend.
+struct Trip: SyncEntity {
+    static let entityName = "trip"
+    /// Grenzen wie Server (schemas.TripData)
+    static let maxPurpose = 300
+    static let maxLabel = 200
+
+    var id = UUID().uuidString.lowercased()
+    var version = 0
+    var deleted = false
+    var vehicleId: String
+    var driverSub: String?
+    var driverName: String?
+    var startAt: String
+    var endAt: String?
+    var kmStart: Int?
+    var kmEnd: Int?
+    var distanceGps: Double?
+    var distanceRoute: Double?
+    var startPlaceId: String?
+    var endPlaceId: String?
+    var startLabel: String?
+    var endLabel: String?
+    /// business | private | commute | field | unknown
+    var category: String = "unknown"
+    var purpose: String?
+    var customerId: String?
+    /// draft | suggested | confirmed | locked (locked setzt nur der Server)
+    var status: String = "draft"
+    /// auto | manual | gap | import
+    var source: String = "manual"
+    var suggestionCategory: String?
+    var suggestionPurpose: String?
+    var suggestionCustomerId: String?
+    var suggestionConfidence: Double?
+    var suggestionReason: String?
+    /// rule | calendar | pattern | llm
+    var suggestionSource: String?
+    var trackHash: String?
+    var splitOf: String?
+    var privateMode: Bool = false
+    var note: String?
+
+    enum CodingKeys: String, CodingKey {
+        case id, version, deleted, vehicleId, driverSub, driverName, startAt, endAt, kmStart, kmEnd
+        case distanceGps, distanceRoute, startPlaceId, endPlaceId, startLabel, endLabel, category, purpose
+        case customerId, status, source, suggestionCategory, suggestionPurpose, suggestionCustomerId
+        case suggestionConfidence, suggestionReason, suggestionSource, trackHash, splitOf, privateMode, note
+    }
+
+    // MARK: Zeit
+
+    private static let isoFormatter: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime]
+        f.timeZone = .current
+        return f
+    }()
+
+    private static let isoFractionalFormatter: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return f
+    }()
+
+    /// ISO-8601 mit lokalem Offset, z. B. 2026-11-24T07:42:00+01:00
+    static func isoString(_ date: Date) -> String { isoFormatter.string(from: date) }
+
+    static func parseISO(_ value: String) -> Date? {
+        isoFormatter.date(from: value) ?? isoFractionalFormatter.date(from: value)
+    }
+
+    var startDate: Date? { Self.parseISO(startAt) }
+    var endDate: Date? {
+        guard let endAt else { return nil }
+        return Self.parseISO(endAt)
+    }
+
+    // MARK: Ableitungen
+
+    var categoryValue: TripCategory { TripCategory.of(category) }
+    var isLocked: Bool { status == "locked" }
+    var isConfirmed: Bool { status == "confirmed" || status == "locked" }
+    /// Muss noch bestätigt/klassifiziert werden (gesperrte Fahrten nie)
+    var needsReview: Bool { !isLocked && (!isConfirmed || category == TripCategory.unknown.rawValue) }
+    /// "YYYY-MM" des (lokalen) Startdatums wie Server (`start_at[:7]`)
+    var monthKey: String { String(startAt.prefix(7)) }
+    var hasSuggestion: Bool { suggestionCategory != nil }
+
+    /// Distanz wie Server: km-Stand, sonst Route, sonst GPS
+    var distanceKm: Double? {
+        if let a = kmStart, let b = kmEnd { return Double(b - a) }
+        return distanceRoute ?? distanceGps
+    }
+
+    static func statusLabel(_ status: String) -> String {
+        switch status {
+        case "draft": "Entwurf"
+        case "suggested": "Vorgeschlagen"
+        case "confirmed": "Bestätigt"
+        case "locked": "Abgeschlossen"
+        default: status
+        }
+    }
+
+    static func sourceLabel(_ source: String) -> String {
+        switch source {
+        case "auto": "Automatisch"
+        case "manual": "Manuell"
+        case "gap": "Lücke"
+        case "import": "Import"
+        default: source
+        }
+    }
+
+    static func suggestionSourceLabel(_ source: String?) -> String {
+        switch source {
+        case "rule": "Regel"
+        case "calendar": "Kalender"
+        case "pattern": "Wiederholung"
+        case "llm": "KI-Vorschlag"
+        default: "Vorschlag"
+        }
+    }
+}
+
+extension Trip {
+    /// Tolerant: fehlende Felder erhalten Standardwerte (ältere/neuere Server).
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        version = c.lenientInt(.version) ?? 0
+        deleted = c.lenientBool(.deleted) ?? false
+        vehicleId = try c.decode(String.self, forKey: .vehicleId)
+        driverSub = c.lenientString(.driverSub)
+        driverName = c.lenientString(.driverName)
+        startAt = try c.decode(String.self, forKey: .startAt)
+        endAt = c.lenientString(.endAt)
+        kmStart = c.lenientInt(.kmStart)
+        kmEnd = c.lenientInt(.kmEnd)
+        distanceGps = c.lenientDouble(.distanceGps)
+        distanceRoute = c.lenientDouble(.distanceRoute)
+        startPlaceId = c.lenientString(.startPlaceId)
+        endPlaceId = c.lenientString(.endPlaceId)
+        startLabel = c.lenientString(.startLabel)
+        endLabel = c.lenientString(.endLabel)
+        category = c.lenientString(.category) ?? TripCategory.unknown.rawValue
+        purpose = c.lenientString(.purpose)
+        customerId = c.lenientString(.customerId)
+        status = c.lenientString(.status) ?? "draft"
+        source = c.lenientString(.source) ?? "manual"
+        suggestionCategory = c.lenientString(.suggestionCategory)
+        suggestionPurpose = c.lenientString(.suggestionPurpose)
+        suggestionCustomerId = c.lenientString(.suggestionCustomerId)
+        suggestionConfidence = c.lenientDouble(.suggestionConfidence)
+        suggestionReason = c.lenientString(.suggestionReason)
+        suggestionSource = c.lenientString(.suggestionSource)
+        trackHash = c.lenientString(.trackHash)
+        splitOf = c.lenientString(.splitOf)
+        privateMode = c.lenientBool(.privateMode) ?? false
+        note = c.lenientString(.note)
+    }
+}
+
+enum PlaceKind: String, CaseIterable, Identifiable {
+    case home, work, customer, other
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .home: "Wohnort"
+        case .work: "Arbeitsort"
+        case .customer: "Kunde"
+        case .other: "Anderer Ort"
+        }
+    }
+
+    var groupTitle: String {
+        switch self {
+        case .home: "Wohnort"
+        case .work: "Arbeitsorte"
+        case .customer: "Kunden"
+        case .other: "Weitere Orte"
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .home: "house.fill"
+        case .work: "building.2.fill"
+        case .customer: "person.crop.square.fill"
+        case .other: "mappin.circle.fill"
+        }
+    }
+
+    static func of(_ raw: String?) -> PlaceKind {
+        guard let raw, let k = PlaceKind(rawValue: raw) else { return .other }
+        return k
+    }
+}
+
+/// Bekannter Ort (Wohnort, Büro, Kunde …). Koordinaten des Wohnorts verlassen das Gerät nie.
+struct Place: SyncEntity {
+    static let entityName = "place"
+    static let maxName = 100
+    static let radiusRange = 50...5000
+
+    var id = UUID().uuidString.lowercased()
+    var version = 0
+    var deleted = false
+    var name: String
+    /// home | work | customer | other
+    var kind: String = PlaceKind.other.rawValue
+    var lat: Double?
+    var lon: Double?
+    var radiusM: Int = 150
+    var customerId: String?
+    var defaultCategory: String?
+    /// Server-Feld `private` (Schlüsselwort in Swift)
+    var isPrivate: Bool = false
+
+    enum CodingKeys: String, CodingKey {
+        case id, version, deleted, name, kind, lat, lon, radiusM, customerId, defaultCategory
+        case isPrivate = "private"
+    }
+
+    var kindValue: PlaceKind { PlaceKind.of(kind) }
+    var isHome: Bool { kind == PlaceKind.home.rawValue }
+    var hasCoordinate: Bool { lat != nil && lon != nil }
+
+    /// Wohnort: Koordinaten nie senden (Server lehnt ab, Datensparsamkeit).
+    func payload() throws -> Data {
+        try payload(omitting: isHome ? ["lat", "lon"] : [])
+    }
+}
+
+/// Kunde/Projekt (Zweck geschäftlicher Fahrten).
+struct Customer: SyncEntity {
+    static let entityName = "customer"
+    static let maxName = 150
+    static let maxRef = 50
+    static let maxNote = 500
+
+    var id = UUID().uuidString.lowercased()
+    var version = 0
+    var deleted = false
+    var name: String
+    var ref: String?
+    var note: String?
+}
+
+/// Regel für Zweck-Vorschläge (Ort/Zeit/Wochentag → Kategorie/Zweck/Kunde).
+struct PurposeRule: SyncEntity {
+    static let entityName = "purpose_rule"
+    static let weekdayLabels = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"]
+
+    var id = UUID().uuidString.lowercased()
+    var version = 0
+    var deleted = false
+    var priority: Int = 100
+    var fromPlaceId: String?
+    var toPlaceId: String?
+    /// ISO-Wochentage "1,2,3,4,5" (1 = Montag); `nil` = jeden Tag
+    var weekdays: String?
+    /// "HH:MM"
+    var timeFrom: String?
+    var timeTo: String?
+    var vehicleId: String?
+    var resultCategory: String = TripCategory.business.rawValue
+    var resultPurpose: String?
+    var resultCustomerId: String?
+    var autoConfirm: Bool = false
+    /// user | learned
+    var origin: String = "user"
+    var active: Bool = true
+
+    var isLearned: Bool { origin == "learned" }
+
+    var weekdaySet: [Int] {
+        guard let weekdays else { return [] }
+        return weekdays.split(separator: ",")
+            .compactMap { Int($0.trimmingCharacters(in: .whitespaces)) }
+            .filter { (1...7).contains($0) }
+            .sorted()
+    }
+
+    static func weekdayString(_ days: [Int]) -> String? {
+        let set = Array(Set(days.filter { (1...7).contains($0) })).sorted()
+        if set.isEmpty { return nil }
+        return set.map { String($0) }.joined(separator: ",")
+    }
+
+    /// "Mo–Fr", "Sa–So", "Mo, Mi, Fr", "täglich"
+    static func weekdayText(_ days: [Int]) -> String {
+        let set = Array(Set(days)).filter { (1...7).contains($0) }.sorted()
+        if set.isEmpty || set.count == 7 { return "täglich" }
+        var parts: [String] = []
+        var i = 0
+        while i < set.count {
+            var j = i
+            while j + 1 < set.count && set[j + 1] == set[j] + 1 { j += 1 }
+            let first = weekdayLabels[set[i] - 1]
+            let last = weekdayLabels[set[j] - 1]
+            if j - i >= 2 {
+                parts.append("\(first)–\(last)")
+            } else if j > i {
+                parts.append(first)
+                parts.append(last)
+            } else {
+                parts.append(first)
+            }
+            i = j + 1
+        }
+        return parts.joined(separator: ", ")
+    }
+}
+
+/// Steuer-/Spesenparameter je Jahr und Geltungsbereich (Bund, Kanton, Mandant).
+struct TaxParam: SyncEntity {
+    static let entityName = "tax_param"
+    static let keys = ["km_rate", "commute_rate", "cap_federal", "cap_canton", "private_share_pct",
+                       "min_private_month", "vat_rate"]
+    static let maxValue = 1_000_000.0
+    static let maxText = 300
+
+    var id = UUID().uuidString.lowercased()
+    var version = 0
+    var deleted = false
+    var year: Int
+    /// federal | canton:ZH | tenant
+    var scope: String = "tenant"
+    var key: String
+    var value: Double
+    var sourceUrl: String?
+    var note: String?
+
+    static func label(_ key: String) -> String {
+        switch key {
+        case "km_rate": "Kilometeransatz Geschäftsfahrten"
+        case "commute_rate": "Arbeitsweg Privatauto"
+        case "cap_federal": "Fahrkostenabzug Obergrenze Bund"
+        case "cap_canton": "Fahrkostenabzug Obergrenze Kanton"
+        case "private_share_pct": "Privatanteil pauschal"
+        case "min_private_month": "Privatanteil Minimum"
+        case "vat_rate": "MWST-Normalsatz"
+        default: key
+        }
+    }
+
+    static func unit(_ key: String) -> String {
+        switch key {
+        case "km_rate", "commute_rate": "CHF/km"
+        case "cap_federal", "cap_canton": "CHF"
+        case "private_share_pct": "%/Monat"
+        case "min_private_month": "CHF/Monat"
+        case "vat_rate": "%"
+        default: ""
+        }
+    }
+
+    static func scopeLabel(_ scope: String) -> String {
+        if scope == "federal" { return "Bund" }
+        if scope == "tenant" { return "Mandant" }
+        if scope == "default" { return "Standard (Annahme)" }
+        if scope.hasPrefix("canton:") { return "Kanton \(scope.dropFirst("canton:".count))" }
+        return scope
+    }
+
+    static func valueText(_ key: String, _ value: Double) -> String {
+        let digits = (key == "km_rate" || key == "commute_rate") ? 2 : (value == value.rounded() ? 0 : 2)
+        return "\(Fmt.num(value, digits)) \(unit(key))"
+    }
+}
+
+/// Monatsabschluss (nur Server schreibt; App speichert und zeigt an).
+struct TripPeriod: Codable, Identifiable, Hashable {
+    var id: String
+    var version: Int = 0
+    var deleted: Bool = false
+    var vehicleId: String
+    /// "YYYY-MM"
+    var month: String
+    var status: String = "closed"
+    var closedBy: String?
+    var closedAt: String?
+    var anchorSeq: Int?
+    var kmStart: Int?
+    var kmEnd: Int?
+    var tripsCount: Int = 0
+    var businessKm: Double = 0
+    var privateKm: Double = 0
+    var commuteKm: Double = 0
+    var fieldKm: Double = 0
+    var note: String?
+
+    enum CodingKeys: String, CodingKey {
+        case id, version, deleted, vehicleId, month, status, closedBy, closedAt, anchorSeq, kmStart, kmEnd
+        case tripsCount, businessKm, privateKm, commuteKm, fieldKm, note
+    }
+
+    var isClosed: Bool { status == "closed" && !deleted }
+    var closedDate: Date? {
+        guard let closedAt else { return nil }
+        return Trip.parseISO(closedAt)
+    }
+}
+
+extension TripPeriod {
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let decodedVehicle = try c.decode(String.self, forKey: .vehicleId)
+        let decodedMonth = try c.decode(String.self, forKey: .month)
+        vehicleId = decodedVehicle
+        month = decodedMonth
+        id = c.lenientString(.id) ?? "\(decodedVehicle)|\(decodedMonth)"
+        version = c.lenientInt(.version) ?? 0
+        deleted = c.lenientBool(.deleted) ?? false
+        status = c.lenientString(.status) ?? "closed"
+        closedBy = c.lenientString(.closedBy)
+        closedAt = c.lenientString(.closedAt)
+        anchorSeq = c.lenientInt(.anchorSeq)
+        kmStart = c.lenientInt(.kmStart)
+        kmEnd = c.lenientInt(.kmEnd)
+        tripsCount = c.lenientInt(.tripsCount) ?? 0
+        businessKm = c.lenientDouble(.businessKm) ?? 0
+        privateKm = c.lenientDouble(.privateKm) ?? 0
+        commuteKm = c.lenientDouble(.commuteKm) ?? 0
+        fieldKm = c.lenientDouble(.fieldKm) ?? 0
+        note = c.lenientString(.note)
+    }
+}
+
+/// Lücke in der km-Kette (km-Ende Fahrt n ≠ km-Beginn Fahrt n+1; negativ = Überschneidung).
+struct TripGap: Identifiable, Hashable, Decodable {
+    var afterTripId: String?
+    var beforeTripId: String?
+    var kmFrom: Int
+    var kmTo: Int
+    var km: Int
+
+    init(afterTripId: String?, beforeTripId: String?, kmFrom: Int, kmTo: Int, km: Int? = nil) {
+        self.afterTripId = afterTripId
+        self.beforeTripId = beforeTripId
+        self.kmFrom = kmFrom
+        self.kmTo = kmTo
+        self.km = km ?? (kmTo - kmFrom)
+    }
+
+    var id: String { "\(afterTripId ?? "-")|\(beforeTripId ?? "-")|\(kmFrom)|\(kmTo)" }
+}
+
+extension KeyedDecodingContainer {
+    /// Int, auch aus 12.0 o. ä.; fehlend/ungültig → nil
+    func lenientInt(_ key: Key) -> Int? {
+        if let v = try? decodeIfPresent(Int.self, forKey: key) { return v }
+        if let d = try? decodeIfPresent(Double.self, forKey: key), d.isFinite { return Int(d.rounded()) }
+        return nil
+    }
+
+    func lenientDouble(_ key: Key) -> Double? {
+        if let d = try? decodeIfPresent(Double.self, forKey: key) { return d }
+        if let s = try? decodeIfPresent(String.self, forKey: key) { return Double(s) }
+        return nil
+    }
+
+    func lenientString(_ key: Key) -> String? {
+        if let s = try? decodeIfPresent(String.self, forKey: key) { return s }
+        return nil
+    }
+
+    func lenientBool(_ key: Key) -> Bool? {
+        if let b = try? decodeIfPresent(Bool.self, forKey: key) { return b }
+        if let i = try? decodeIfPresent(Int.self, forKey: key) { return i != 0 }
+        return nil
+    }
+}
+
+// MARK: Fahrtenbuch – Server-Antworten (tolerant)
+
+struct TripMismatch: Decodable, Identifiable, Hashable {
+    var tripId: String?
+    var reason: String?
+    var id: String { "\(tripId ?? "-")|\(reason ?? "")" }
+}
+
+struct OdometerCheck: Decodable, Hashable {
+    var tripKm: Double?
+    var odometerKm: Double?
+    var diffKm: Double?
+    var ok: Bool?
+    var readings: Int?
+    var note: String?
+
+    enum CodingKeys: String, CodingKey { case tripKm, odometerKm, diffKm, ok, readings, note }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        tripKm = c.lenientDouble(.tripKm)
+        odometerKm = c.lenientDouble(.odometerKm)
+        diffKm = c.lenientDouble(.diffKm)
+        ok = c.lenientBool(.ok)
+        readings = c.lenientInt(.readings)
+        note = c.lenientString(.note)
+    }
+}
+
+/// Antwort von GET …/trips/check?month=
+struct TripCheck: Decodable {
+    var month: String?
+    var trips: Int?
+    var gaps: [TripGap] = []
+    var mismatches: [TripMismatch] = []
+    var odometerCheck: OdometerCheck?
+    var unconfirmed: Int?
+    var closed: Bool?
+
+    enum CodingKeys: String, CodingKey { case month, trips, gaps, mismatches, odometerCheck, unconfirmed, closed }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        month = c.lenientString(.month)
+        trips = c.lenientInt(.trips)
+        gaps = (try? c.decodeIfPresent([TripGap].self, forKey: .gaps)) ?? []
+        mismatches = (try? c.decodeIfPresent([TripMismatch].self, forKey: .mismatches)) ?? []
+        odometerCheck = try? c.decodeIfPresent(OdometerCheck.self, forKey: .odometerCheck)
+        unconfirmed = c.lenientInt(.unconfirmed)
+        closed = c.lenientBool(.closed)
+    }
+}
+
+struct YearReportParam: Decodable, Identifiable, Hashable {
+    var key: String?
+    var label: String?
+    var value: Double?
+    var year: Int?
+    var scope: String?
+    var sourceUrl: String?
+    var note: String?
+    var id: String { "\(key ?? "-")|\(scope ?? "-")|\(year ?? 0)" }
+
+    enum CodingKeys: String, CodingKey { case key, label, value, year, scope, sourceUrl, note }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        key = c.lenientString(.key)
+        label = c.lenientString(.label)
+        value = c.lenientDouble(.value)
+        year = c.lenientInt(.year)
+        scope = c.lenientString(.scope)
+        sourceUrl = c.lenientString(.sourceUrl)
+        note = c.lenientString(.note)
+    }
+}
+
+struct YearReportItem: Decodable, Hashable {
+    var label: String?
+    var value: Double?
+    var applicable: Bool?
+    var formula: String?
+    var reason: String?
+    var params: [YearReportParam] = []
+
+    enum CodingKeys: String, CodingKey { case label, value, applicable, formula, reason, params }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        label = c.lenientString(.label)
+        value = c.lenientDouble(.value)
+        applicable = c.lenientBool(.applicable)
+        formula = c.lenientString(.formula)
+        reason = c.lenientString(.reason)
+        params = (try? c.decodeIfPresent([YearReportParam].self, forKey: .params)) ?? []
+    }
+}
+
+/// Jahresbericht (GET …/year-report?year=). Alle Felder optional, unbekannte werden ignoriert.
+/// Achtung: `convertFromSnakeCase` wandelt auch Dictionary-Schlüssel (z. B. `km_rate` → `kmRate`);
+/// Zugriff deshalb über `value(_:_:)` mit normalisiertem Schlüssel.
+struct YearReport: Decodable {
+    var year: Int?
+    var canton: String?
+    var tripsCount: Int?
+    var unconfirmed: Int?
+    var monthsUsed: Int?
+    var km: [String: Double] = [:]
+    var sharesPct: [String: Double] = [:]
+    var costs: [String: Double] = [:]
+    var items: [String: YearReportItem] = [:]
+    var params: [String: YearReportParam] = [:]
+    var warnings: [String] = []
+    var disclaimer: String?
+    /// Lokal aus den Fahrten berechnet (offline, ohne Steuerposten)
+    var isLocal = false
+
+    enum CodingKeys: String, CodingKey {
+        case year, canton, tripsCount, unconfirmed, monthsUsed, km, sharesPct, costs, items, params, warnings
+        case disclaimer
+    }
+
+    init() {}
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        year = c.lenientInt(.year)
+        canton = c.lenientString(.canton)
+        tripsCount = c.lenientInt(.tripsCount)
+        unconfirmed = c.lenientInt(.unconfirmed)
+        monthsUsed = c.lenientInt(.monthsUsed)
+        km = Self.numbers(c, .km)
+        sharesPct = Self.numbers(c, .sharesPct)
+        costs = Self.numbers(c, .costs)
+        items = (try? c.decodeIfPresent([String: YearReportItem].self, forKey: .items)) ?? [:]
+        params = (try? c.decodeIfPresent([String: YearReportParam].self, forKey: .params)) ?? [:]
+        warnings = (try? c.decodeIfPresent([String].self, forKey: .warnings)) ?? []
+        disclaimer = c.lenientString(.disclaimer)
+    }
+
+    private static func numbers(_ c: KeyedDecodingContainer<CodingKeys>, _ key: CodingKeys) -> [String: Double] {
+        guard let raw = try? c.decodeIfPresent([String: Double?].self, forKey: key) else { return [:] }
+        return raw.compactMapValues { $0 }
+    }
+
+    static func normalized(_ key: String) -> String {
+        key.replacingOccurrences(of: "_", with: "").lowercased()
+    }
+
+    /// Wert per Schlüssel unabhängig von snake_case/camelCase.
+    static func value<T>(_ dict: [String: T], _ key: String) -> T? {
+        if let v = dict[key] { return v }
+        let wanted = normalized(key)
+        return dict.first { normalized($0.key) == wanted }?.value
+    }
+
+    func km(_ category: TripCategory) -> Double? { Self.value(self.km, category.rawValue) }
+    func share(_ category: TripCategory) -> Double? { Self.value(self.sharesPct, category.rawValue) }
+    func item(_ key: String) -> YearReportItem? { Self.value(self.items, key) }
+    var totalKm: Double? { Self.value(self.km, "total") }
+
+    /// Offline-Ersatz: km und Anteile je Kategorie aus lokalen Fahrten.
+    static func local(trips: [Trip], year: Int) -> YearReport {
+        var r = YearReport()
+        r.year = year
+        r.isLocal = true
+        let list = trips.filter { !$0.deleted && $0.startAt.hasPrefix("\(year)-") }
+        r.tripsCount = list.count
+        r.unconfirmed = list.filter(\.needsReview).count
+        var totals: [String: Double] = [:]
+        for c in TripCategory.allCases { totals[c.rawValue] = 0 }
+        for t in list {
+            totals[t.category, default: 0] += max(0, t.distanceKm ?? 0)
+        }
+        let total = totals.values.reduce(0, +)
+        totals["total"] = total
+        r.km = totals
+        if total > 0 {
+            for c in TripCategory.allCases {
+                r.sharesPct[c.rawValue] = (totals[c.rawValue] ?? 0) / total * 100
+            }
+        }
+        if let n = r.unconfirmed, n > 0 {
+            r.warnings.append("\(n) Fahrt(en) nicht bestätigt bzw. ohne Kategorie – Zahlen vorläufig.")
+        }
+        return r
+    }
 }

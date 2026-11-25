@@ -8,6 +8,8 @@ struct OverviewView: View {
 
     var body: some View {
         let s = store.stats(for: store.vehicle(id: vehicle.id) ?? vehicle)
+        let reviewCount = store.reviewTrips(for: vehicle.id).count
+        let gaps = store.gaps(for: vehicle.id, month: nil)
         List {
             if store.canWrite {
                 Section {
@@ -20,6 +22,27 @@ struct OverviewView: View {
                     .listRowBackground(Color.clear)
                 }
             }
+            if reviewCount > 0 || !gaps.isEmpty {
+                Section("Fahrtenbuch") {
+                    if reviewCount > 0 {
+                        NavigationLink {
+                            TripReviewView(vehicle: vehicle)
+                        } label: {
+                            Label(TripOverviewText.review(reviewCount), systemImage: "checklist")
+                                .foregroundStyle(.orange)
+                        }
+                    }
+                    if !gaps.isEmpty {
+                        NavigationLink {
+                            GapListView(vehicle: vehicle)
+                        } label: {
+                            Label(TripOverviewText.gaps(gaps), systemImage: "exclamationmark.triangle.fill")
+                                .foregroundStyle(.red)
+                        }
+                    }
+                }
+            }
+
             Section("Kilometer") {
                 LabeledContent("Aktueller Stand", value: Fmt.km(s.currentKm))
                 LabeledContent("Seit Erfassung", value: Fmt.km(s.drivenKm))
@@ -112,5 +135,16 @@ struct OverviewView: View {
         .frame(height: 180)
         .padding(.vertical, 8)
         .accessibilityLabel("Verbrauchsverlauf, Durchschnitt \(average.map { Fmt.num($0, 1) } ?? "–") Liter pro 100 km")
+    }
+}
+
+enum TripOverviewText {
+    static func review(_ n: Int) -> String {
+        n == 1 ? "1 Fahrt bestätigen" : "\(n) Fahrten bestätigen"
+    }
+
+    static func gaps(_ gaps: [TripGap]) -> String {
+        let km = gaps.reduce(0) { $0 + abs($1.km) }
+        return gaps.count == 1 ? "Lücke von \(Fmt.km(km)) in der km-Kette" : "\(gaps.count) Lücken · \(Fmt.km(km))"
     }
 }

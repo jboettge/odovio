@@ -349,7 +349,7 @@ struct MaterialPickerView: View {
     var body: some View {
         NavigationStack {
             content
-                .navigationTitle("Materialstamm")
+                .navigationTitle("Material")
                 .navigationBarTitleDisplayMode(.inline)
                 .searchable(text: $search, placement: .navigationBarDrawer(displayMode: .always),
                             prompt: "Name, Art.-Nr. oder Kategorie")
