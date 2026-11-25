@@ -9,6 +9,8 @@ struct AuthConfig: Decodable {
     let issuer: String
     let clientId: String
     let scopes: String
+    /// Client-ID des Webfrontends (neuere Server; von der App nicht verwendet)
+    let webClientId: String?
 }
 
 private struct OIDCDiscovery: Decodable {

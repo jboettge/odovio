@@ -1,6 +1,7 @@
 import SwiftUI
 
 struct VehicleDetailView: View {
+    @Environment(AppSettings.self) private var settings
     @Environment(TenantStore.self) private var store
     @Environment(\.dynamicTypeSize) private var typeSize
     let vehicle: Vehicle
@@ -24,7 +25,7 @@ struct VehicleDetailView: View {
     }
 
     enum Export: String, Identifiable {
-        case logbook, vehicle
+        case logbook, vehicle, activity
         var id: String { rawValue }
     }
 
@@ -63,19 +64,35 @@ struct VehicleDetailView: View {
                         exportButton(.vehicle)
                         exportButton(.logbook)
                     }
+                    if showActivity {
+                        Section("Gemeinsam") {
+                            Button { export = .activity } label: {
+                                Label("Aktivität", systemImage: "clock.arrow.circlepath")
+                            }
+                        }
+                    }
                 } label: {
                     Image(systemName: "square.and.arrow.up")
                 }
-                .accessibilityLabel(pane == .trips ? "Fahrtenbuch exportieren" : "Fahrzeug-PDF exportieren")
+                .accessibilityLabel(menuLabel)
             }
         }
         .sheet(item: $export) { e in
             switch e {
             case .vehicle: ReportView(vehicle: current)
             case .logbook: ModalNavigation { TripReportsView(vehicle: current) }
+            case .activity: ModalNavigation { ActivityView(vehicleId: current.id) }
             }
         }
         .onAppear { store.defaultVehicleId = vehicle.id }   // zuletzt gewählt → Start/Automatik
+    }
+
+    /// Aktivität (wer hat was geändert) nur im Servermodus
+    private var showActivity: Bool { !store.isLocal && settings.capabilities.activity }
+
+    private var menuLabel: String {
+        let base: String = pane == .trips ? "Fahrtenbuch exportieren" : "Fahrzeug-PDF exportieren"
+        return showActivity ? base + " oder Aktivität ansehen" : base
     }
 
     private func exportButton(_ e: Export) -> some View {
@@ -83,6 +100,7 @@ struct VehicleDetailView: View {
             switch e {
             case .logbook: Label("Fahrtenbuch (PDF/CSV)", systemImage: "car.side")
             case .vehicle: Label("Fahrzeug-PDF (Tanken, Wartung)", systemImage: "doc.richtext")
+            case .activity: Label("Aktivität", systemImage: "clock.arrow.circlepath")
             }
         }
     }

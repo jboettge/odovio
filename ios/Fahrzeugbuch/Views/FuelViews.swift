@@ -49,7 +49,7 @@ struct FuelListView: View {
             }
             ForEach(entries) { e in
                 Button { form = EditTarget(value: e) } label: {
-                    FuelRow(entry: e, consumption: consumption[e.km], pending: store.isPending(e.id))
+                    FuelRow(entry: e, consumption: consumption[e.km], pending: !store.isLocal && store.isPending(e.id))
                 }
                 .buttonStyle(.plain)
                 .swipeActions {
@@ -182,6 +182,7 @@ private struct FuelRow: View {
             if let s = entry.station, !s.isEmpty {
                 Text(s).font(.footnote).foregroundStyle(Color.neutralText)
             }
+            AuthorNote(createdBy: entry.createdBy)
         }
         .contentShape(Rectangle())
         .accessibilityElement(children: .combine)
@@ -352,6 +353,7 @@ struct FuelFormView: View {
                     }
                 }
                 if let e = entry {
+                    AuthorshipSection(createdBy: e.createdBy, updatedBy: e.updatedBy)
                     HistorySection(entity: FuelEntry.entityName, id: e.id)
                 }
                 if !store.canWrite {

@@ -39,7 +39,11 @@ struct ScanClient {
 
     static let maxImageBytes = 2 * 1024 * 1024
 
+    /// KI-Auswertung verfügbar? Im Lokalmodus nie (kein Server).
+    var isAvailable: Bool { !api.isLocalPlaceholder }
+
     func scan(jpeg: Data, kind: ScanKind) async -> Outcome {
+        guard isAvailable else { return .notConfigured }   // Lokalmodus: keine KI-Auswertung
         guard jpeg.count <= Self.maxImageBytes else { return .failed("Das Bild ist zu gross (max. 2 MB).") }
         let body = Body(imageB64: jpeg.base64EncodedString(), kind: kind.rawValue)
         guard let data = try? APIClient.encoder.encode(body) else { return .failed("Bild konnte nicht gesendet werden.") }
@@ -91,6 +95,7 @@ enum VisionAvailability {
         #if DEBUG
         if Demo.isActive { return false }
         #endif
+        if api.isLocalPlaceholder { return false }   // Lokalmodus: keine KI-Auswertung
         let key = api.baseURL.absoluteString
         if let entry = cache[key], Date().timeIntervalSince(entry.checkedAt) < 600 { return entry.value }
         guard let response = try? await api.rawResponse("GET", "api/intel/status", timeout: 8) else {

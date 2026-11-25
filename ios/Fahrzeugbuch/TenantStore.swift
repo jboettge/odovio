@@ -8,12 +8,24 @@ import Observation
 /// - Objekte mit ausstehenden Änderungen werden beim Pull nicht überschrieben.
 /// - Abgelehnte Änderungen bleiben in `rejectedOps` sichtbar (mit lokaler Kopie zum Bearbeiten/erneut Senden).
 /// - Persistenz gebündelt (~300 ms), Kodieren/Schreiben ausserhalb des Main-Actors; `flush()` schreibt sofort.
+///
+/// Lokalmodus (`mode == .local`): keine Outbox, kein Sync, keine Ablehnungen. Jede Änderung wird stattdessen
+/// in das append-only `LocalJournal` (SHA-256-Kette) geschrieben; Begründungspflicht und Sperren
+/// abgeschlossener Monate prüft der Store selbst (wie der Server). Ablage `Application Support/Lokal/`
+/// (nicht vom Geräte-Backup ausgeschlossen, Dateischutz „completeUnlessOpen“).
 @MainActor
 @Observable
 final class TenantStore {
     let tenant: TenantInfo
+    /// Betriebsart dieses Stores
+    let mode: AppMode
     @ObservationIgnored private let apiProvider: @MainActor () -> APIClient
     @ObservationIgnored private let fileURL: URL
+    /// Lokalmodus: Journal aller Änderungen (sonst `nil`)
+    @ObservationIgnored let localJournal: LocalJournal?
+    /// Ablage der Beleg-Dateien (`nil` = Standard des Servermodus)
+    @ObservationIgnored let attachmentDirectory: URL?
+    @ObservationIgnored private let gate: StorageGate
 
     private(set) var vehicles: [String: Vehicle] = [:] { didSet { statsCache.removeAll() } }
     private(set) var odometer: [String: OdometerReading] = [:] { didSet { statsCache.removeAll() } }
@@ -51,6 +63,9 @@ final class TenantStore {
     private(set) var rejectedOps: [RejectedOp] = []
     /// Problem beim Laden der lokalen Datei (defekt → gesichert; gesperrt → später geladen)
     var storeLoadIssue: String?
+    /// Lokalmodus: Anzahl Journal-Einträge und Kettenkopf (für Anzeige; ändert sich mit jeder Änderung)
+    private(set) var journalCount = 0
+    private(set) var journalHead = ""
 
     @ObservationIgnored private var rerunRequested = false
     @ObservationIgnored private var syncScheduled = false
@@ -60,7 +75,7 @@ final class TenantStore {
     @ObservationIgnored private var dirty = false
     /// Datei vorhanden, aber nicht lesbar (Gerät gesperrt) → nicht überschreiben
     @ObservationIgnored private var persistBlocked = false
-    @ObservationIgnored private let generation = StorageGate.shared.current
+    @ObservationIgnored private let generation: Int
     @ObservationIgnored private let observers = ObserverBag()
     @ObservationIgnored private var tripCache = TripCache()
     @ObservationIgnored private var statsCache: [Vehicle: VehicleStats] = [:]
@@ -78,16 +93,40 @@ final class TenantStore {
 
     var canWrite: Bool { tenant.canWrite }
 
-    /// API-Client des angemeldeten Benutzers (für Aufrufe ausserhalb des Syncs, z. B. Scan)
-    var api: APIClient { apiProvider() }
+    /// Lokalmodus (ohne Server)
+    var isLocal: Bool { mode == .local }
 
-    /// - Parameter directory: Ablageort der Mandantendatei (Tests); Standard `Application Support/Mandanten`.
-    init(tenant: TenantInfo, api: @escaping @MainActor () -> APIClient, directory: URL? = nil) {
+    /// API-Client des angemeldeten Benutzers (für Aufrufe ausserhalb des Syncs, z. B. Scan).
+    /// Im Lokalmodus ein Platzhalter, dessen Aufrufe sofort fehlschlagen (`APIClient.isLocalPlaceholder`).
+    var api: APIClient { isLocal ? .localPlaceholder : apiProvider() }
+
+    /// - Parameter directory: Ablageort der Mandantendatei (Tests); Standard `Application Support/Mandanten`
+    ///   bzw. im Lokalmodus `Application Support/Lokal` (dort auch `journal.jsonl` und `Belege/`).
+    init(tenant: TenantInfo, api: @escaping @MainActor () -> APIClient, directory: URL? = nil,
+         mode: AppMode = .server) {
         self.tenant = tenant
+        self.mode = mode
         self.apiProvider = api
-        self.fileURL = (directory ?? Self.directory()).appending(path: "\(tenant.slug).json")
+        let dir = directory ?? (mode == .local ? Self.localDirectory() : Self.directory())
+        self.fileURL = dir.appending(path: "\(tenant.slug).json")
+        let gate: StorageGate = mode == .local ? .local : .shared
+        self.gate = gate
+        self.generation = gate.current
+        if mode == .local {
+            self.attachmentDirectory = dir.appending(path: "Belege", directoryHint: .isDirectory)
+            self.localJournal = LocalJournal(fileURL: dir.appending(path: "journal.jsonl"), gate: gate)
+        } else {
+            self.attachmentDirectory = nil
+            self.localJournal = nil
+        }
         load()
+        if mode == .local { recoverFromJournal() }
         observeAppLifecycle()
+    }
+
+    /// Lokales Fahrzeugbuch (ohne Server).
+    convenience init(localDirectory directory: URL? = nil) {
+        self.init(tenant: .local, api: { .localPlaceholder }, directory: directory, mode: .local)
     }
 
     // MARK: Lesen
@@ -149,7 +188,8 @@ final class TenantStore {
     /// JPEG eines Belegs: lokal bzw. vom Server (danach lokal zwischengespeichert). `nil` offline/fehlend
     /// oder wenn die Prüfsumme nicht zum Beleg passt (dann Hinweis in `notices`).
     func attachmentData(_ a: Attachment) async -> Data? {
-        if let local = AttachmentFiles.read(a.id) { return local }
+        if let local = AttachmentFiles.read(a.id, directory: attachmentDirectory) { return local }
+        if isLocal { return nil }
         #if DEBUG
         if Demo.isActive { return nil }
         #endif
@@ -569,27 +609,34 @@ final class TenantStore {
 
     func save(_ o: OdometerReading, reason: String? = nil) {
         guard checkReason(requiresReason(odometer: o), reason) else { return }
+        let touched = datedKeys(o.vehicleId, o.date, odometer[o.id].map { ($0.vehicleId, $0.date) })
         upsert(o, in: \.odometer, reason: reason)
+        bumpLocalCorrections(touched)
     }
 
     func delete(_ o: OdometerReading, reason: String? = nil) {
         guard checkReason(requiresReason(odometer: o), reason) else { return }
         remove(o, in: \.odometer, reason: reason)
+        bumpLocalCorrections(datedKeys(o.vehicleId, o.date, nil))
     }
 
     func save(_ f: FuelEntry, reason: String? = nil) {
         guard checkReason(requiresReason(fuel: f), reason) else { return }
+        let touched = datedKeys(f.vehicleId, f.date, fuel[f.id].map { ($0.vehicleId, $0.date) })
         upsert(f, in: \.fuel, reason: reason)
+        bumpLocalCorrections(touched)
     }
 
     func delete(_ f: FuelEntry, reason: String? = nil) {
         guard checkReason(requiresReason(fuel: f), reason) else { return }
         remove(f, in: \.fuel, reason: reason)
+        bumpLocalCorrections(datedKeys(f.vehicleId, f.date, nil))
     }
 
     func delete(_ m: Maintenance, reason: String? = nil) {
         guard checkReason(requiresReason(maintenance: m), reason) else { return }
         remove(m, in: \.maintenance, reason: reason)
+        bumpLocalCorrections(datedKeys(m.vehicleId, m.date, nil))
     }
 
     func save(_ a: MaterialArticle) { upsert(a, in: \.articles) }
@@ -600,8 +647,21 @@ final class TenantStore {
     func delete(_ c: Customer) { remove(c, in: \.customers) }
     func save(_ r: PurposeRule) { upsert(r, in: \.rules) }
     func delete(_ r: PurposeRule) { remove(r, in: \.rules) }
-    func save(_ p: TaxParam) { upsert(p, in: \.taxParams) }
-    func delete(_ p: TaxParam) { remove(p, in: \.taxParams) }
+    /// Steuerparameter: im Servermodus nur im Webfrontend bearbeitbar (der Server lehnt App-Änderungen ab).
+    func save(_ p: TaxParam) {
+        guard canEditTaxParams else { notices.append(Self.taxParamsWebOnly); return }
+        upsert(p, in: \.taxParams)
+    }
+
+    func delete(_ p: TaxParam) {
+        guard canEditTaxParams else { notices.append(Self.taxParamsWebOnly); return }
+        remove(p, in: \.taxParams)
+    }
+
+    /// Steuerparameter in der App änderbar (nur Lokalmodus)
+    var canEditTaxParams: Bool { isLocal && canWrite }
+
+    static let taxParamsWebOnly = "Steuerparameter sind nur im Webfrontend bearbeitbar."
 
     /// Fahrt speichern. Gesperrte Fahrten (abgeschlossener Monat) sind unveränderlich – nur Storno.
     /// In abgeschlossenen Monaten (z. B. Nachtrag) ist eine Begründung nötig. Im Privatmodus werden
@@ -620,14 +680,46 @@ final class TenantStore {
         guard checkReason(requiresReason(for: t), reason) else { return false }
         var e = t.privacySanitized
         if e.status == "locked" { e.status = "confirmed" }   // „locked“ setzt nur der Server
+        var touched = [(e.vehicleId, e.monthKey)]
+        if let old = trips[e.id] { touched.append((old.vehicleId, old.monthKey)) }
+        let closedKeys = touched.filter { isMonthClosed(vehicleId: $0.0, month: $0.1) }
+        if isLocal && !closedKeys.isEmpty {
+            // wie Server: Korrektur/Nachtrag im abgeschlossenen Monat → sofort gesperrt, Namen eingefroren
+            e.status = "locked"
+            e = LogbookRules.frozenNames(e, places: places, customers: customers)
+        }
         upsert(e, in: \.trips, reason: reason)
+        bumpLocalCorrections(closedKeys)
         return true
     }
 
     /// Storno ist auch bei gesperrten Fahrten erlaubt (wird protokolliert) – dann mit Begründung (≥ 10 Zeichen).
     func delete(_ t: Trip, reason: String? = nil) {
         guard checkReason(requiresReason(for: t), reason) else { return }
+        let old = trips[t.id] ?? t
         remove(t, in: \.trips, reason: reason)
+        bumpLocalCorrections([(old.vehicleId, old.monthKey)])
+    }
+
+    // MARK: Lokalmodus – Korrekturen in abgeschlossenen Monaten
+
+    private func datedKeys(_ vehicleId: String, _ date: Date, _ old: (String, Date)?) -> [(String, String)] {
+        var out = [(vehicleId, TripTime.month(date))]
+        if let old { out.append((old.0, TripTime.month(old.1))) }
+        return out
+    }
+
+    /// Lokalmodus: Korrekturzähler der betroffenen abgeschlossenen Monate erhöhen (wie Server).
+    private func bumpLocalCorrections(_ keys: [(String, String)]) {
+        guard isLocal else { return }
+        var seen = Set<String>()
+        for (vehicleId, month) in keys where seen.insert("\(vehicleId)|\(month)").inserted {
+            guard var p = period(vehicleId: vehicleId, month: month) else { continue }
+            p.corrections = (p.corrections ?? 0) + 1
+            p.version += 1
+            periods[p.id] = p
+            journalRecord("trip_period", p.id, version: p.version, action: "update", value: p, reason: nil)
+        }
     }
 
     /// Fahrt bestätigen (Kategorie setzen). `purpose`/`customerId` = nil → unverändert.
@@ -659,6 +751,7 @@ final class TenantStore {
     /// übernimmt den Abschluss und synchronisiert danach (gesperrte Fahrten). Fehler als `APIError`
     /// (409 mit strukturiertem Detail: offene Fahrten, Lücken, unvollständige Fahrten; 422 laufender Monat).
     func closeMonth(vehicleId: String, month: String, force: Bool, reason: String?) async throws -> PeriodCloseResponse {
+        if isLocal { return try closeMonthLocally(vehicleId: vehicleId, month: month, force: force, reason: reason) }
         guard canWrite else { throw APIError(status: 403, message: "Keine Schreibberechtigung für diesen Mandanten.") }
         guard month < TripTime.month(Date()) else {
             throw APIError(status: 422, message: "Nur abgelaufene Monate können abgeschlossen werden.")
@@ -705,6 +798,8 @@ final class TenantStore {
                     var compare = material
                     compare.version = existing.version
                     compare.deleted = existing.deleted
+                    compare.createdBy = existing.createdBy
+                    compare.updatedBy = existing.updatedBy
                     if compare == existing { continue } // unverändert → keine Revision
                 }
                 upsert(material, in: \.materials, reason: reason)
@@ -735,12 +830,12 @@ final class TenantStore {
                            sha256: AttachmentFiles.sha256(imageData), mime: "image/jpeg", size: imageData.count,
                            takenAt: ISODate.string(Date()), note: note?.nilIfEmpty)
         do {
-            try AttachmentFiles.write(imageData, id: a.id)
+            try AttachmentFiles.write(imageData, id: a.id, directory: attachmentDirectory)
         } catch {
             notices.append("Beleg konnte nicht lokal gespeichert werden: \(error.localizedDescription)")
             return nil
         }
-        pendingBlobs.append(a.id)
+        if !isLocal { pendingBlobs.append(a.id) }
         upsert(a, in: \.attachments)
         return attachments[a.id]
     }
@@ -767,6 +862,11 @@ final class TenantStore {
         e.version = (base ?? 0) + 1                 // optimistisch, Server bestätigt
         e.deleted = false
         self[keyPath: kp][e.id] = e
+        if isLocal {
+            journalRecord(T.entityName, e.id, version: e.version, action: base == nil ? "create" : "update",
+                          value: e, reason: Self.cleanReason(reason))
+            return
+        }
         enqueue(PendingOp(entity: T.entityName, entityId: e.id, action: "upsert",
                           baseVersion: base, data: try? e.payload(), clientTs: Self.now(),
                           reason: Self.cleanReason(reason)))
@@ -779,11 +879,32 @@ final class TenantStore {
         e.deleted = true
         e.version += 1
         self[keyPath: kp][e.id] = e
+        if isLocal {
+            journalRecord(T.entityName, e.id, version: e.version, action: "delete", value: e,
+                          reason: Self.cleanReason(reason))
+            return
+        }
         enqueue(PendingOp(entity: T.entityName, entityId: e.id, action: "delete",
                           baseVersion: base, data: nil, clientTs: Self.now(), reason: Self.cleanReason(reason)))
     }
 
+    /// Lokalmodus: Änderung ins Journal (statt Outbox) und speichern.
+    private func journalRecord<T: Encodable>(_ entity: String, _ id: String, version: Int, action: String, value: T,
+                                             reason: String?) {
+        guard let journal = localJournal else { return }
+        let data = (try? JSONNode.from(value, encoder: Self.fileEncoder)) ?? .null
+        journal.append(entity: entity, entityId: id, version: version, action: action, data: data, reason: reason)
+        journalCount = journal.count
+        journalHead = journal.headHash
+        if batchDepth > 0 {
+            batchNeedsSync = true
+            return
+        }
+        persist()
+    }
+
     private func enqueue(_ op: PendingOp) {
+        guard !isLocal else { return }
         outbox.append(op)
         if batchDepth > 0 {
             batchNeedsSync = true
@@ -798,7 +919,7 @@ final class TenantStore {
 
     /// Mehrere Änderungen kurz nacheinander → ein Sync.
     private func scheduleSync() {
-        guard autoSyncEnabled, !syncScheduled else { return }
+        guard autoSyncEnabled, !syncScheduled, !isLocal else { return }
         syncScheduled = true
         Task { [weak self] in
             await Task.yield()
@@ -977,6 +1098,7 @@ final class TenantStore {
     // MARK: Sync
 
     func sync() async {
+        if isLocal { return }   // Lokalmodus: kein Server
         #if DEBUG
         if Demo.isActive { return }
         #endif
@@ -1237,6 +1359,191 @@ final class TenantStore {
         }
     }
 
+    // MARK: Lokalmodus – Journal, Abschluss, Datenaustausch
+
+    /// Lokalmodus beim Laden: Objekte, deren Journal-Stand neuer ist als die Datei (z. B. App beendet vor dem
+    /// verzögerten Speichern oder Datei defekt), aus dem Journal übernehmen.
+    private func recoverFromJournal() {
+        guard let journal = localJournal else { return }
+        journalCount = journal.count
+        journalHead = journal.headHash
+        var restored = 0
+        for e in journal.latest().values.sorted(by: { $0.seq < $1.seq }) where applyJournalState(e) {
+            restored += 1
+        }
+        if restored > 0 {
+            notices.append("\(restored) Eintrag/Einträge aus dem lokalen Journal wiederhergestellt.")
+            persist()
+        }
+    }
+
+    /// Stand aus dem Journal übernehmen, wenn neuer als der aktuelle Datensatz. Rückgabe: übernommen.
+    private func applyJournalState(_ e: JournalEntry) -> Bool {
+        let d = Self.fileDecoder
+        func take<T: SyncEntity>(_ type: T.Type, _ kp: ReferenceWritableKeyPath<TenantStore, [String: T]>) -> Bool {
+            if let current = self[keyPath: kp][e.entityId], current.version >= e.version { return false }
+            guard let value = try? e.data.decode(T.self, decoder: d), value.id == e.entityId else { return false }
+            self[keyPath: kp][e.entityId] = value
+            return true
+        }
+        switch e.entity {
+        case Vehicle.entityName: return take(Vehicle.self, \.vehicles)
+        case OdometerReading.entityName: return take(OdometerReading.self, \.odometer)
+        case FuelEntry.entityName: return take(FuelEntry.self, \.fuel)
+        case Maintenance.entityName: return take(Maintenance.self, \.maintenance)
+        case MaintenanceItem.entityName: return take(MaintenanceItem.self, \.items)
+        case MaintenanceMaterial.entityName: return take(MaintenanceMaterial.self, \.materials)
+        case MaterialArticle.entityName: return take(MaterialArticle.self, \.articles)
+        case Trip.entityName: return take(Trip.self, \.trips)
+        case Place.entityName: return take(Place.self, \.places)
+        case Customer.entityName: return take(Customer.self, \.customers)
+        case PurposeRule.entityName: return take(PurposeRule.self, \.rules)
+        case TaxParam.entityName: return take(TaxParam.self, \.taxParams)
+        case Attachment.entityName: return take(Attachment.self, \.attachments)
+        case "trip_period":
+            if let current = periods[e.entityId], current.version >= e.version { return false }
+            guard let p = try? e.data.decode(TripPeriod.self, decoder: d), p.id == e.entityId else { return false }
+            periods[p.id] = p
+            return true
+        default:
+            return false
+        }
+    }
+
+    /// Lokaler Monatsabschluss: Fahrten sperren (Namen eingefroren) und Abschluss anlegen – je ein Journal-
+    /// Eintrag. Die Prüfungen macht `closeMonthLocally`.
+    func applyLocalClose(lockedTrips: [Trip], period: TripPeriod, reason: String?) {
+        guard isLocal, canWrite else { return }
+        performBatch {
+            for var t in lockedTrips {
+                t.version = (trips[t.id]?.version ?? 0) + 1
+                t.deleted = false
+                trips[t.id] = t
+                journalRecord(Trip.entityName, t.id, version: t.version, action: "update", value: t, reason: nil)
+            }
+            let previous = periods[period.id]
+            for (key, old) in periods where old.vehicleId == period.vehicleId && old.month == period.month
+                && key != period.id {
+                periods.removeValue(forKey: key)
+            }
+            periods[period.id] = period
+            journalRecord("trip_period", period.id, version: period.version,
+                          action: previous == nil ? "create" : "update", value: period,
+                          reason: Self.cleanReason(reason))
+        }
+        flush()
+    }
+
+    /// Lokalmodus: gesamten Bestand ersetzen (Import einer Sicherung bzw. Übernahme eines Server-Stands).
+    /// `journal` = Einträge der Sicherung (bereits geprüft); `nil` → neues Journal mit je einem Eintrag
+    /// „create“ (bzw. „delete“ für stornierte Objekte) pro Objekt, Begründung `reason`.
+    func replaceLocalContent(_ snap: Snapshot, journal entries: [JournalEntry]?, reason: String?) throws {
+        guard isLocal, let journal = localJournal else {
+            throw APIError(status: 409, message: "Nur im Lokalmodus möglich.")
+        }
+        var clean = snap
+        clean.outbox = []
+        clean.pendingBlobs = []
+        clean.rejectedOps = []
+        clean.cursor = 0
+        apply(clean)
+        if let entries {
+            try journal.replaceAll(entries)
+        } else {
+            try journal.replaceAll([])
+            let why = Self.cleanReason(reason)
+            func all<T: SyncEntity>(_ dict: [String: T]) {
+                for e in dict.values.sorted(by: { $0.id < $1.id }) {
+                    journalRecord(T.entityName, e.id, version: e.version, action: e.deleted ? "delete" : "create",
+                                  value: e, reason: why)
+                }
+            }
+            performBatch {
+                all(vehicles); all(customers); all(places); all(rules); all(taxParams); all(articles)
+                all(odometer); all(fuel); all(maintenance); all(items); all(materials); all(trips)
+                for p in periods.values.sorted(by: { $0.id < $1.id }) {
+                    journalRecord("trip_period", p.id, version: p.version, action: "create", value: p, reason: why)
+                }
+                all(attachments)
+            }
+        }
+        journalCount = journal.count
+        journalHead = journal.headHash
+        dirty = true
+        persist()
+        flush()
+    }
+
+    /// Bestand als Snapshot (Datenaustausch, Sicherung, Moduswechsel).
+    func contentSnapshot() -> Snapshot { makeSnapshot() }
+
+    /// Moduswechsel Lokal → Server: nicht stornierte Objekte des lokalen Stands mit gleichen IDs als Upsert-Ops
+    /// in Abhängigkeitsreihenfolge einreihen (Fahrzeuge, Kunden, Orte, Regeln, Materialstamm, km-Stände,
+    /// Tankungen, Wartungen, Checkpunkte, Material, Fahrten, Belege). Gesperrte Fahrten gehen als „confirmed“,
+    /// Belege zusätzlich in `pendingBlobs`. Steuerparameter und Monatsabschlüsse werden nicht übertragen.
+    /// Rückgabe: Anzahl eingereihter Objekte je Entity bzw. übersprungener (`skipped:<entity>`).
+    func enqueueMigration(_ snap: Snapshot, attachmentSource: URL? = nil) -> [String: Int] {
+        guard !isLocal, canWrite else { return [:] }
+        var counts: [String: Int] = [:]
+        let liveVehicles = Set(snap.vehicles.values.filter { !$0.deleted }.map(\.id))
+        let liveFuel = Set(snap.fuel.values.filter { !$0.deleted && liveVehicles.contains($0.vehicleId) }.map(\.id))
+        let liveMaintenance = Set(snap.maintenance.values.filter { !$0.deleted && liveVehicles.contains($0.vehicleId) }
+            .map(\.id))
+        func send<T: SyncEntity>(_ list: [T], _ kp: ReferenceWritableKeyPath<TenantStore, [String: T]>,
+                                 valid: (T) -> Bool = { _ in true }, transform: (T) -> T = { $0 }) {
+            for e in list where !e.deleted {
+                guard valid(e) else {
+                    counts["skipped:" + T.entityName, default: 0] += 1
+                    continue
+                }
+                upsert(transform(e), in: kp)
+                counts[T.entityName, default: 0] += 1
+            }
+        }
+        func byId<T: SyncEntity>(_ d: [String: T]) -> [T] { d.values.sorted { $0.id < $1.id } }
+        performBatch {
+            send(snap.vehicles.values.sorted { ($0.name, $0.id) < ($1.name, $1.id) }, \.vehicles)
+            send(byId(snap.customers ?? [:]), \.customers)
+            send(byId(snap.places ?? [:]), \.places)
+            send((snap.rules ?? [:]).values.sorted { ($0.priority, $0.id) < ($1.priority, $1.id) }, \.rules,
+                 valid: { $0.vehicleId.map { liveVehicles.contains($0) } ?? true })
+            send(byId(snap.articles ?? [:]), \.articles, valid: { $0.vehicleId.map { liveVehicles.contains($0) } ?? true })
+            send(snap.odometer.values.sorted { ($0.date, $0.id) < ($1.date, $1.id) }, \.odometer,
+                 valid: { liveVehicles.contains($0.vehicleId) })
+            send(snap.fuel.values.sorted { ($0.date, $0.id) < ($1.date, $1.id) }, \.fuel,
+                 valid: { liveVehicles.contains($0.vehicleId) })
+            send(snap.maintenance.values.sorted { ($0.date, $0.id) < ($1.date, $1.id) }, \.maintenance,
+                 valid: { liveVehicles.contains($0.vehicleId) })
+            send(snap.items.values.sorted { ($0.maintenanceId, $0.position, $0.id) < ($1.maintenanceId, $1.position, $1.id) },
+                 \.items, valid: { liveMaintenance.contains($0.maintenanceId) })
+            send((snap.materials ?? [:]).values.sorted {
+                ($0.maintenanceId, $0.position, $0.id) < ($1.maintenanceId, $1.position, $1.id)
+            }, \.materials, valid: { liveMaintenance.contains($0.maintenanceId) })
+            send((snap.trips ?? [:]).values.sorted(by: Self.chronological), \.trips,
+                 valid: { liveVehicles.contains($0.vehicleId) },
+                 transform: { t in
+                     var e = t.privacySanitized
+                     if e.status == "locked" { e.status = "confirmed" }
+                     return e
+                 })
+            let attachmentList = byId(snap.attachments ?? [:])
+            send(attachmentList, \.attachments, valid: { a in
+                if let f = a.fuelId { return liveFuel.contains(f) }
+                if let m = a.maintenanceId { return liveMaintenance.contains(m) }
+                return a.vehicleId.map { liveVehicles.contains($0) } ?? false
+            })
+            for a in attachmentList where !a.deleted && attachments[a.id] != nil && !pendingBlobs.contains(a.id) {
+                // Datei in die Ablage des Servermodus kopieren (Upload nach dem Sync der Metadaten)
+                if !AttachmentFiles.exists(a.id, directory: AttachmentFiles.directory),
+                   let data = AttachmentFiles.read(a.id, directory: attachmentSource) ?? AttachmentFiles.read(a.id) {
+                    try? AttachmentFiles.write(data, id: a.id)
+                }
+                if AttachmentFiles.exists(a.id) { pendingBlobs.append(a.id) }
+            }
+        }
+        return counts
+    }
+
     #if DEBUG
     func demoSeed(vehicles v: [Vehicle], odometer o: [OdometerReading], fuel f: [FuelEntry],
                   maintenance m: [Maintenance], items i: [MaintenanceItem], materials mat: [MaintenanceMaterial],
@@ -1248,9 +1555,18 @@ final class TenantStore {
         items = Dictionary(uniqueKeysWithValues: i.map { ($0.id, $0) })
         materials = Dictionary(uniqueKeysWithValues: mat.map { ($0.id, $0) })
         articles = Dictionary(uniqueKeysWithValues: art.map { ($0.id, $0) })
+        if isLocal {
+            rebuildDemoJournal()
+            return
+        }
         outbox = pending.map { PendingOp(entity: FuelEntry.entityName, entityId: $0.id, action: "upsert",
                                          baseVersion: nil, data: nil, clientTs: "") }
         lastSync = Date().addingTimeInterval(-600)
+    }
+
+    /// Demo im Lokalmodus: Journal aus dem gesetzten Bestand neu aufbauen (Integritätsprüfung meldet intakt).
+    private func rebuildDemoJournal() {
+        try? replaceLocalContent(makeSnapshot(), journal: nil, reason: "Demo-Daten")
     }
 
     func demoSeedTrips(trips t: [Trip], places p: [Place], customers c: [Customer], rules r: [PurposeRule],
@@ -1261,12 +1577,14 @@ final class TenantStore {
         rules = Dictionary(uniqueKeysWithValues: r.map { ($0.id, $0) })
         taxParams = Dictionary(uniqueKeysWithValues: tp.map { ($0.id, $0) })
         periods = Dictionary(uniqueKeysWithValues: pe.map { ($0.id, $0) })
+        if isLocal { rebuildDemoJournal() }
     }
 
     /// Demo-Beleg: Datei lokal ablegen, ohne Outbox/Upload.
     func demoAddAttachment(_ a: Attachment, data: Data) {
-        try? AttachmentFiles.write(data, id: a.id)
+        try? AttachmentFiles.write(data, id: a.id, directory: attachmentDirectory)
         attachments[a.id] = a
+        if isLocal { rebuildDemoJournal() }
     }
     #endif
 
@@ -1338,17 +1656,18 @@ final class TenantStore {
         persistTask?.cancel()
         persistTask = nil
         if persistBlocked { reloadIfBlocked() }
+        localJournal?.flush()
         guard dirty, !persistBlocked else { return }
         write(synchronously: true)
     }
 
     /// Kodieren und Schreiben auf der Schreib-Queue; nur wenn der Speicher nicht inzwischen gelöscht wurde.
     private func write(synchronously: Bool) {
-        guard StorageGate.shared.isCurrent(generation) else { return }
+        guard gate.isCurrent(generation) else { return }
         dirty = false
         let report = ErrorSink { [weak self] message in self?.syncError = message }
         StoreFiles.write(makeSnapshot(), to: fileURL, generation: generation, synchronously: synchronously,
-                         report: report)
+                         report: report, gate: gate, excludeFromBackup: !isLocal)
     }
 
     private func load() {
@@ -1371,7 +1690,8 @@ final class TenantStore {
             cursor = 0
             storeLoadIssue = "Die lokale Datei konnte nicht gelesen werden"
                 + (backup.map { " und wurde als „\($0)“ gesichert" } ?? "")
-                + ". Die Daten werden neu vom Server geladen; nicht synchronisierte Änderungen sind in der Sicherung enthalten."
+                + (isLocal ? ". Die Daten werden aus dem lokalen Journal wiederhergestellt."
+                   : ". Die Daten werden neu vom Server geladen; nicht synchronisierte Änderungen sind in der Sicherung enthalten.")
         }
     }
 
@@ -1418,6 +1738,11 @@ final class TenantStore {
     /// Nach dem Entsperren: Datei laden und die zwischenzeitlich (nur im Speicher) erfassten Änderungen
     /// darüberlegen, statt die Datei zu überschreiben.
     func reloadIfBlocked() {
+        if let journal = localJournal, journal.isBlocked {
+            journal.reloadIfBlocked()
+            journalCount = journal.count
+            journalHead = journal.headHash
+        }
         guard persistBlocked else { return }
         guard let data = try? Data(contentsOf: fileURL) else { return }
         let memory = makeSnapshot()
@@ -1438,6 +1763,7 @@ final class TenantStore {
             outbox.append(op)
         }
         for id in memory.pendingBlobs ?? [] where !pendingBlobs.contains(id) { pendingBlobs.append(id) }
+        if isLocal { recoverFromJournal() }   // Lokalmodus: Journal enthält die zwischenzeitlichen Änderungen
         persist()
     }
 
@@ -1484,6 +1810,26 @@ final class TenantStore {
         let dir = StoreFiles.defaultDirectory
         try? StoreFiles.ensureDirectory(dir)
         return dir
+    }
+
+    /// Ablage des Lokalmodus (`Application Support/Lokal`, im Geräte-Backup enthalten).
+    static func localDirectory() -> URL {
+        let dir = StoreFiles.localDirectory
+        try? StoreFiles.ensureDirectory(dir, excludeFromBackup: false)
+        return dir
+    }
+
+    /// Lokale Daten (Lokalmodus) vorhanden?
+    static func hasLocalData(directory: URL? = nil) -> Bool {
+        let dir = directory ?? StoreFiles.localDirectory
+        let fm = FileManager.default
+        return fm.fileExists(atPath: dir.appending(path: "\(LocalIdentity.slug).json").path)
+            || fm.fileExists(atPath: dir.appending(path: "journal.jsonl").path)
+    }
+
+    /// Lokale Daten (Lokalmodus) endgültig löschen; laufende lokale Stores schreiben danach nicht mehr.
+    static func deleteLocalData(directory: URL? = nil) {
+        StoreFiles.deleteLocal(directory: directory)
     }
 
     static func fileURL(for slug: String) -> URL {
@@ -1597,40 +1943,71 @@ enum StoreFiles {
             .appending(path: "Mandanten", directoryHint: .isDirectory)
     }
 
+    /// Lokalmodus: `Application Support/Lokal` (Mandantendatei, Journal, Belege) – im Geräte-Backup enthalten
+    static var localDirectory: URL {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appending(path: "Lokal", directoryHint: .isDirectory)
+    }
+
+    /// Schreiboptionen der Mandanten-/Journaldateien (Dateischutz „completeUnlessOpen“)
+    static var writeOptions: Data.WritingOptions {
+        #if os(iOS)
+        return [.atomic, .completeFileProtectionUnlessOpen]
+        #else
+        return [.atomic]
+        #endif
+    }
+
+    /// Exporte (PDF/CSV/Sicherung): Dateischutz „complete“
+    static var exportOptions: Data.WritingOptions {
+        #if os(iOS)
+        return [.atomic, .completeFileProtection]
+        #else
+        return [.atomic]
+        #endif
+    }
+
     static func write(_ snapshot: TenantStore.Snapshot, to url: URL, generation: Int, synchronously: Bool,
-                      report: ErrorSink) {
+                      report: ErrorSink, gate: StorageGate = .shared, excludeFromBackup: Bool = true) {
         if synchronously {
-            queue.sync { perform(snapshot, url, generation, report) }
+            queue.sync { perform(snapshot, url, generation, report, gate, excludeFromBackup) }
         } else {
-            queue.async { perform(snapshot, url, generation, report) }
+            queue.async { perform(snapshot, url, generation, report, gate, excludeFromBackup) }
         }
     }
 
-    private static func perform(_ snapshot: TenantStore.Snapshot, _ url: URL, _ generation: Int, _ report: ErrorSink) {
-        guard StorageGate.shared.isCurrent(generation) else { return }
+    private static func perform(_ snapshot: TenantStore.Snapshot, _ url: URL, _ generation: Int, _ report: ErrorSink,
+                                _ gate: StorageGate, _ excludeFromBackup: Bool) {
+        guard gate.isCurrent(generation) else { return }
         do {
             let data = try encoder.encode(snapshot)
-            try ensureDirectory(url.deletingLastPathComponent())
-            #if os(iOS)
-            try data.write(to: url, options: [.atomic, .completeFileProtectionUnlessOpen])
-            #else
-            try data.write(to: url, options: [.atomic])
-            #endif
+            try ensureDirectory(url.deletingLastPathComponent(), excludeFromBackup: excludeFromBackup)
+            try data.write(to: url, options: writeOptions)
         } catch {
             report.send("Lokales Speichern fehlgeschlagen: \(error.localizedDescription)")
         }
     }
 
-    /// Verzeichnis anlegen; nicht ins iCloud-/Finder-Backup (enthält u. a. Wohnort-Koordinaten).
-    static func ensureDirectory(_ dir: URL) throws {
+    /// Verzeichnis anlegen. Servermodus: nicht ins iCloud-/Finder-Backup (Kopie des Servers, enthält u. a.
+    /// Wohnort-Koordinaten). Lokalmodus: im Backup (einzige Kopie der Daten → Datenverlust vermeiden).
+    static func ensureDirectory(_ dir: URL, excludeFromBackup: Bool = true) throws {
         let fm = FileManager.default
         if !fm.fileExists(atPath: dir.path) {
             try fm.createDirectory(at: dir, withIntermediateDirectories: true)
         }
         var target = dir
         var values = URLResourceValues()
-        values.isExcludedFromBackup = true
+        values.isExcludedFromBackup = excludeFromBackup
         try? target.setResourceValues(values)
+    }
+
+    /// Lokale Daten löschen; erhöht die lokale Generation (laufende lokale Stores schreiben nicht mehr).
+    static func deleteLocal(directory: URL? = nil) {
+        let dir = directory ?? localDirectory
+        queue.sync {
+            StorageGate.local.bump()
+            try? FileManager.default.removeItem(at: dir)
+        }
     }
 
     /// Alle Mandantendateien löschen; erhöht die Generation (laufende Stores schreiben nicht mehr).
@@ -1645,7 +2022,10 @@ enum StoreFiles {
 
 /// Generation des lokalen Speichers: `deleteAll()` erhöht sie, ältere Stores schreiben danach nicht mehr.
 final class StorageGate: @unchecked Sendable {
+    /// Servermodus (Mandantendateien)
     static let shared = StorageGate()
+    /// Lokalmodus (eigene Generation: Abmelden vom Server löscht nie lokale Daten)
+    static let local = StorageGate()
     private let lock = NSLock()
     private var value = 0
 

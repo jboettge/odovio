@@ -4,10 +4,26 @@ import SwiftUI
 // MARK: Server-Prüfung
 
 enum TripServer {
+    /// Monatsprüfung: Servermodus über den Server, Lokalmodus auf dem Gerät (`TenantStore.monthCheck`).
     @MainActor
     static func check(_ settings: AppSettings, _ store: TenantStore, vehicleId: String, month: String) async throws -> TripCheck {
-        try await settings.api.get("api/t/\(store.tenant.slug)/vehicles/\(vehicleId)/trips/check",
-                                   query: [URLQueryItem(name: "month", value: month)])
+        if store.isLocal {
+            return store.monthCheck(vehicleId: vehicleId, month: month).tripCheck
+        }
+        return try await settings.api.get("api/t/\(store.tenant.slug)/vehicles/\(vehicleId)/trips/check",
+                                          query: [URLQueryItem(name: "month", value: month)])
+    }
+
+    /// Fahrtenbuch-PDF eines Monats (lokal erzeugt bzw. vom Server).
+    @MainActor
+    static func logbook(_ settings: AppSettings, _ store: TenantStore, vehicle: Vehicle, month: String) async throws -> URL {
+        if store.isLocal {
+            return try LocalReports.logbookPDF(store: store, vehicle: vehicle, month: month)
+        }
+        await store.sync()
+        return try await download(settings, store, vehicleId: vehicle.id, file: "logbook.pdf",
+                                  query: [URLQueryItem(name: "month", value: month)],
+                                  name: "Fahrzeugbuch_Fahrtenbuch_\(vehicle.name)_\(month).pdf")
     }
 
     @MainActor
@@ -113,11 +129,11 @@ struct GapListView: View {
                     Task { await runCheck() }
                 } label: {
                     HStack {
-                        Label("Mit Server prüfen", systemImage: "checkmark.shield")
+                        Label(checkTitle, systemImage: "checkmark.shield")
                         if loading { Spacer(); ProgressView() }
                     }
                 }
-                .disabled(loading || AppMode.isDemo)
+                .disabled(loading || (AppMode.isDemo && !store.isLocal))
                 if let checkError {
                     Label(checkError, systemImage: "exclamationmark.triangle")
                         .font(.footnote).foregroundStyle(Color.warningText)
@@ -126,10 +142,9 @@ struct GapListView: View {
                     serverResult(check)
                 }
             } header: {
-                Text("Server-Prüfung")
+                Text(checkHeader)
             } footer: {
-                Text("Prüft zusätzlich fehlende Kilometerstände, Abweichungen GPS/Route und den Abgleich mit "
-                     + "Tankvorgängen und Kilometerständen (nur online).")
+                Text(checkFooter)
             }
         }
         .navigationTitle("Lücken")
@@ -137,6 +152,17 @@ struct GapListView: View {
             TripFormView(vehicle: vehicle, trip: target.value)
         }
         .refreshable { await store.sync() }
+    }
+
+    private var checkTitle: String { store.isLocal ? "Monat prüfen" : "Mit Server prüfen" }
+    private var checkHeader: String { store.isLocal ? "Prüfung" : "Server-Prüfung" }
+
+    private var checkFooter: String {
+        store.isLocal
+            ? "Prüft zusätzlich fehlende Kilometerstände, Abweichungen GPS/Route und den Abgleich mit "
+                + "Tankvorgängen und Kilometerständen – auf diesem iPhone."
+            : "Prüft zusätzlich fehlende Kilometerstände, Abweichungen GPS/Route und den Abgleich mit "
+                + "Tankvorgängen und Kilometerständen (nur online)."
     }
 
     private func gapRow(_ g: TripGap) -> some View {
@@ -229,7 +255,7 @@ struct GapListView: View {
     private func runCheck() async {
         loading = true
         defer { loading = false }
-        await store.sync()
+        if !store.isLocal { await store.sync() }
         do {
             check = try await TripServer.check(settings, store, vehicleId: vehicle.id, month: month)
             checkError = nil
@@ -292,7 +318,10 @@ struct MonthChecklist {
     var estimated: [Trip]
     var pendingOps: Int
     var odometerOk: Bool?
+    /// Blockierende Abweichungen (`blocking` fehlt bei älteren Servern → blockierend)
     var mismatches: [TripMismatch]
+    /// Nicht blockierende Hinweise
+    var hints: [TripMismatch]
 
     init(trips: [Trip], gaps: [TripGap], pendingOps: Int, check: TripCheck?) {
         self.trips = trips
@@ -306,7 +335,9 @@ struct MonthChecklist {
         self.estimated = trips.filter(\.kmEstimated)
         self.pendingOps = pendingOps
         self.odometerOk = check?.odometerCheck?.ok
-        self.mismatches = check?.mismatches ?? []
+        let all = check?.mismatches ?? []
+        self.mismatches = all.filter { $0.blocking ?? true }
+        self.hints = all.filter { !($0.blocking ?? true) }
     }
 
     var allOk: Bool {
@@ -324,7 +355,7 @@ struct MonthChecklist {
         if !estimated.isEmpty { list.append("\(estimated.count) Fahrt(en) mit geschätztem Kilometerstand") }
         if pendingOps > 0 { list.append("\(pendingOps) Änderung(en) nicht synchronisiert") }
         if odometerOk == false { list.append("Abweichung zu Tankvorgängen/Kilometerständen") }
-        if !mismatches.isEmpty { list.append("\(mismatches.count) Abweichung(en) laut Server") }
+        if !mismatches.isEmpty { list.append("\(mismatches.count) Abweichung(en) laut Prüfung") }
         return list
     }
 }
@@ -495,7 +526,8 @@ struct MonthCloseView: View {
     var body: some View {
         let trips = store.trips(for: vehicle.id, month: month)
         let gaps = store.gaps(for: vehicle.id, month: month)
-        let checklist = MonthChecklist(trips: trips, gaps: gaps, pendingOps: store.outbox.count, check: check)
+        let pendingOps: Int = store.isLocal ? 0 : store.outbox.count
+        let checklist = MonthChecklist(trips: trips, gaps: gaps, pendingOps: pendingOps, check: check)
         Form {
             Section {
                 Picker("Monat", selection: $month) {
@@ -538,7 +570,7 @@ struct MonthCloseView: View {
             fileURL = nil
             check = nil
             checkError = nil
-            if !AppMode.isDemo && period == nil { await loadCheck() }
+            if (store.isLocal || !AppMode.isDemo) && period == nil { await loadCheck() }
         }
         .sheet(item: $form) { target in
             TripFormView(vehicle: vehicle, trip: target.value)
@@ -571,26 +603,33 @@ struct MonthCloseView: View {
             CheckRow(title: "Keine Lücke in der Kilometerkette", ok: c.gaps.isEmpty,
                      detail: c.gaps.isEmpty ? nil : GapText.summary(c.gaps))
             CheckRow(title: "Abgleich mit Tankvorgängen/Kilometerständen", ok: c.odometerOk, detail: odometerDetail)
-            CheckRow(title: "Alles synchronisiert", ok: c.pendingOps == 0,
-                     detail: c.pendingOps == 0 ? nil : "\(c.pendingOps) Änderung(en) ausstehend")
-            if c.pendingOps > 0 {
-                Button("Jetzt synchronisieren") { Task { await store.sync() } }
-                    .disabled(store.isSyncing)
+            if !store.isLocal {
+                CheckRow(title: "Alles synchronisiert", ok: c.pendingOps == 0,
+                         detail: c.pendingOps == 0 ? nil : "\(c.pendingOps) Änderung(en) ausstehend")
+                if c.pendingOps > 0 {
+                    Button("Jetzt synchronisieren") { Task { await store.sync() } }
+                        .disabled(store.isSyncing)
+                }
             }
             ForEach(c.mismatches) { m in
                 Label(m.reason ?? "Abweichung", systemImage: "exclamationmark.triangle")
                     .font(.footnote)
                     .foregroundStyle(Color.warningText)
             }
+            ForEach(c.hints) { m in
+                Label(m.reason ?? "Hinweis", systemImage: "info.circle")
+                    .font(.footnote)
+                    .foregroundStyle(Color.neutralText)
+            }
             Button {
                 Task { await loadCheck() }
             } label: {
                 HStack {
-                    Label("Server-Prüfung aktualisieren", systemImage: "arrow.clockwise")
+                    Label(refreshTitle, systemImage: "arrow.clockwise")
                     if loadingCheck { Spacer(); ProgressView() }
                 }
             }
-            .disabled(loadingCheck || AppMode.isDemo)
+            .disabled(loadingCheck || (AppMode.isDemo && !store.isLocal))
             if let checkError {
                 Label(checkError, systemImage: "exclamationmark.triangle")
                     .font(.footnote).foregroundStyle(Color.warningText)
@@ -621,6 +660,7 @@ struct MonthCloseView: View {
 
     private var odometerDetail: String {
         if let o = check?.odometerCheck { return OdometerText.describe(o) }
+        if store.isLocal { return "Prüfung ausstehend" }
         return AppMode.isDemo ? "Server-Prüfung im Demo-Modus nicht verfügbar" : "Server-Prüfung ausstehend (online)"
     }
 
@@ -666,9 +706,17 @@ struct MonthCloseView: View {
         } header: {
             Text("Status")
         } footer: {
-            Text("Fahrten dieses Monats sind gesperrt. Korrekturen nur per Storno bzw. neuer Fahrt mit Begründung; "
-                 + "der Abschluss ist mit einem Integritätsanker gesichert.")
+            Text(closedFooter)
         }
+    }
+
+    private var refreshTitle: String { store.isLocal ? "Prüfung aktualisieren" : "Server-Prüfung aktualisieren" }
+
+    private var closedFooter: String {
+        let base = "Fahrten dieses Monats sind gesperrt. Korrekturen nur per Storno bzw. neuer Fahrt mit Begründung; "
+        return store.isLocal
+            ? base + "der Abschluss ist im lokalen Änderungsprotokoll vermerkt (ohne signierten Server-Anker)."
+            : base + "der Abschluss ist mit einem Integritätsanker gesichert."
     }
 
     // MARK: Abschliessen
@@ -739,7 +787,7 @@ struct MonthCloseView: View {
                     if loadingPDF { Spacer(); ProgressView() }
                 }
             }
-            .disabled(loadingPDF || AppMode.isDemo)
+            .disabled(loadingPDF || (AppMode.isDemo && !store.isLocal))
             if let fileURL {
                 Button { previewURL = fileURL } label: { Label("Vorschau", systemImage: "eye") }
                 ShareLink(item: fileURL) { Label("Teilen / Sichern", systemImage: "square.and.arrow.up") }
@@ -747,7 +795,7 @@ struct MonthCloseView: View {
         } header: {
             Text("Fahrtenbuch")
         } footer: {
-            if !store.outbox.isEmpty {
+            if !store.isLocal && !store.outbox.isEmpty {
                 Text("\(store.outbox.count) Änderung(en) noch nicht synchronisiert – sie fehlen im PDF.")
                     .foregroundStyle(Color.warningText)
             }
@@ -757,7 +805,7 @@ struct MonthCloseView: View {
     // MARK: Server
 
     private func loadCheck() async {
-        guard !AppMode.isDemo else { return }
+        guard store.isLocal || !AppMode.isDemo else { return }
         loadingCheck = true
         defer { loadingCheck = false }
         do {
@@ -772,7 +820,7 @@ struct MonthCloseView: View {
         guard !AppMode.isDemo, isPast else { return }
         closing = true
         defer { closing = false }
-        await store.sync()   // ausstehende Fahrten zuerst übertragen
+        if !store.isLocal { await store.sync() }   // ausstehende Fahrten zuerst übertragen
         let reason: String? = force ? forceReason.trimmed : nil
         do {
             let response = try await store.closeMonth(vehicleId: vehicle.id, month: month, force: force,
@@ -782,7 +830,7 @@ struct MonthCloseView: View {
             forceMode = false
             forceReason = ""
             resultText = Self.summaryText(response)
-            await store.sync()   // gesperrte Fahrten holen
+            if !store.isLocal { await store.sync() }   // gesperrte Fahrten holen
         } catch let e as APIError where e.status == 409 {
             conflict = e.userMessage
             forceMode = true
@@ -803,12 +851,8 @@ struct MonthCloseView: View {
     private func loadPDF() async {
         loadingPDF = true
         defer { loadingPDF = false }
-        await store.sync()
         do {
-            let url = try await TripServer.download(
-                settings, store, vehicleId: vehicle.id, file: "logbook.pdf",
-                query: [URLQueryItem(name: "month", value: month)],
-                name: "Fahrzeugbuch_Fahrtenbuch_\(vehicle.name)_\(month).pdf")
+            let url = try await TripServer.logbook(settings, store, vehicle: vehicle, month: month)
             fileURL = url
             previewURL = url
         } catch {
@@ -930,7 +974,7 @@ struct TripReportsView: View {
                 if busy == key { Spacer(); ProgressView() }
             }
         }
-        .disabled(busy != nil || AppMode.isDemo)
+        .disabled(busy != nil || (AppMode.isDemo && !store.isLocal))
     }
 
     @ViewBuilder
@@ -961,7 +1005,9 @@ struct TripReportsView: View {
         } header: {
             Text("Kilometer nach Kategorie")
         } footer: {
-            if r.isLocal {
+            if store.isLocal {
+                Text("Auf diesem iPhone aus deinen Fahrten und Steuerparametern berechnet.")
+            } else if r.isLocal {
                 Text("Lokal aus den Fahrten auf diesem Gerät berechnet – Steuerposten nur online.")
             }
         }
@@ -1092,6 +1138,11 @@ struct TripReportsView: View {
     }
 
     private func loadReport() async {
+        if store.isLocal {
+            report = LocalReports.yearReport(store: store, vehicle: vehicle, year: year)
+            reportError = nil
+            return
+        }
         guard !AppMode.isDemo else {
             report = localReport
             return
@@ -1111,12 +1162,8 @@ struct TripReportsView: View {
     }
 
     private func loadLogbook() async {
-        await store.sync()
         do {
-            let url = try await TripServer.download(
-                settings, store, vehicleId: vehicle.id, file: "logbook.pdf",
-                query: [URLQueryItem(name: "month", value: month)],
-                name: "Fahrzeugbuch_Fahrtenbuch_\(vehicle.name)_\(month).pdf")
+            let url = try await TripServer.logbook(settings, store, vehicle: vehicle, month: month)
             logbookURL = url
             previewURL = url
         } catch {
@@ -1125,6 +1172,14 @@ struct TripReportsView: View {
     }
 
     private func loadCSV() async {
+        if store.isLocal {
+            do {
+                csvURL = try LocalReports.tripsCSV(store: store, vehicle: vehicle, from: from, to: to)
+            } catch {
+                self.error = "CSV nicht erstellt: \(error.userMessage)"
+            }
+            return
+        }
         await store.sync()
         let f = APIClient.dayFormatter
         do {
@@ -1139,6 +1194,16 @@ struct TripReportsView: View {
     }
 
     private func loadYearPDF() async {
+        if store.isLocal {
+            do {
+                let url = try LocalReports.yearReportPDF(store: store, vehicle: vehicle, year: year)
+                yearPDF = url
+                previewURL = url
+            } catch {
+                self.error = "Jahresbericht-PDF nicht erstellt: \(error.userMessage)"
+            }
+            return
+        }
         await store.sync()
         do {
             let url = try await TripServer.download(

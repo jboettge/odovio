@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// Antwort von `GET …/audit/verify` (Kette, Datenstand, Anker, Belege).
 struct IntegrityReport: Decodable {
@@ -37,6 +38,17 @@ struct SettingsView: View {
     @State private var confirmServerChange = false
     @State private var showScanner = false
     @State private var showSetup = false
+    // Betriebsart
+    @State private var confirmResetMode = false
+    @State private var showSwitchLocal = false
+    @State private var showMigration = false
+    // Lokalmodus: Sicherung und Integrität
+    @State private var backupURL: URL?
+    @State private var backupBusy = false
+    @State private var backupMessage: String?
+    @State private var showImporter = false
+    @State private var importURL: URL?
+    @State private var localIntegrity: LocalIntegrity?
 
     struct ServerTestResult {
         var ok: Bool
@@ -52,14 +64,24 @@ struct SettingsView: View {
 
     var body: some View {
         Form {
-            serverSection
+            modeSection
 
-            if settings.auth.isLoggedIn {
+            if !settings.isLocal {
+                serverSection
+            }
+
+            if settings.isLocal, let store = settings.store {
+                catalogSection(store)
+                tripSection
+                geocodingSection
+                backupSection(store)
+                localIntegritySection(store)
+            } else if settings.auth.isLoggedIn {
                 Section("Konto") {
                     LabeledContent("Angemeldet als", value: settings.auth.userName ?? "–")
                     ForEach(settings.tenants) { t in
                         LabeledContent {
-                            Text(t.canWrite ? "Bearbeiten" : "Nur lesen")
+                            RoleTag(role: t.role)
                         } label: {
                             Label(t.slug, systemImage: "book.closed")
                         }
@@ -68,45 +90,9 @@ struct SettingsView: View {
                 }
 
                 if let store = settings.store {
-                    Section {
-                        NavigationLink {
-                            MaterialCatalogView()
-                                .environment(store)
-                        } label: {
-                            Label("Materialstamm (\(store.articles(for: nil).count))", systemImage: "shippingbox")
-                        }
-                        NavigationLink {
-                            PlacesView()
-                                .environment(store)
-                        } label: {
-                            Label("Orte (\(store.placeList.count))", systemImage: "mappin.and.ellipse")
-                        }
-                        NavigationLink {
-                            CustomersView()
-                                .environment(store)
-                        } label: {
-                            Label("Kunden (\(store.customerList.count))", systemImage: "person.2")
-                        }
-                        NavigationLink {
-                            RulesView()
-                                .environment(store)
-                        } label: {
-                            Label("Regeln (\(store.allRules.count))", systemImage: "wand.and.stars")
-                        }
-                        NavigationLink {
-                            TaxParamsView()
-                                .environment(store)
-                        } label: {
-                            Label("Steuerparameter (\(store.taxParamList.count))", systemImage: "percent")
-                        }
-                    } header: {
-                        Text("Stammdaten")
-                    } footer: {
-                        Text(catalogFooter(store))
-                    }
-
+                    sharedSection(store)
+                    catalogSection(store)
                     tripSection
-
                     dataSection(store)
                 }
             }
@@ -124,7 +110,11 @@ struct SettingsView: View {
         .navigationTitle("Einstellungen")
         .toolbar {
             ToolbarItem(placement: .confirmationAction) {
-                Button(settings.isConfigured ? "Fertig" : "Weiter") {
+                Button(doneTitle) {
+                    if settings.isLocal {
+                        dismiss()
+                        return
+                    }
                     let new = url.trimmed
                     if new != settings.serverURL && !settings.serverURL.isEmpty {
                         confirmServerChange = true
@@ -133,41 +123,307 @@ struct SettingsView: View {
                         dismiss()
                     }
                 }
-                .disabled(parsedURL == nil)
+                .disabled(!settings.isLocal && parsedURL == nil)
             }
         }
-        .confirmationDialog("Server wechseln?", isPresented: $confirmServerChange, titleVisibility: .visible) {
-            Button("Wechseln, abmelden und lokale Daten löschen", role: .destructive) {
-                let target = url.trimmed
-                Task {
-                    await settings.changeServer(to: target)
-                    dismiss()
-                }
-            }
-        } message: {
-            Text("Du wirst abgemeldet (Anmeldung wird widerrufen) und der Anmeldeserver wird neu ermittelt. "
-                 + pendingWarning)
-        }
-        .confirmationDialog("Abmelden?", isPresented: $confirmLogout, titleVisibility: .visible) {
-            Button("Abmelden und lokale Daten löschen", role: .destructive) {
-                Task {
-                    await settings.logout()   // inkl. Tracks löschen (AppSettings.resetLocalData)
-                    dismiss()
-                }
-            }
-        } message: {
-            Text(pendingWarning)
-        }
+        .modifier(SettingsDialogs(settings: settings, url: url, pendingWarning: pendingWarning,
+                                  confirmServerChange: $confirmServerChange, confirmLogout: $confirmLogout,
+                                  confirmResetMode: $confirmResetMode, dismiss: { dismiss() }))
         .sheet(isPresented: $showScanner) {
             ServerQRScannerView { server in
                 url = server
                 testResult = nil
             }
         }
+        .sheet(isPresented: $showSwitchLocal) {
+            SwitchToLocalView()
+        }
+        .sheet(isPresented: $showMigration) {
+            if let store = settings.store {
+                MigrationWizardView().environment(store)
+            }
+        }
+        .fileImporter(isPresented: $showImporter, allowedContentTypes: [.data]) { result in
+            switch result {
+            case .success(let picked): importURL = picked
+            case .failure(let e): backupMessage = "Datei nicht geöffnet: \(e.localizedDescription)"
+            }
+        }
+        .confirmationDialog("Sicherung importieren?", isPresented: Binding(
+            get: { importURL != nil }, set: { if !$0 { importURL = nil } }),
+                            titleVisibility: .visible, presenting: importURL) { picked in
+            Button("Importieren und lokale Daten ersetzen", role: .destructive) {
+                Task { await importBackup(picked) }
+            }
+        } message: { _ in
+            Text("Die Sicherung ersetzt alle Fahrzeuge, Fahrten, Tankvorgänge, Wartungen und Stammdaten auf diesem "
+                 + "iPhone. Exportiere vorher eine aktuelle Sicherung, wenn du den heutigen Stand behalten möchtest.")
+        }
         .navigationDestination(isPresented: $showSetup) {
             TripSetupView(forAutomation: true)
         }
         .onAppear { if url.isEmpty { url = settings.serverURL } }
+    }
+
+    private var doneTitle: String {
+        (settings.isConfigured || settings.isLocal) ? "Fertig" : "Weiter"
+    }
+
+    // MARK: Betriebsart
+
+    private var modeSection: some View {
+        Section {
+            LabeledContent {
+                Text(ModeText.title(settings.isLocal))
+            } label: {
+                Label("Aktuell", systemImage: settings.isLocal ? "iphone" : "server.rack")
+            }
+            Text(ModeText.explanation(settings.isLocal))
+                .font(.footnote)
+                .foregroundStyle(Color.neutralText)
+                .fixedSize(horizontal: false, vertical: true)
+            if settings.isLocal {
+                Button {
+                    showMigration = true
+                } label: {
+                    Label("Auf Server übertragen …", systemImage: "icloud.and.arrow.up")
+                }
+                .disabled(settings.store == nil)
+            } else if settings.store != nil {
+                Button {
+                    showSwitchLocal = true
+                } label: {
+                    Label("Nur noch lokal verwenden …", systemImage: "iphone")
+                }
+            }
+            NavigationLink {
+                ScrollView {
+                    ModeComparisonTable().padding()
+                }
+                .navigationTitle("Betriebsarten")
+                .navigationBarTitleDisplayMode(.inline)
+            } label: {
+                Label("Betriebsarten vergleichen", systemImage: "tablecells")
+            }
+            Button(role: .destructive) {
+                confirmResetMode = true
+            } label: {
+                Label("Betriebsart neu wählen …", systemImage: "arrow.uturn.backward")
+            }
+            .disabled(AppMode.isDemo)
+        } header: {
+            Text("Betriebsart")
+        }
+    }
+
+    // MARK: Gemeinsam (Servermodus)
+
+    @ViewBuilder
+    private func sharedSection(_ store: TenantStore) -> some View {
+        let caps = settings.capabilities
+        Section {
+            LabeledContent("Name", value: store.tenant.slug)
+            LabeledContent("Deine Rolle") { RoleTag(role: store.tenant.role) }
+            if caps.members {
+                NavigationLink {
+                    MembersView()
+                        .environment(store)
+                } label: {
+                    Label("Mitglieder", systemImage: "person.2")
+                }
+            }
+            if caps.activity {
+                NavigationLink {
+                    ActivityView()
+                        .environment(store)
+                } label: {
+                    Label("Aktivität", systemImage: "clock.arrow.circlepath")
+                }
+            }
+        } header: {
+            Text("Fahrzeugbuch")
+        } footer: {
+            Text("Alle Mitglieder bewirtschaften dieselben Fahrzeuge. Mitglieder und Rollen werden im Webfrontend "
+                 + "deines Servers verwaltet.")
+        }
+    }
+
+    // MARK: Stammdaten
+
+    private func catalogSection(_ store: TenantStore) -> some View {
+        Section {
+            NavigationLink {
+                MaterialCatalogView()
+                    .environment(store)
+            } label: {
+                Label("Materialstamm (\(store.articles(for: nil).count))", systemImage: "shippingbox")
+            }
+            NavigationLink {
+                PlacesView()
+                    .environment(store)
+            } label: {
+                Label("Orte (\(store.placeList.count))", systemImage: "mappin.and.ellipse")
+            }
+            NavigationLink {
+                CustomersView()
+                    .environment(store)
+            } label: {
+                Label("Kunden (\(store.customerList.count))", systemImage: "person.2")
+            }
+            NavigationLink {
+                RulesView()
+                    .environment(store)
+            } label: {
+                Label("Regeln (\(store.allRules.count))", systemImage: "wand.and.stars")
+            }
+            NavigationLink {
+                TaxParamsView()
+                    .environment(store)
+            } label: {
+                Label("Steuerparameter (\(store.taxParamList.count))", systemImage: "percent")
+            }
+        } header: {
+            Text("Stammdaten")
+        } footer: {
+            Text(catalogFooter(store))
+        }
+    }
+
+    // MARK: Lokalmodus
+
+    private var geocodingSection: some View {
+        Section {
+            Toggle(isOn: Binding(get: { settings.useAppleGeocoding }, set: { settings.useAppleGeocoding = $0 })) {
+                Label("Adressen über Apple ermitteln", systemImage: "map")
+            }
+        } header: {
+            Text("Adressen")
+        } footer: {
+            Text("Datenschutz: Für Start und Ziel einer Fahrt werden die Koordinaten an den Kartendienst von Apple "
+                 + "gesendet, um die Adresse zu ermitteln. Ausgeschaltet verlassen keine Standortdaten das iPhone – "
+                 + "Fahrten zeigen dann nur deine gespeicherten Orte.")
+        }
+    }
+
+    private func backupSection(_ store: TenantStore) -> some View {
+        Section {
+            LabeledContent("Speicherort", value: ModeText.localTitle)
+            Button {
+                Task { await exportBackup(store) }
+            } label: {
+                HStack {
+                    Label("Datensicherung exportieren", systemImage: "square.and.arrow.up.on.square")
+                    if backupBusy { Spacer(); ProgressView() }
+                }
+            }
+            .disabled(backupBusy)
+            if let backupURL {
+                ShareLink(item: backupURL) {
+                    Label("Sicherung teilen / in Dateien sichern", systemImage: "square.and.arrow.up")
+                }
+            }
+            Button {
+                showImporter = true
+            } label: {
+                Label("Sicherung importieren …", systemImage: "square.and.arrow.down")
+            }
+            .disabled(backupBusy || AppMode.isDemo)
+            if let backupMessage {
+                Text(backupMessage)
+                    .font(.footnote)
+                    .foregroundStyle(Color.neutralText)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        } header: {
+            Text("Datensicherung")
+        } footer: {
+            Text("Die Sicherung enthält alle lokalen Daten inkl. Änderungsprotokoll und Belegen. Bewahre sie z. B. in "
+                 + "der Dateien-App (iCloud Drive) auf. Zusätzlich sichert das iCloud-Backup des iPhones die Daten.")
+        }
+    }
+
+    private func localIntegritySection(_ store: TenantStore) -> some View {
+        Section {
+            if let issue = store.storeLoadIssue {
+                Label(issue, systemImage: "externaldrive.badge.exclamationmark")
+                    .font(.footnote)
+                    .foregroundStyle(Color.warningText)
+            }
+            Button {
+                Task { await verifyLocal(store) }
+            } label: {
+                HStack {
+                    Label("Integrität prüfen", systemImage: "checkmark.shield")
+                    if verifying { Spacer(); ProgressView() }
+                }
+            }
+            .disabled(verifying)
+            if let r = localIntegrity {
+                localIntegrityRows(r)
+            }
+        } header: {
+            Text("Änderungsprotokoll")
+        } footer: {
+            Text("Jede Änderung wird auf diesem iPhone in einer Hash-Kette protokolliert. Lokal gibt es keine "
+                 + "signierten Server-Anker: Die Kette zeigt versehentliche Beschädigungen, schützt aber nicht vor "
+                 + "einer vollständigen Neuberechnung auf dem Gerät.")
+        }
+    }
+
+    @ViewBuilder
+    private func localIntegrityRows(_ r: LocalIntegrity) -> some View {
+        let count = Present.count(r.count)
+        if r.ok {
+            CheckRow(title: "Lokales Protokoll intakt · \(count) Einträge", ok: true)
+        } else {
+            let detail: String? = Present.int(r.brokenAt).map { "Unterbrochen ab Eintrag \($0)" }
+            CheckRow(title: "Lokales Protokoll beschädigt", ok: false, detail: detail)
+        }
+        CheckRow(title: "Signierte Server-Anker", ok: nil, detail: "Lokal nicht vorhanden")
+        ForEach(Array(Present.lines(r.problems).prefix(10).enumerated()), id: \.offset) { item in
+            Label(item.element, systemImage: "exclamationmark.triangle")
+                .font(.footnote)
+                .foregroundStyle(Color.warningText)
+        }
+        if let head = Present.text(r.headHash) {
+            DisclosureGroup("Technische Details") {
+                LabeledContent("Letzter Hash") {
+                    Text(head).font(.caption.monospaced()).textSelection(.enabled)
+                }
+            }
+            .font(.footnote)
+        }
+    }
+
+    private func exportBackup(_ store: TenantStore) async {
+        backupBusy = true
+        defer { backupBusy = false }
+        do {
+            backupURL = try LocalBackup.exportBackup(store: store)
+            backupMessage = nil
+        } catch {
+            backupMessage = "Sicherung nicht erstellt: \(error.userMessage)"
+        }
+    }
+
+    private func importBackup(_ picked: URL) async {
+        backupBusy = true
+        defer { backupBusy = false }
+        let access = picked.startAccessingSecurityScopedResource()
+        defer { if access { picked.stopAccessingSecurityScopedResource() } }
+        do {
+            let summary = try settings.importBackup(from: picked)
+            localIntegrity = nil
+            backupMessage = BackupText.imported(summary)
+        } catch {
+            backupMessage = "Import fehlgeschlagen: \(error.userMessage)"
+        }
+    }
+
+    private func verifyLocal(_ store: TenantStore) async {
+        verifying = true
+        defer { verifying = false }
+        localIntegrity = store.verifyLocalJournal()
     }
 
     // MARK: Server
@@ -218,10 +474,10 @@ struct SettingsView: View {
     }
 
     private func catalogFooter(_ store: TenantStore) -> String {
-        store.canWrite
-            ? "Artikel für die Materialerfassung bei Wartungen; Orte, Kunden, Regeln und Steuerparameter "
-                + "für das Fahrtenbuch."
-            : "Nur ansehen – dein Zugang für dieses Fahrzeugbuch ist schreibgeschützt."
+        if !store.canWrite { return "Nur ansehen – dein Zugang für dieses Fahrzeugbuch ist schreibgeschützt." }
+        let base = "Artikel für die Materialerfassung bei Wartungen; Orte, Kunden, Regeln und Steuerparameter "
+            + "für das Fahrtenbuch."
+        return store.isLocal ? base : base + " Steuerparameter bearbeitest du im Webfrontend deines Servers."
     }
 
     // MARK: Fahrtenbuch
@@ -273,7 +529,6 @@ struct SettingsView: View {
 
     private func dataSection(_ store: TenantStore) -> some View {
         Section {
-            LabeledContent("Fahrzeugbuch", value: store.tenant.slug)
             LabeledContent("Ausstehend", value: "\(store.outbox.count) Änderung(en)")
             NavigationLink {
                 RejectedOpsView()
@@ -398,5 +653,62 @@ struct SettingsView: View {
             integrity = nil
             integrityError = "Prüfung nicht möglich: \(error.userMessage)"
         }
+    }
+}
+
+/// Rückfragen der Einstellungen (Serverwechsel, Abmelden, Betriebsart neu wählen).
+private struct SettingsDialogs: ViewModifier {
+    let settings: AppSettings
+    let url: String
+    let pendingWarning: String
+    @Binding var confirmServerChange: Bool
+    @Binding var confirmLogout: Bool
+    @Binding var confirmResetMode: Bool
+    let dismiss: () -> Void
+
+    private var resetModeText: String {
+        var text = "Die App zeigt wieder die Auswahl «Nur auf diesem iPhone» oder «Mit Server»."
+        if settings.isLocal {
+            text += " Exportiere vorher eine Datensicherung, damit deine lokalen Daten sicher erhalten bleiben."
+        } else {
+            let n = TenantStore.pendingCountOnDisk()
+            if n > 0 { text += " Achtung: \(n) Änderung(en) sind noch nicht synchronisiert." }
+        }
+        return text
+    }
+
+    func body(content: Content) -> some View {
+        content
+            .confirmationDialog("Server wechseln?", isPresented: $confirmServerChange, titleVisibility: .visible) {
+                Button("Wechseln, abmelden und lokale Daten löschen", role: .destructive) {
+                    let target = url.trimmed
+                    Task {
+                        await settings.changeServer(to: target)
+                        dismiss()
+                    }
+                }
+            } message: {
+                Text("Du wirst abgemeldet (Anmeldung wird widerrufen) und der Anmeldeserver wird neu ermittelt. "
+                     + pendingWarning)
+            }
+            .confirmationDialog("Abmelden?", isPresented: $confirmLogout, titleVisibility: .visible) {
+                Button("Abmelden und lokale Daten löschen", role: .destructive) {
+                    Task {
+                        await settings.logout()   // inkl. Tracks löschen (AppSettings.resetLocalData)
+                        dismiss()
+                    }
+                }
+            } message: {
+                Text(pendingWarning)
+            }
+            .confirmationDialog("Betriebsart neu wählen?", isPresented: $confirmResetMode,
+                                titleVisibility: .visible) {
+                Button("Zur Auswahl der Betriebsart", role: .destructive) {
+                    dismiss()
+                    settings.resetMode()
+                }
+            } message: {
+                Text(resetModeText)
+            }
     }
 }

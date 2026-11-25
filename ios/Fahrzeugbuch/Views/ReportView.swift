@@ -1,7 +1,8 @@
 import QuickLook
 import SwiftUI
 
-/// PDF-Export (serverseitig erzeugt, inkl. Änderungsprotokoll und Integritätsvermerk).
+/// PDF-Export (Servermodus: serverseitig erzeugt, inkl. Änderungsprotokoll und Integritätsvermerk;
+/// Lokalmodus: auf dem iPhone erzeugt über `LocalReports`).
 struct ReportView: View {
     @Environment(AppSettings.self) private var settings
     @Environment(TenantStore.self) private var store
@@ -29,7 +30,7 @@ struct ReportView: View {
                 } header: {
                     Text("Zeitraum")
                 } footer: {
-                    if !store.outbox.isEmpty {
+                    if !store.isLocal && !store.outbox.isEmpty {
                         Text("\(store.outbox.count) Änderung(en) noch nicht synchronisiert – sie fehlen im PDF.")
                             .foregroundStyle(Color.warningText)
                     }
@@ -43,14 +44,13 @@ struct ReportView: View {
                             if loading { Spacer(); ProgressView() }
                         }
                     }
-                    .disabled(loading || AppMode.isDemo)
+                    .disabled(loading || (AppMode.isDemo && !store.isLocal))
                     if let fileURL {
                         Button { previewURL = fileURL } label: { Label("Vorschau", systemImage: "eye") }
                         ShareLink(item: fileURL) { Label("Teilen / Sichern", systemImage: "square.and.arrow.up") }
                     }
                 } footer: {
-                    Text("Tankvorgänge, Wartungen, Kilometerstände und Kosten des Fahrzeugs mit Änderungsprotokoll. "
-                         + "Das Fahrtenbuch exportierst du im Bereich Fahrten.")
+                    Text(footerText)
                 }
             }
             .navigationTitle("Fahrzeug-PDF")
@@ -61,6 +61,12 @@ struct ReportView: View {
             .quickLookPreview($previewURL)
             .errorAlert($error)
         }
+    }
+
+    private var footerText: String {
+        let base = "Tankvorgänge, Wartungen, Kilometerstände und Kosten des Fahrzeugs mit Änderungsprotokoll. "
+            + "Das Fahrtenbuch exportierst du im Bereich Fahrten."
+        return store.isLocal ? base + " Erstellt auf diesem iPhone (ohne signierte Server-Anker)." : base
     }
 
     enum Preset: String, CaseIterable, Identifiable {
@@ -101,6 +107,16 @@ struct ReportView: View {
     private func generate() async {
         loading = true
         defer { loading = false }
+        if store.isLocal {
+            do {
+                let url = try LocalReports.vehicleReportPDF(store: store, vehicle: vehicle, from: from, to: to)
+                fileURL = url
+                previewURL = url
+            } catch {
+                self.error = "Fahrzeug-PDF nicht erstellt: \(error.userMessage)"
+            }
+            return
+        }
         await store.sync()   // ausstehende Änderungen zuerst übertragen
         let f = APIClient.dayFormatter
         do {

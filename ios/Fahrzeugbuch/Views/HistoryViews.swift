@@ -1,6 +1,7 @@
 import SwiftUI
 
-/// Revisionsverlauf eines Eintrags (online, aus der unveränderlichen Revisionskette).
+/// Revisionsverlauf eines Eintrags: Servermodus online aus der unveränderlichen Revisionskette,
+/// Lokalmodus aus dem lokalen Änderungsprotokoll (sofort, ohne Netz).
 struct HistorySection: View {
     @Environment(AppSettings.self) private var settings
     @Environment(TenantStore.self) private var store
@@ -34,8 +35,7 @@ struct HistorySection: View {
                     }
                 }
                 if revisions.isEmpty {
-                    Text(store.isPending(id) ? "Noch nicht synchronisiert." : "Kein Verlauf.")
-                        .foregroundStyle(.secondary)
+                    Text(emptyText).foregroundStyle(.secondary)
                 }
             } else {
                 Button {
@@ -54,10 +54,31 @@ struct HistorySection: View {
             }
         } header: {
             Text("Änderungsverlauf")
+        } footer: {
+            if store.isLocal {
+                Text("Aus dem lokalen Änderungsprotokoll auf diesem iPhone.")
+            }
+        }
+        .task(id: id) {
+            if store.isLocal { loadLocal() }
         }
     }
 
+    private var emptyText: String {
+        if store.isLocal { return "Kein Verlauf." }
+        return store.isPending(id) ? "Noch nicht synchronisiert." : "Kein Verlauf."
+    }
+
+    private func loadLocal() {
+        revisions = store.localHistory(entity: entity, id: id)
+        error = nil
+    }
+
     private func load() async {
+        if store.isLocal {
+            loadLocal()
+            return
+        }
         loading = true
         defer { loading = false }
         do {
@@ -69,9 +90,7 @@ struct HistorySection: View {
     }
 
     static func time(_ iso: String) -> String {
-        let f = ISO8601DateFormatter()
-        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        guard let d = f.date(from: iso) else { return iso }
+        guard let d = Present.parseISO(iso) else { return iso }
         return d.formatted(date: .abbreviated, time: .shortened)
     }
 }

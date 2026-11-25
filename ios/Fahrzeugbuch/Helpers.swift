@@ -34,16 +34,7 @@ enum Fmt {
     static func dateTime(_ d: Date) -> String { d.formatted(date: .abbreviated, time: .shortened) }
 }
 
-/// Demo-Modus (nur Debug): Geräte-Funktionen (GPS, Bewegung) nicht starten.
-enum AppMode {
-    static var isDemo: Bool {
-        #if DEBUG
-        return Demo.isActive
-        #else
-        return false
-        #endif
-    }
-}
+// Demo-Kennzeichen `AppMode.isDemo`: siehe Shared/AppMode.swift (Logik).
 
 /// Monatsschlüssel "YYYY-MM" (wie Server) und Anzeige.
 enum TripMonth {

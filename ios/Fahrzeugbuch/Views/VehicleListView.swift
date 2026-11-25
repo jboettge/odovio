@@ -35,6 +35,9 @@ struct VehicleListView: View {
     /// Statistik je Fahrzeug (E14: nicht bei jedem Zeichnen neu rechnen)
     @State private var statsCache: [String: VehicleStats] = [:]
     @State private var lastDueSignature: String?
+    /// Servermodus: Mitglieder (für „Gemeinsam mit n Personen“)
+    @State private var memberCount: Int?
+    @State private var sharedRoute: SharedRoute?
 
     /// Ändert sich bei jeder lokalen Änderung (Outbox) und jedem Sync (Cursor/Zeitpunkt).
     private var dataKey: String {
@@ -47,12 +50,21 @@ struct VehicleListView: View {
         NavigationStack(path: $path) {
             List {
                 StoreIssueSection()
+                if !store.isLocal, let n = memberCount, n > 1 {
+                    Section {
+                        SharedBanner(memberCount: n) { sharedRoute = .members }
+                    }
+                }
                 Section {
                     ForEach(store.vehicleList) { v in
                         vehicleRow(v)
                     }
                 } header: {
-                    if !store.canWrite {
+                    if store.isLocal {
+                        Label(ModeText.localTitle, systemImage: "iphone")
+                            .textCase(nil)
+                            .accessibilityLabel("Betriebsart: \(ModeText.localTitle)")
+                    } else if !store.canWrite {
                         Label("Nur Lesezugriff auf «\(store.tenant.slug)»", systemImage: "eye")
                             .textCase(nil)
                     }
@@ -73,10 +85,15 @@ struct VehicleListView: View {
                 ToolbarItemGroup(placement: .topBarLeading) {
                     Button { showSettings = true } label: { Image(systemName: "gearshape") }
                         .accessibilityLabel("Einstellungen")
-                    TenantMenu()
+                    if !store.isLocal {
+                        TenantMenu()
+                    }
                 }
                 ToolbarItemGroup(placement: .topBarTrailing) {
-                    SyncStatusButton()
+                    if !store.isLocal {
+                        SharedMenu(route: $sharedRoute)
+                        SyncStatusButton()
+                    }
                     if store.canWrite {
                         Button { form = EditTarget(value: nil) } label: { Image(systemName: "plus") }
                             .accessibilityLabel("Fahrzeug hinzufügen")
@@ -87,6 +104,8 @@ struct VehicleListView: View {
             .sheet(item: $form) { target in VehicleFormView(vehicle: target.value) }
             .sheet(item: $quick) { $0.form }
             .sheet(isPresented: $showSettings) { NavigationStack { SettingsView() } }
+            .sheet(item: $sharedRoute) { $0.view }
+            .task(id: store.tenant.slug) { await loadMembers() }
             .stornoDialog($toDelete, title: "Fahrzeug stornieren?") { store.delete($0) }
             .modifier(SyncNoticeModifier())
             .task(id: dataKey) { await refreshStats() }
@@ -175,6 +194,18 @@ struct VehicleListView: View {
             lastDueSignature = signature
             await DueNotifications.reschedule(store)
         }
+    }
+
+    /// Anzahl Mitglieder (still; offline bleibt die Leiste einfach weg).
+    private func loadMembers() async {
+        guard !store.isLocal, settings.capabilities.members else { return }
+        #if DEBUG
+        if AppMode.isDemo {
+            memberCount = Demo.membersSample().members.count
+            return
+        }
+        #endif
+        if let r = try? await store.fetchMembers() { memberCount = r.members.count }
     }
 
     // MARK: Quick Actions / Mitteilungen

@@ -71,6 +71,7 @@ enum TripStatusFilter: String, CaseIterable, Identifiable {
 /// Fahrten eines Fahrzeugs: Statuskarten, Start/Stopp, Fahrtenbuch-Funktionen, Suche/Filter, Liste nach Tag.
 @MainActor
 struct TripsListView: View {
+    @Environment(AppSettings.self) private var settings
     @Environment(TenantStore.self) private var store
     @Environment(TripCoordinator.self) private var coordinator
     let vehicle: Vehicle
@@ -367,7 +368,7 @@ struct TripsListView: View {
         let hint: String = (t.isLocked || !store.canWrite) ? "Ansehen" : "Bearbeiten"
         return Button { form = EditTarget(value: t) } label: {
             TripRow(trip: t, route: store.routeLabel(t), customer: store.customerLabel(t),
-                    pending: store.isPending(t.id))
+                    pending: store.isPending(t.id), author: Authorship.foreign(t.createdBy, settings: settings))
         }
         .buttonStyle(.plain)
         .accessibilityHint(hint)
@@ -636,6 +637,8 @@ struct TripRow: View {
     let route: String
     var customer: String?
     var pending = false
+    /// „von Anna“, wenn eine andere Person die Fahrt erfasst hat (Servermodus)
+    var author: String?
 
     private var timeText: String {
         guard let start = trip.startDate else { return "–" }
@@ -704,6 +707,7 @@ struct TripRow: View {
         if let s = suggestionText { parts.append(s) }
         if trip.privateMode { parts.append("Privatmodus") }
         if pending { parts.append("noch nicht synchronisiert") }
+        if let author { parts.append("erfasst \(author)") }
         return parts.joined(separator: ", ")
     }
 
@@ -725,6 +729,12 @@ struct TripRow: View {
                         Image(systemName: "eye.slash").font(.footnote).foregroundStyle(Color.neutralText)
                     }
                     if pending { PendingBadge() }
+                    if let author {
+                        Text(author)
+                            .font(.footnote)
+                            .foregroundStyle(Color.neutralText)
+                            .lineLimit(1)
+                    }
                 }
                 Text(route).fixedSize(horizontal: false, vertical: true)
                 Text(detailText).font(.footnote).foregroundStyle(Color.neutralText)
@@ -1110,6 +1120,7 @@ struct TripFormView: View {
                             }
                         }
                     }
+                    AuthorshipSection(createdBy: t.createdBy, updatedBy: t.updatedBy)
                     HistorySection(entity: Trip.entityName, id: t.id)
                 }
             }

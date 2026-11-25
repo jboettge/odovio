@@ -122,7 +122,8 @@ final class TripCoordinator {
             return
         }
         #endif
-        if !settings.auth.isLoggedIn && !isRecording && UIApplication.shared.isProtectedDataAvailable {
+        if !settings.auth.isLoggedIn && !settings.isLocal && !isRecording
+            && UIApplication.shared.isProtectedDataAvailable {
             tracks.deleteAll()   // keine Rohdaten ohne angemeldeten Benutzer
         }
         configured = true
@@ -621,8 +622,12 @@ final class TripCoordinator {
         trip.source = a.source == "auto" ? "auto" : "manual"
         trip.status = "draft"
         trip.privateMode = a.privateMode
-        trip.driverName = settings.auth.userName
-        trip.driverSub = UserDefaults.standard.string(forKey: "dataOwnerSub")
+        if settings.isLocal {
+            trip.driverName = LocalIdentity.actorName
+        } else {
+            trip.driverName = settings.displayName ?? settings.auth.userName
+            trip.driverSub = UserDefaults.standard.string(forKey: "dataOwnerSub")
+        }
         trip.distanceGps = track.distanceKm
         trip.trackHash = track.hash
 
@@ -665,7 +670,25 @@ final class TripCoordinator {
 
         // Online-Anreicherung (offline/Fehler → bleibt leer)
         let geo = GeoClient(api: settings.api)
-        if a.privateMode {
+        if settings.isLocal {
+            // Lokalmodus: keine Server-Geodienste; optional Apple-Geocoding (nur Strasse/Gemeinde)
+            if settings.useAppleGeocoding {
+                if a.privateMode {
+                    if privateMunicipalityEnabled {
+                        trip.startLabel = await AppleGeocoder.reverse(track.start, roundingMeters: 1000)?.municipality
+                        trip.endLabel = await AppleGeocoder.reverse(track.end, roundingMeters: 1000)?.municipality
+                    }
+                } else {
+                    let rounding: Double = hasHome ? 50 : 1000
+                    if trip.startLabel == nil, let r = await AppleGeocoder.reverse(track.start, roundingMeters: rounding) {
+                        trip.startLabel = Self.label(r, municipalityOnly: !hasHome)
+                    }
+                    if trip.endLabel == nil, let r = await AppleGeocoder.reverse(track.end, roundingMeters: rounding) {
+                        trip.endLabel = Self.label(r, municipalityOnly: !hasHome)
+                    }
+                }
+            }
+        } else if a.privateMode {
             if privateMunicipalityEnabled {
                 let startPoint = track.start
                 let endPoint = track.end
@@ -774,8 +797,8 @@ final class TripCoordinator {
         if let s = RuleEngine.patternSuggestion(facts: facts, history: history) {
             return s
         }
-        // (4) LLM auf dem eigenen Server – nur pseudonymisierte Merkmale, nie Koordinaten
-        guard allowLLM, let settings else { return nil }
+        // (4) LLM auf dem eigenen Server – nur pseudonymisierte Merkmale, nie Koordinaten (nicht im Lokalmodus)
+        guard allowLLM, let settings, !settings.isLocal, !store.isLocal else { return nil }
         let request = suggestRequest(trip: trip, facts: facts, endPlace: endPlace, places: places,
                                      customers: customers, history: history)
         guard var s = await GeoClient(api: settings.api).suggest(tenant: store.tenant.slug, request: request) else {

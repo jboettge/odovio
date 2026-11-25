@@ -52,6 +52,14 @@ struct APIClient {
         self.tokenProvider = tokenProvider
     }
 
+    /// Lokalmodus: Platzhalter ohne Server – jeder Aufruf schlägt sofort fehl (kein Netzwerkzugriff).
+    static let localPlaceholder = APIClient(baseURL: URL(string: "lokal://geraet")!) { _ in
+        throw APIError(status: 503, message: "Im Lokalmodus nicht verfügbar (kein Server).")
+    }
+
+    /// Platzhalter des Lokalmodus (Scan-KI, Geodienste, Berichte des Servers nicht verfügbar)
+    var isLocalPlaceholder: Bool { baseURL.scheme == "lokal" }
+
     /// Kopie mit anderem Transport (Tests).
     func with(transport: @escaping Transport) -> APIClient {
         var copy = self
@@ -131,6 +139,9 @@ struct APIClient {
     /// Request ohne Statusprüfung (für tolerante Aufrufe mit 204/503 usw.), inkl. einmaligem Refresh nach 401.
     func rawResponse(_ method: String, _ path: String, query: [URLQueryItem] = [], body: Data? = nil,
                      contentType: String = "application/json", timeout: TimeInterval = 20) async throws -> RawResponse {
+        if isLocalPlaceholder {
+            throw APIError(status: 503, message: "Im Lokalmodus nicht verfügbar (kein Server).")
+        }
         guard var comps = URLComponents(url: baseURL.appending(path: path), resolvingAgainstBaseURL: false) else {
             throw URLError(.badURL)
         }

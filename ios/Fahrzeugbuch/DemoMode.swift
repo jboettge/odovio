@@ -37,7 +37,14 @@ enum Demo {
             ChecklistTemplate(title: "MFK-Vorbereitung", items: ["Beleuchtung & Blinker", "Bremsen"]),
         ]
         UserDefaults.standard.set(try? JSONEncoder().encode(templates), forKey: "checklistTemplates")
-        settings.demoTenants([TenantInfo(slug: "privat", role: "write"), TenantInfo(slug: "b-re.ch", role: "read")])
+        if isLocalScreen {
+            // Betriebsart „Nur auf diesem iPhone“: lokales Fahrzeugbuch mit denselben Beispieldaten
+            settings.startLocal()
+            if let s = settings.store { seed(s) }
+            return
+        }
+        settings.mode = .server   // Betriebsart eines früheren Demo-Starts überschreiben
+        settings.demoTenants([TenantInfo(slug: "privat", role: "admin"), TenantInfo(slug: "b-re.ch", role: "read")])
     }
 
     static func day(_ s: String) -> Date { APIClient.dayFormatter.date(from: s)! }
@@ -70,8 +77,11 @@ enum Demo {
                                     date: day("2026-11-24"), km: 53410, liters: 43.6, priceTotal: 77.80,
                                     station: "Tamoil Landquart")
         fuelEntries.append(pendingFuel)
+        // Gemeinsam: einige Einträge hat eine andere Person erfasst („von Luca Rossi“)
+        fuelEntries[1].createdBy = "Luca Rossi"
+        fuelEntries[4].createdBy = "Anna Muster"
 
-        let maintenance = [
+        var maintenance = [
             Maintenance(id: serviceId, version: 2, vehicleId: vehicleId, date: day("2026-03-20"), km: 50100,
                         title: "Service 50'000", cost: 420.50, note: "Garage Muster AG, Uster",
                         nextDueKm: 65000, nextDueDate: day("2027-03-20")),
@@ -81,6 +91,8 @@ enum Demo {
             Maintenance(id: "77777777-7777-4777-8777-777777777777", version: 1, vehicleId: vehicleId,
                         date: day("2022-11-10"), km: 31000, title: "MFK", nextDueDate: day("2026-11-10")),
         ]
+        maintenance[1].createdBy = "Anna Muster"
+        maintenance[1].updatedBy = "jakob"
         let labels = [("Motoröl gewechselt", true), ("Ölfilter gewechselt", true),
                       ("Luftfilter geprüft/gewechselt", true), ("Innenraumfilter gewechselt", false),
                       ("Bremsflüssigkeit geprüft", true), ("Batterie geprüft", false)]
@@ -321,6 +333,11 @@ enum Demo {
                  category: "unknown", status: "draft", source: "manual"),
         ]
 
+        // Kundenfahrten hat Anna erfasst (gemeinsames Fahrzeug)
+        trips[3].createdBy = "Anna Muster"
+        trips[4].createdBy = "Anna Muster"
+        trips[4].updatedBy = "jakob"
+
         // Privatfahrt im Privatmodus: nur Zeit und km
         var privateTrip = trip(5, "2026-11-14", (10, 0), (11, 20), 53216, 53264, from: nil, to: nil,
                                category: "private", status: "confirmed")
@@ -385,6 +402,60 @@ struct DemoScanScreen: View {
 }
 
 extension Demo {
+    /// Screens im Lokalmodus („Nur auf diesem iPhone“)
+    static let localScreens: Set<String> = ["local-list", "local-settings", "migrate"]
+
+    static var isLocalScreen: Bool { localScreens.contains(screen) }
+
+    /// Mitglieder (3 Personen, alle Rollen) – nur Anzeige, ohne Netzwerk.
+    static func membersSample() -> MembersResponse {
+        let now = Date()
+        return MembersResponse(members: [
+            Member(id: "u-jakob", username: "jakob", name: "Jakob Brunner", email: "jakob@example.ch", role: "admin",
+                   source: "keycloak", lastActivityAt: Trip.isoString(now.addingTimeInterval(-600))),
+            Member(id: "u-anna", username: "anna", name: "Anna Muster", email: "anna@example.ch", role: "write",
+                   source: "keycloak", lastActivityAt: Trip.isoString(now.addingTimeInterval(-2 * 3600))),
+            Member(id: "u-luca", username: "luca", name: "Luca Rossi", role: "read",
+                   source: "keycloak", lastActivityAt: Trip.isoString(now.addingTimeInterval(-3 * 86400))),
+        ], manageable: true)
+    }
+
+    /// Aktivitäten (10 Einträge über drei Tage) – nur Anzeige, ohne Netzwerk.
+    static func activitySample() -> [ActivityItem] {
+        let now = Date()
+        func ago(_ minutes: Double) -> String { Trip.isoString(now.addingTimeInterval(-minutes * 60)) }
+        let rows: [(Double, String, String, String, String, String?, String)] = [
+            (8, "Jakob Brunner", "create", FuelEntry.entityName, pendingFuelId, vehicleId,
+             "Tankvorgang 43.60 l · CHF 77.80 (Tamoil Landquart)"),
+            (35, "Anna Muster", "update", Trip.entityName, tripId(4), vehicleId,
+             "Fahrt Meier AG → Büro: Zweck «Offerte Heizungssanierung»"),
+            (50, "Anna Muster", "create", Trip.entityName, tripId(3), vehicleId, "Fahrt Büro → Meier AG erfasst"),
+            (120, "Jakob Brunner", "update", Maintenance.entityName, serviceId, vehicleId,
+             "Service 50'000: Checkliste «Bremsflüssigkeit geprüft» abgehakt"),
+            (60 * 24 + 15, "Luca Rossi", "create", FuelEntry.entityName, "44444444-4444-4444-8444-000000000001",
+             vehicleId, "Tankvorgang 41.30 l · CHF 72.10"),
+            (60 * 24 + 40, "Anna Muster", "create", Customer.entityName, customerId(1), nil,
+             "Kunde «Huber Treuhand GmbH» angelegt"),
+            (60 * 24 + 90, "Jakob Brunner", "update", PurposeRule.entityName, ruleId(1), nil,
+             "Regel «Kundentermin Meier AG» angepasst"),
+            (60 * 48 + 20, "Anna Muster", "delete", Trip.entityName, tripId(12), vehicleId,
+             "Doppelt erfasste Fahrt storniert"),
+            (60 * 48 + 75, "Jakob Brunner", "create", OdometerReading.entityName, "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+             vehicleId, "Kilometerstand 52'010 km"),
+            (60 * 48 + 130, "Luca Rossi", "create", Maintenance.entityName, "66666666-6666-4666-8666-666666666666",
+             busId, "Wartung «Bremsbeläge vorne» erfasst"),
+        ]
+        return rows.enumerated().map { n, r in
+            ActivityItem(seq: 520 - n, at: ago(r.0), actorName: r.1, action: r.2, entity: r.3, entityId: r.4,
+                         vehicleId: r.5, summary: r.6)
+        }
+    }
+
+    /// Fahrzeugbücher für den Übertragungs-Assistenten (Schritt Zusammenfassung).
+    static func migrationTenants() -> [TenantInfo] {
+        [TenantInfo(slug: "privat", role: "admin"), TenantInfo(slug: "b-re.ch", role: "read")]
+    }
+
     /// Beispiele für „Abgelehnte Änderungen“ (nur Anzeige).
     static func rejectedSamples() -> [RejectedOp] {
         [
@@ -414,9 +485,19 @@ struct DemoScreen: View {
     @Environment(AppSettings.self) private var settings
 
     var body: some View {
-        if let store = settings.store, let v = store.vehicle(id: Demo.vehicleId) {
+        if Demo.screen == "mode-choice" {
+            ModeChoiceView()
+        } else if let store = settings.store, let v = store.vehicle(id: Demo.vehicleId) {
             Group {
                 switch Demo.screen {
+                // Betriebsart / Lokalmodus / Gemeinsam
+                case "local-list": VehicleListView()
+                case "local-settings": NavigationStack { SettingsView() }
+                case "migrate":
+                    MigrationWizardView(previewStep: .summary, previewServer: "https://fahrzeugbuch.j-mb.net",
+                                        previewTenants: Demo.migrationTenants())
+                case "members": NavigationStack { MembersView(preview: Demo.membersSample()) }
+                case "activity": NavigationStack { ActivityView(preview: Demo.activitySample()) }
                 case "overview": NavigationStack { VehicleDetailView(vehicle: v, pane: .overview) }
                 case "fuel": NavigationStack { VehicleDetailView(vehicle: v, pane: .fuel) }
                 case "maintenance": NavigationStack { VehicleDetailView(vehicle: v, pane: .maintenance) }

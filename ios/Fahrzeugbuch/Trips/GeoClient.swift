@@ -5,6 +5,9 @@ import Foundation
 struct GeoClient {
     let api: APIClient
 
+    /// Im Lokalmodus nicht verfügbar
+    var isAvailable: Bool { !api.isLocalPlaceholder }
+
     struct MatchResult: Decodable {
         var distanceKm: Double
         var durationS: Double
@@ -151,6 +154,8 @@ struct GeoClient {
     /// Basis-URL und Token wie die App, inkl. einmaligem Refresh nach 401.
     private func request(_ method: String, _ path: String, body: Data? = nil,
                          timeout: TimeInterval) async throws -> APIClient.RawResponse {
-        try await api.rawResponse(method, path, body: body, timeout: timeout)
+        // Lokalmodus: keine Geodienste/LLM des Servers (Aufrufer erhalten `nil`)
+        guard !api.isLocalPlaceholder else { throw URLError(.cannotConnectToHost) }
+        return try await api.rawResponse(method, path, body: body, timeout: timeout)
     }
 }

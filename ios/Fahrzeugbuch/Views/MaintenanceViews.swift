@@ -120,6 +120,7 @@ private struct MaintenanceRow: View {
                 Text(due.dueText).font(.footnote)
                     .foregroundStyle(due.overdue ? Color.dangerText : Color.neutralText)
             }
+            AuthorNote(createdBy: maintenance.createdBy)
         }
         .accessibilityElement(children: .combine)
     }
@@ -184,6 +185,7 @@ struct MaintenanceDetailView: View {
                     Section("Notiz") { Text(note) }
                 }
 
+                AuthorshipSection(createdBy: m.createdBy, updatedBy: m.updatedBy)
                 HistorySection(entity: Maintenance.entityName, id: m.id)
             }
             .navigationTitle(m.title)

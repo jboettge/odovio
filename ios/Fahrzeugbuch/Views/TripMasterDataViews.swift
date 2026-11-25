@@ -858,17 +858,36 @@ struct TaxParamsView: View {
 
     init() {}
 
-    private var rowHint: String { store.canWrite ? "Bearbeiten" : "Ansehen" }
+    private var rowHint: String { store.canEditTaxParams ? "Bearbeiten" : "Ansehen" }
+
+    private var infoText: String {
+        store.isLocal
+            ? "Annahmen – mit Treuhand prüfen. Sätze und Obergrenzen ändern jährlich und je Kanton; "
+                + "ohne eigene Werte rechnet die App mit Standardwerten."
+            : "Annahmen – mit Treuhand prüfen. Sätze und Obergrenzen ändern jährlich und je Kanton; "
+                + "ohne eigene Werte rechnet der Server mit Standardwerten."
+    }
 
     var body: some View {
         let list = store.taxParamList
         let years = Array(Set(list.map(\.year))).sorted(by: >)
         List {
             Section {
-                Label("Annahmen – mit Treuhand prüfen. Sätze und Obergrenzen ändern jährlich und je Kanton; "
-                      + "ohne eigene Werte rechnet der Server mit Standardwerten.", systemImage: "info.circle")
+                Label(infoText, systemImage: "info.circle")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
+            }
+            if !store.isLocal {
+                Section {
+                    Label("In der App nur ansehen. Steuerparameter erfassen und ändern Personen mit der Rolle "
+                          + "«Bearbeiten» oder «Verwalten» im Webfrontend deines Servers.", systemImage: "eye")
+                        .font(.subheadline)
+                        .foregroundStyle(Color.neutralText)
+                        .fixedSize(horizontal: false, vertical: true)
+                    if store.canWrite {
+                        WebFrontendButton(title: "Im Webfrontend bearbeiten", path: WebFrontend.taxParamsPath)
+                    }
+                }
             }
             ForEach(years, id: \.self) { y in
                 Section {
@@ -879,7 +898,7 @@ struct TaxParamsView: View {
                         .buttonStyle(.plain)
                         .accessibilityHint(rowHint)
                         .swipeActions {
-                            if store.canWrite {
+                            if store.canEditTaxParams {
                                 Button("Stornieren", role: .destructive) { toDelete = p }
                             }
                         }
@@ -892,12 +911,12 @@ struct TaxParamsView: View {
         .overlay {
             if list.isEmpty {
                 ContentUnavailableView("Keine eigenen Parameter", systemImage: "percent",
-                                       description: Text("Der Server verwendet Standardwerte (Annahmen)."))
+                                       description: Text(emptyText))
             }
         }
         .navigationTitle("Steuerparameter")
         .toolbar {
-            if store.canWrite {
+            if store.canEditTaxParams {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button { form = EditTarget(value: nil) } label: { Image(systemName: "plus") }
                         .accessibilityLabel("Parameter hinzufügen")
@@ -909,6 +928,10 @@ struct TaxParamsView: View {
         }
         .stornoDialog($toDelete, title: "Parameter stornieren?") { store.delete($0) }
         .refreshable { await store.sync() }
+    }
+
+    private var emptyText: String {
+        store.isLocal ? "Die App verwendet Standardwerte (Annahmen)." : "Der Server verwendet Standardwerte (Annahmen)."
     }
 
     private func paramRow(_ p: TaxParam) -> some View {
@@ -966,13 +989,13 @@ struct TaxParamFormView: View {
     private var stored: TaxParam? { param.flatMap { store.taxParams[$0.id] } }
     private var titleText: String {
         if stored == nil { return "Neuer Parameter" }
-        return store.canWrite ? "Parameter bearbeiten" : "Parameter"
+        return store.canEditTaxParams ? "Parameter bearbeiten" : "Parameter"
     }
-    private var cancelTitle: String { store.canWrite ? "Abbrechen" : "Fertig" }
+    private var cancelTitle: String { store.canEditTaxParams ? "Abbrechen" : "Fertig" }
 
     private var snapshot: String { FormSnapshot.make([String(year), String(describing: scopeKind), canton, key, value, sourceUrl, note]) }
 
-    private var hasChanges: Bool { store.canWrite && didPrefill && snapshot != initial }
+    private var hasChanges: Bool { store.canEditTaxParams && didPrefill && snapshot != initial }
 
     private var scope: String {
         switch scopeKind {
@@ -1008,7 +1031,7 @@ struct TaxParamFormView: View {
         return exists ? "Für dieses Jahr, diesen Geltungsbereich und Schlüssel existiert bereits ein Wert." : nil
     }
 
-    private var canSave: Bool { store.canWrite && errors.isEmpty }
+    private var canSave: Bool { store.canEditTaxParams && errors.isEmpty }
 
     var body: some View {
         NavigationStack {
@@ -1040,7 +1063,7 @@ struct TaxParamFormView: View {
                         Text(duplicateHint).foregroundStyle(Color.warningText)
                     }
                 }
-                .disabled(!store.canWrite)
+                .disabled(!store.canEditTaxParams)
 
                 Section {
                     TextField("Quelle (URL, optional)", text: $sourceUrl)
@@ -1053,7 +1076,7 @@ struct TaxParamFormView: View {
                 } footer: {
                     Text("Annahmen – mit Treuhand prüfen. Keine Steuer- oder Rechtsberatung.")
                 }
-                .disabled(!store.canWrite)
+                .disabled(!store.canEditTaxParams)
 
                 if !errors.isEmpty {
                     Section {
@@ -1077,7 +1100,7 @@ struct TaxParamFormView: View {
                         }
                     }
                 }
-                if store.canWrite {
+                if store.canEditTaxParams {
                     ToolbarItem(placement: .confirmationAction) {
                         Button("Sichern") {
                             save()

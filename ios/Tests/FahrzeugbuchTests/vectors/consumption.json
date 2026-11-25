@@ -1,0 +1,223 @@
+{
+ "description": "Verbrauch Voll-zu-voll (stats.consumption_points/summarize). Eingabe: Tankvorgänge (nicht stornierte, beliebige Reihenfolge; sortiert wird nach km, Datum, id). Ausgabe: Etappen und Durchschnitt. Gerundet wie der Server: liters/cost 2, consumption 2, cost_per_km 3, avg_consumption 2, avg_liters_per_km 4, avg_cost_per_km 3.",
+ "cases": [
+  {
+   "name": "zwei Volltankungen",
+   "fuel": [
+    {
+     "id": "f1",
+     "date": "2026-01-01",
+     "km": 10000,
+     "liters": 40.0,
+     "price_total": 70.0,
+     "full_tank": true
+    },
+    {
+     "id": "f2",
+     "date": "2026-01-15",
+     "km": 10600,
+     "liters": 38.5,
+     "price_total": 69.3,
+     "full_tank": true
+    }
+   ],
+   "expected": {
+    "points": [
+     {
+      "date": "2026-01-15",
+      "km": 10600,
+      "distance": 600,
+      "liters": 38.5,
+      "cost": 69.3,
+      "consumption": 6.42,
+      "cost_per_km": 0.115
+     }
+    ],
+    "summary": {
+     "avg_consumption": 6.42,
+     "avg_liters_per_km": 0.0642,
+     "avg_cost_per_km": 0.115
+    }
+   }
+  },
+  {
+   "name": "Teilbetankung zählt zur nächsten Volltankung",
+   "fuel": [
+    {
+     "id": "f1",
+     "date": "2026-02-01",
+     "km": 20000,
+     "liters": 45.0,
+     "price_total": 80.0,
+     "full_tank": true
+    },
+    {
+     "id": "f2",
+     "date": "2026-02-05",
+     "km": 20250,
+     "liters": 10.0,
+     "price_total": 18.0,
+     "full_tank": false
+    },
+    {
+     "id": "f3",
+     "date": "2026-02-10",
+     "km": 20700,
+     "liters": 25.0,
+     "price_total": 45.5,
+     "full_tank": true
+    },
+    {
+     "id": "f4",
+     "date": "2026-02-20",
+     "km": 21200,
+     "liters": 31.2,
+     "price_total": 56.47,
+     "full_tank": true
+    }
+   ],
+   "expected": {
+    "points": [
+     {
+      "date": "2026-02-10",
+      "km": 20700,
+      "distance": 700,
+      "liters": 35.0,
+      "cost": 63.5,
+      "consumption": 5.0,
+      "cost_per_km": 0.091
+     },
+     {
+      "date": "2026-02-20",
+      "km": 21200,
+      "distance": 500,
+      "liters": 31.2,
+      "cost": 56.47,
+      "consumption": 6.24,
+      "cost_per_km": 0.113
+     }
+    ],
+    "summary": {
+     "avg_consumption": 5.52,
+     "avg_liters_per_km": 0.0552,
+     "avg_cost_per_km": 0.1
+    }
+   }
+  },
+  {
+   "name": "Teilbetankung vor der ersten Volltankung wird ignoriert, unsortierte Eingabe",
+   "fuel": [
+    {
+     "id": "f3",
+     "date": "2026-03-20",
+     "km": 30900,
+     "liters": 50.0,
+     "price_total": 90.0,
+     "full_tank": true
+    },
+    {
+     "id": "f1",
+     "date": "2026-03-01",
+     "km": 30000,
+     "liters": 20.0,
+     "price_total": 36.0,
+     "full_tank": false
+    },
+    {
+     "id": "f2",
+     "date": "2026-03-05",
+     "km": 30100,
+     "liters": 30.0,
+     "price_total": 54.0,
+     "full_tank": true
+    }
+   ],
+   "expected": {
+    "points": [
+     {
+      "date": "2026-03-20",
+      "km": 30900,
+      "distance": 800,
+      "liters": 50.0,
+      "cost": 90.0,
+      "consumption": 6.25,
+      "cost_per_km": 0.113
+     }
+    ],
+    "summary": {
+     "avg_consumption": 6.25,
+     "avg_liters_per_km": 0.0625,
+     "avg_cost_per_km": 0.113
+    }
+   }
+  },
+  {
+   "name": "gleicher km-Stand → keine Etappe (Distanz 0)",
+   "fuel": [
+    {
+     "id": "f1",
+     "date": "2026-04-01",
+     "km": 40000,
+     "liters": 40.0,
+     "price_total": 70.0,
+     "full_tank": true
+    },
+    {
+     "id": "f2",
+     "date": "2026-04-01",
+     "km": 40000,
+     "liters": 2.0,
+     "price_total": 3.6,
+     "full_tank": true
+    },
+    {
+     "id": "f3",
+     "date": "2026-04-09",
+     "km": 40500,
+     "liters": 33.0,
+     "price_total": 60.0,
+     "full_tank": true
+    }
+   ],
+   "expected": {
+    "points": [
+     {
+      "date": "2026-04-09",
+      "km": 40500,
+      "distance": 500,
+      "liters": 33.0,
+      "cost": 60.0,
+      "consumption": 6.6,
+      "cost_per_km": 0.12
+     }
+    ],
+    "summary": {
+     "avg_consumption": 6.6,
+     "avg_liters_per_km": 0.066,
+     "avg_cost_per_km": 0.12
+    }
+   }
+  },
+  {
+   "name": "nur eine Volltankung",
+   "fuel": [
+    {
+     "id": "f1",
+     "date": "2026-05-01",
+     "km": 50000,
+     "liters": 40.0,
+     "price_total": 70.0,
+     "full_tank": true
+    }
+   ],
+   "expected": {
+    "points": [],
+    "summary": {
+     "avg_consumption": null,
+     "avg_liters_per_km": null,
+     "avg_cost_per_km": null
+    }
+   }
+  }
+ ]
+}

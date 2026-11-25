@@ -1,0 +1,172 @@
+{
+ "description": "km-Lücken (trips.km_gaps) nach chronologischer Sortierung (Zeitpunkt inkl. Offset, dann id). Lücke, wenn km_end(n) ≠ km_start(n+1); km = km_start(n+1) − km_end(n), negativ = Überschneidung. Fehlende km-Werte erzeugen keine Lücke. `previous` = letzte Fahrt vor dem Zeitraum (optional). Erwartet: Reihenfolge der IDs und Lücken.",
+ "cases": [
+  {
+   "name": "lückenlos",
+   "previous": null,
+   "trips": [
+    {
+     "id": "a",
+     "start_at": "2026-03-02T08:00:00+01:00",
+     "km_start": 10000,
+     "km_end": 10020
+    },
+    {
+     "id": "b",
+     "start_at": "2026-03-02T17:00:00+01:00",
+     "km_start": 10020,
+     "km_end": 10035
+    }
+   ],
+   "expected": {
+    "order": [
+     "a",
+     "b"
+    ],
+    "gaps": []
+   }
+  },
+  {
+   "name": "Lücke und Überschneidung",
+   "previous": null,
+   "trips": [
+    {
+     "id": "a",
+     "start_at": "2026-03-02T08:00:00+01:00",
+     "km_start": 10000,
+     "km_end": 10020
+    },
+    {
+     "id": "b",
+     "start_at": "2026-03-03T08:00:00+01:00",
+     "km_start": 10030,
+     "km_end": 10050
+    },
+    {
+     "id": "c",
+     "start_at": "2026-03-04T08:00:00+01:00",
+     "km_start": 10045,
+     "km_end": 10060
+    }
+   ],
+   "expected": {
+    "order": [
+     "a",
+     "b",
+     "c"
+    ],
+    "gaps": [
+     {
+      "after_trip_id": "a",
+      "before_trip_id": "b",
+      "km_from": 10020,
+      "km_to": 10030,
+      "km": 10
+     },
+     {
+      "after_trip_id": "b",
+      "before_trip_id": "c",
+      "km_from": 10050,
+      "km_to": 10045,
+      "km": -5
+     }
+    ]
+   }
+  },
+  {
+   "name": "Vorgänger aus dem Vormonat",
+   "previous": {
+    "id": "p",
+    "start_at": "2026-02-27T08:00:00+01:00",
+    "km_start": 9980,
+    "km_end": 9990
+   },
+   "trips": [
+    {
+     "id": "a",
+     "start_at": "2026-03-02T08:00:00+01:00",
+     "km_start": 10000,
+     "km_end": 10020
+    }
+   ],
+   "expected": {
+    "order": [
+     "a"
+    ],
+    "gaps": [
+     {
+      "after_trip_id": "p",
+      "before_trip_id": "a",
+      "km_from": 9990,
+      "km_to": 10000,
+      "km": 10
+     }
+    ]
+   }
+  },
+  {
+   "name": "Sortierung über Offsets (Sommerzeit-Wechsel)",
+   "previous": null,
+   "trips": [
+    {
+     "id": "late",
+     "start_at": "2026-03-29T03:10:00+02:00",
+     "km_start": 10010,
+     "km_end": 10020
+    },
+    {
+     "id": "early",
+     "start_at": "2026-03-29T01:30:00+01:00",
+     "km_start": 10000,
+     "km_end": 10010
+    },
+    {
+     "id": "utc",
+     "start_at": "2026-03-29T00:00:00+00:00",
+     "km_start": 9990,
+     "km_end": 10000
+    }
+   ],
+   "expected": {
+    "order": [
+     "utc",
+     "early",
+     "late"
+    ],
+    "gaps": []
+   }
+  },
+  {
+   "name": "fehlende km-Stände unterbrechen nicht",
+   "previous": null,
+   "trips": [
+    {
+     "id": "a",
+     "start_at": "2026-03-02T08:00:00+01:00",
+     "km_start": 10000,
+     "km_end": null
+    },
+    {
+     "id": "b",
+     "start_at": "2026-03-02T09:00:00+01:00",
+     "km_start": 10040,
+     "km_end": 10050
+    },
+    {
+     "id": "c",
+     "start_at": "2026-03-02T10:00:00+01:00",
+     "km_start": null,
+     "km_end": 10070
+    }
+   ],
+   "expected": {
+    "order": [
+     "a",
+     "b",
+     "c"
+    ],
+    "gaps": []
+   }
+  }
+ ]
+}

@@ -20,11 +20,17 @@ protocol SyncEntity: Codable, Identifiable, Hashable where ID == String {
     var id: String { get }
     var version: Int { get set }
     var deleted: Bool { get set }
+    /// Erfasst/zuletzt geändert von (Anzeigename, nur vom Server; nie gesendet)
+    var createdBy: String? { get }
+    var updatedBy: String? { get }
     /// Nutzdaten für `/sync` (Standard: alle Felder ausser id/version/deleted; `Place` überschreibt)
     func payload() throws -> Data
 }
 
 extension SyncEntity {
+    /// Felder, die nur der Server setzt (nie in `/sync` senden)
+    static var serverOnlyKeys: [String] { ["created_by", "updated_by"] }
+
     /// Nutzdaten für den Server (snake_case, ohne id/version/deleted).
     func payload() throws -> Data {
         try payload(omitting: [])
@@ -34,7 +40,7 @@ extension SyncEntity {
     func payload(omitting extra: [String]) throws -> Data {
         let data = try APIClient.encoder.encode(self)
         var dict = try JSONSerialization.jsonObject(with: data) as? [String: Any] ?? [:]
-        for key in ["id", "version", "deleted"] + extra { dict.removeValue(forKey: key) }
+        for key in ["id", "version", "deleted"] + Self.serverOnlyKeys + extra { dict.removeValue(forKey: key) }
         return try JSONSerialization.data(withJSONObject: dict)
     }
 }
@@ -44,6 +50,9 @@ struct Vehicle: SyncEntity {
     var id = UUID().uuidString.lowercased()
     var version = 0
     var deleted = false
+    /// Anzeigename (setzt nur der Server; wird nie gesendet)
+    var createdBy: String?
+    var updatedBy: String?
     var name: String
     var make: String?
     var model: String?
@@ -72,6 +81,9 @@ struct OdometerReading: SyncEntity {
     var id = UUID().uuidString.lowercased()
     var version = 0
     var deleted = false
+    /// Anzeigename (setzt nur der Server; wird nie gesendet)
+    var createdBy: String?
+    var updatedBy: String?
     var vehicleId: String
     var date: Date
     var km: Int
@@ -83,6 +95,9 @@ struct FuelEntry: SyncEntity {
     var id = UUID().uuidString.lowercased()
     var version = 0
     var deleted = false
+    /// Anzeigename (setzt nur der Server; wird nie gesendet)
+    var createdBy: String?
+    var updatedBy: String?
     var vehicleId: String
     var date: Date
     var km: Int
@@ -106,6 +121,9 @@ struct Attachment: SyncEntity {
     var id = UUID().uuidString.lowercased()
     var version = 0
     var deleted = false
+    /// Anzeigename (setzt nur der Server; wird nie gesendet)
+    var createdBy: String?
+    var updatedBy: String?
     var fuelId: String?
     var maintenanceId: String?
     /// Pflicht für Tacho-Fotos ohne Tankung/Wartung; sonst passend zum verknüpften Eintrag
@@ -137,6 +155,9 @@ struct Maintenance: SyncEntity {
     var id = UUID().uuidString.lowercased()
     var version = 0
     var deleted = false
+    /// Anzeigename (setzt nur der Server; wird nie gesendet)
+    var createdBy: String?
+    var updatedBy: String?
     var vehicleId: String
     var date: Date
     var km: Int?
@@ -152,6 +173,9 @@ struct MaintenanceItem: SyncEntity {
     var id = UUID().uuidString.lowercased()
     var version = 0
     var deleted = false
+    /// Anzeigename (setzt nur der Server; wird nie gesendet)
+    var createdBy: String?
+    var updatedBy: String?
     var maintenanceId: String
     var label: String
     var done: Bool = false
@@ -171,6 +195,9 @@ struct MaintenanceMaterial: SyncEntity {
     var id = UUID().uuidString.lowercased()
     var version = 0
     var deleted = false
+    /// Anzeigename (setzt nur der Server; wird nie gesendet)
+    var createdBy: String?
+    var updatedBy: String?
     var maintenanceId: String
     var name: String
     var partNumber: String?
@@ -207,6 +234,9 @@ struct MaterialArticle: SyncEntity {
     var id = UUID().uuidString.lowercased()
     var version = 0
     var deleted = false
+    /// Anzeigename (setzt nur der Server; wird nie gesendet)
+    var createdBy: String?
+    var updatedBy: String?
     var name: String
     var partNumber: String?
     var unit: String = "Stk"
@@ -298,12 +328,18 @@ struct TenantInfo: Codable, Hashable, Identifiable {
     var slug: String
     var role: String
     var id: String { slug }
-    var canWrite: Bool { role == "write" }
+    /// Verwalten (Rolle "admin") – impliziert Schreibrecht. Verwaltung selbst nur im Webfrontend.
+    var isAdmin: Bool { role == "admin" }
+    var canWrite: Bool { role == "write" || role == "admin" }
+    var isLocal: Bool { slug == LocalIdentity.slug && role == "write" }
+    var roleLabel: String { Member.roleLabel(role) }
 }
 
 struct MeResponse: Decodable {
     var sub: String
     var name: String?
+    /// Anzeigename (z. B. „Anna Muster“), neuere Server
+    var displayName: String?
     var tenants: [TenantInfo]
 }
 
@@ -523,6 +559,9 @@ struct Trip: SyncEntity {
     var id: String
     var version: Int
     var deleted: Bool
+    /// Anzeigename (setzt nur der Server; wird nie gesendet)
+    var createdBy: String?
+    var updatedBy: String?
     var vehicleId: String
     var driverSub: String?
     var driverName: String?
@@ -574,6 +613,7 @@ struct Trip: SyncEntity {
         case distanceGps, distanceRoute, startPlaceId, endPlaceId, startLabel, endLabel, category, purpose
         case customerId, customerName, status, source, suggestionCategory, suggestionPurpose, suggestionCustomerId
         case suggestionConfidence, suggestionReason, suggestionSource, trackHash, splitOf, privateMode, note
+        case createdBy, updatedBy
     }
 
     init(id: String = UUID().uuidString.lowercased(), version: Int = 0, deleted: Bool = false,
@@ -661,6 +701,8 @@ struct Trip: SyncEntity {
                   splitOf: c.lenientString(.splitOf),
                   privateMode: c.lenientBool(.privateMode) ?? false,
                   note: c.lenientString(.note))
+        createdBy = c.lenientString(.createdBy)
+        updatedBy = c.lenientString(.updatedBy)
     }
 
     func encode(to encoder: Encoder) throws {
@@ -698,6 +740,8 @@ struct Trip: SyncEntity {
         try c.encodeIfPresent(splitOf, forKey: .splitOf)
         try c.encode(privateMode, forKey: .privateMode)
         try c.encodeIfPresent(note, forKey: .note)
+        try c.encodeIfPresent(createdBy, forKey: .createdBy)
+        try c.encodeIfPresent(updatedBy, forKey: .updatedBy)
     }
 
     // MARK: Datenschutz
@@ -831,6 +875,9 @@ struct Place: SyncEntity {
     var id = UUID().uuidString.lowercased()
     var version = 0
     var deleted = false
+    /// Anzeigename (setzt nur der Server; wird nie gesendet)
+    var createdBy: String?
+    var updatedBy: String?
     var name: String
     /// home | work | customer | other
     var kind: String = PlaceKind.other.rawValue
@@ -843,7 +890,7 @@ struct Place: SyncEntity {
     var isPrivate: Bool = false
 
     enum CodingKeys: String, CodingKey {
-        case id, version, deleted, name, kind, lat, lon, radiusM, customerId, defaultCategory
+        case id, version, deleted, createdBy, updatedBy, name, kind, lat, lon, radiusM, customerId, defaultCategory
         case isPrivate = "private"
     }
 
@@ -875,6 +922,8 @@ extension Place {
                   customerId: c.lenientString(.customerId),
                   defaultCategory: c.lenientString(.defaultCategory),
                   isPrivate: c.lenientBool(.isPrivate) ?? false)
+        createdBy = c.lenientString(.createdBy)
+        updatedBy = c.lenientString(.updatedBy)
     }
 }
 
@@ -888,6 +937,9 @@ struct Customer: SyncEntity {
     var id = UUID().uuidString.lowercased()
     var version = 0
     var deleted = false
+    /// Anzeigename (setzt nur der Server; wird nie gesendet)
+    var createdBy: String?
+    var updatedBy: String?
     var name: String
     var ref: String?
     var note: String?
@@ -901,6 +953,9 @@ struct PurposeRule: SyncEntity {
     var id = UUID().uuidString.lowercased()
     var version = 0
     var deleted = false
+    /// Anzeigename (setzt nur der Server; wird nie gesendet)
+    var createdBy: String?
+    var updatedBy: String?
     var priority: Int = 100
     var fromPlaceId: String?
     var toPlaceId: String?
@@ -970,6 +1025,9 @@ struct TaxParam: SyncEntity {
     var id = UUID().uuidString.lowercased()
     var version = 0
     var deleted = false
+    /// Anzeigename (setzt nur der Server; wird nie gesendet)
+    var createdBy: String?
+    var updatedBy: String?
     var year: Int
     /// federal | canton:ZH | tenant
     var scope: String = "tenant"
@@ -1162,6 +1220,8 @@ extension KeyedDecodingContainer {
 struct TripMismatch: Decodable, Identifiable, Hashable {
     var tripId: String?
     var reason: String?
+    /// Verhindert den Abschluss (ausser force + Begründung); `nil` bei älteren Servern = blockierend
+    var blocking: Bool?
     var id: String { "\(tripId ?? "-")|\(reason ?? "")" }
 }
 
@@ -1174,6 +1234,15 @@ struct OdometerCheck: Decodable, Hashable {
     var note: String?
 
     enum CodingKeys: String, CodingKey { case tripKm, odometerKm, diffKm, ok, readings, note }
+
+    init(tripKm: Double?, odometerKm: Double?, diffKm: Double?, ok: Bool?, readings: Int?, note: String?) {
+        self.tripKm = tripKm
+        self.odometerKm = odometerKm
+        self.diffKm = diffKm
+        self.ok = ok
+        self.readings = readings
+        self.note = note
+    }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -1197,6 +1266,17 @@ struct TripCheck: Decodable {
     var closed: Bool?
 
     enum CodingKeys: String, CodingKey { case month, trips, gaps, mismatches, odometerCheck, unconfirmed, closed }
+
+    init(month: String?, trips: Int?, gaps: [TripGap], mismatches: [TripMismatch], odometerCheck: OdometerCheck?,
+         unconfirmed: Int?, closed: Bool?) {
+        self.month = month
+        self.trips = trips
+        self.gaps = gaps
+        self.mismatches = mismatches
+        self.odometerCheck = odometerCheck
+        self.unconfirmed = unconfirmed
+        self.closed = closed
+    }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -1222,6 +1302,16 @@ struct YearReportParam: Decodable, Identifiable, Hashable {
 
     enum CodingKeys: String, CodingKey { case key, label, value, year, scope, sourceUrl, note }
 
+    init(key: String?, label: String?, value: Double?, year: Int?, scope: String?, sourceUrl: String?, note: String?) {
+        self.key = key
+        self.label = label
+        self.value = value
+        self.year = year
+        self.scope = scope
+        self.sourceUrl = sourceUrl
+        self.note = note
+    }
+
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         key = c.lenientString(.key)
@@ -1243,6 +1333,16 @@ struct YearReportItem: Decodable, Hashable {
     var params: [YearReportParam] = []
 
     enum CodingKeys: String, CodingKey { case label, value, applicable, formula, reason, params }
+
+    init(label: String?, value: Double?, applicable: Bool?, formula: String?, reason: String?,
+         params: [YearReportParam] = []) {
+        self.label = label
+        self.value = value
+        self.applicable = applicable
+        self.formula = formula
+        self.reason = reason
+        self.params = params
+    }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)

@@ -48,6 +48,10 @@ struct LoginView: View {
                     Button("Probleme bei der Anmeldung?") { confirmReset = true }
                         .font(.footnote)
                         .padding(.top, 8)
+                    Button("Ohne Server nutzen – Betriebsart wählen") { settings.resetMode() }
+                        .font(.footnote)
+                        .disabled(AppMode.isDemo)
+                        .accessibilityHint("Zurück zur Auswahl «Nur auf diesem iPhone» oder «Mit Server»")
                 }
                 .padding()
             }

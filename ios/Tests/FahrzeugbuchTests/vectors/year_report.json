@@ -1,0 +1,362 @@
+{
+ "description": "Jahresbericht (tax.year_report, GET …/year-report?year=). Eingabe: Fahrzeug (Steuerfelder), Fahrten, Tankvorgänge, Wartungen, tax_params des Mandanten (ohne TAX_CANTON). Erwartet: Teilmenge der Antwort (km, Anteile, Kosten, Positionen value/applicable, Monate, Warnungen). km je Fahrt: Tacho, sonst Route, sonst GPS. Monate mit Nutzung: lokale Monate (Europe/Zurich) mit Fahrt, Tankvorgang oder km-Stand.",
+ "cases": [
+  {
+   "name": "Privatfahrzeug mit Kilometerentschädigung",
+   "year": 2026,
+   "vehicle": {
+    "name": "Golf",
+    "ownership": "private"
+   },
+   "trips": [
+    {
+     "start_at": "2026-01-05T08:00:00+01:00",
+     "end_at": "2026-01-05T08:30:00+01:00",
+     "km_start": 10000,
+     "km_end": 10040,
+     "category": "business",
+     "purpose": "Kunde",
+     "status": "confirmed"
+    },
+    {
+     "start_at": "2026-01-06T07:30:00+01:00",
+     "end_at": "2026-01-06T08:00:00+01:00",
+     "km_start": 10040,
+     "km_end": 10060,
+     "category": "commute",
+     "status": "confirmed"
+    },
+    {
+     "start_at": "2026-02-07T10:00:00+01:00",
+     "end_at": "2026-02-07T11:00:00+01:00",
+     "distance_route": 33.3,
+     "category": "private",
+     "status": "confirmed"
+    },
+    {
+     "start_at": "2026-03-01T10:00:00+01:00",
+     "end_at": "2026-03-01T11:00:00+01:00",
+     "distance_gps": 12.0,
+     "category": "unknown",
+     "status": "draft"
+    },
+    {
+     "start_at": "2027-01-01T00:30:00+01:00",
+     "km_start": 11000,
+     "km_end": 11010,
+     "category": "business",
+     "purpose": "nächstes Jahr",
+     "status": "confirmed"
+    }
+   ],
+   "fuel": [
+    {
+     "date": "2026-01-10",
+     "km": 10100,
+     "liters": 40.0,
+     "price_total": 72.4
+    }
+   ],
+   "maintenance": [
+    {
+     "date": "2026-02-01",
+     "km": 10200,
+     "title": "Service",
+     "cost": 450.0
+    }
+   ],
+   "tax_params": [],
+   "expected": {
+    "trips_count": 4,
+    "unconfirmed": 1,
+    "months_used": 3,
+    "km": {
+     "business": 40.0,
+     "private": 33.3,
+     "commute": 20.0,
+     "field": 0.0,
+     "unknown": 12.0,
+     "total": 105.3
+    },
+    "shares_pct": {
+     "business": 38.0,
+     "private": 31.6,
+     "commute": 19.0,
+     "field": 0.0,
+     "unknown": 11.4
+    },
+    "costs": {
+     "fuel": 72.4,
+     "maintenance": 450.0,
+     "fixed": 0.0,
+     "total": 522.4
+    },
+    "warnings": [
+     "1 Fahrt(en) nicht bestätigt bzw. ohne Kategorie – Zahlen vorläufig.",
+     "Fixkosten (annual_fixed_costs) fehlen – effektive Kosten unvollständig.",
+     "Teilweise Default-Parameter verwendet [A] – eigene tax_params erfassen/bestätigen."
+    ],
+    "items": {
+     "private_share_flat": {
+      "value": null,
+      "applicable": false
+     },
+     "private_share_effective": {
+      "value": null,
+      "applicable": false
+     },
+     "private_share_effective_incl_commute": {
+      "value": null,
+      "applicable": false
+     },
+     "km_compensation": {
+      "value": 30.0,
+      "applicable": true
+     },
+     "commute_deduction_federal": {
+      "value": 15.0,
+      "applicable": true
+     },
+     "commute_deduction_canton": {
+      "value": null,
+      "applicable": false
+     }
+    }
+   }
+  },
+  {
+   "name": "Geschäftsfahrzeug pauschal mit eigenen Parametern",
+   "year": 2026,
+   "vehicle": {
+    "name": "Firmenauto",
+    "ownership": "business",
+    "private_use_method": "flat",
+    "purchase_price": 48000,
+    "annual_fixed_costs": 5400
+   },
+   "trips": [
+    {
+     "start_at": "2026-04-01T08:00:00+02:00",
+     "end_at": "2026-04-01T09:00:00+02:00",
+     "km_start": 20000,
+     "km_end": 20100,
+     "category": "business",
+     "purpose": "Montage",
+     "status": "confirmed"
+    },
+    {
+     "start_at": "2026-04-02T18:00:00+02:00",
+     "end_at": "2026-04-02T19:00:00+02:00",
+     "km_start": 20100,
+     "km_end": 20160,
+     "category": "private",
+     "status": "confirmed"
+    },
+    {
+     "start_at": "2026-05-03T07:00:00+02:00",
+     "end_at": "2026-05-03T07:30:00+02:00",
+     "km_start": 20160,
+     "km_end": 20190,
+     "category": "commute",
+     "status": "confirmed"
+    },
+    {
+     "start_at": "2026-05-04T08:00:00+02:00",
+     "end_at": "2026-05-04T12:00:00+02:00",
+     "km_start": 20190,
+     "km_end": 20290,
+     "category": "field",
+     "purpose": "Tour",
+     "status": "confirmed"
+    }
+   ],
+   "fuel": [
+    {
+     "date": "2026-04-05",
+     "km": 20120,
+     "liters": 50.0,
+     "price_total": 90.0
+    },
+    {
+     "date": "2026-06-05",
+     "km": 20300,
+     "liters": 20.0,
+     "price_total": 36.0
+    }
+   ],
+   "maintenance": [],
+   "tax_params": [
+    {
+     "year": 2026,
+     "scope": "tenant",
+     "key": "private_share_pct",
+     "value": 0.8
+    },
+    {
+     "year": 2026,
+     "scope": "tenant",
+     "key": "cap_canton",
+     "value": 6000
+    }
+   ],
+   "expected": {
+    "trips_count": 4,
+    "unconfirmed": 0,
+    "months_used": 3,
+    "km": {
+     "business": 100.0,
+     "private": 60.0,
+     "commute": 30.0,
+     "field": 100.0,
+     "unknown": 0.0,
+     "total": 290.0
+    },
+    "shares_pct": {
+     "business": 34.5,
+     "private": 20.7,
+     "commute": 10.3,
+     "field": 34.5,
+     "unknown": 0.0
+    },
+    "costs": {
+     "fuel": 126.0,
+     "maintenance": 0,
+     "fixed": 5400.0,
+     "total": 5526.0
+    },
+    "warnings": [
+     "Arbeitsweg mit Geschäftsfahrzeug: bei der Pauschale abgegolten (Art. 5a BKV); Behandlung bei effektiver Methode ungeklärt [P].",
+     "Teilweise Default-Parameter verwendet [A] – eigene tax_params erfassen/bestätigen."
+    ],
+    "items": {
+     "private_share_flat": {
+      "value": 1152.0,
+      "applicable": true
+     },
+     "private_share_effective": {
+      "value": 1143.31,
+      "applicable": true
+     },
+     "private_share_effective_incl_commute": {
+      "value": 1714.97,
+      "applicable": true
+     },
+     "km_compensation": {
+      "value": null,
+      "applicable": false
+     },
+     "commute_deduction_federal": {
+      "value": 22.5,
+      "applicable": true
+     },
+     "commute_deduction_canton": {
+      "value": 22.5,
+      "applicable": true
+     }
+    }
+   }
+  },
+  {
+   "name": "Geschäftsfahrzeug effektiv, Kaufpreis fehlt, Default-Parameter Vorjahr",
+   "year": 2027,
+   "vehicle": {
+    "name": "Bus",
+    "ownership": "business",
+    "private_use_method": "effective"
+   },
+   "trips": [
+    {
+     "start_at": "2027-03-01T08:00:00+01:00",
+     "end_at": "2027-03-01T09:00:00+01:00",
+     "km_start": 5000,
+     "km_end": 5200,
+     "category": "private",
+     "status": "confirmed"
+    },
+    {
+     "start_at": "2027-03-02T08:00:00+01:00",
+     "end_at": "2027-03-02T09:00:00+01:00",
+     "km_start": 5200,
+     "km_end": 5300,
+     "category": "business",
+     "purpose": "Lieferung",
+     "status": "confirmed"
+    }
+   ],
+   "fuel": [
+    {
+     "date": "2027-03-03",
+     "km": 5300,
+     "liters": 30.0,
+     "price_total": 60.0
+    }
+   ],
+   "maintenance": [
+    {
+     "date": "2027-03-04",
+     "km": 5310,
+     "title": "Reifen",
+     "cost": 800.0
+    }
+   ],
+   "tax_params": [],
+   "expected": {
+    "trips_count": 2,
+    "unconfirmed": 0,
+    "months_used": 1,
+    "km": {
+     "business": 100.0,
+     "private": 200.0,
+     "commute": 0.0,
+     "field": 0.0,
+     "unknown": 0.0,
+     "total": 300.0
+    },
+    "shares_pct": {
+     "business": 33.3,
+     "private": 66.7,
+     "commute": 0.0,
+     "field": 0.0,
+     "unknown": 0.0
+    },
+    "costs": {
+     "fuel": 60.0,
+     "maintenance": 800.0,
+     "fixed": 0.0,
+     "total": 860.0
+    },
+    "warnings": [
+     "Kaufpreis (purchase_price) fehlt – Privatanteil pauschal nicht berechenbar.",
+     "Fixkosten (annual_fixed_costs) fehlen – effektive Kosten unvollständig.",
+     "Teilweise Default-Parameter verwendet [A] – eigene tax_params erfassen/bestätigen."
+    ],
+    "items": {
+     "private_share_flat": {
+      "value": null,
+      "applicable": true
+     },
+     "private_share_effective": {
+      "value": 573.33,
+      "applicable": true
+     },
+     "private_share_effective_incl_commute": {
+      "value": 573.33,
+      "applicable": true
+     },
+     "km_compensation": {
+      "value": null,
+      "applicable": false
+     },
+     "commute_deduction_federal": {
+      "value": 0.0,
+      "applicable": true
+     },
+     "commute_deduction_canton": {
+      "value": null,
+      "applicable": false
+     }
+    }
+   }
+  }
+ ]
+}

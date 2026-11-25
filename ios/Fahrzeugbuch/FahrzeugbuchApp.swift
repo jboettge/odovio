@@ -31,6 +31,14 @@ struct FahrzeugbuchApp: App {
                 } message: {
                     Text(settings.loginNotice ?? "")
                 }
+                // Hinweis nach einem Wechsel der Betriebsart (z. B. Übernahme der Daten)
+                .alert("Betriebsart", isPresented: Binding(
+                    get: { settings.modeNotice != nil },
+                    set: { if !$0 { settings.modeNotice = nil } })) {
+                    Button("OK", role: .cancel) {}
+                } message: {
+                    Text(settings.modeNotice ?? "")
+                }
                 // Einrichtungslink fahrzeugbuch://setup?server=https://… (Schema in project.yml registrieren)
                 .onOpenURL { url in handleOpenURL(url) }
                 .alert("Server übernehmen?", isPresented: Binding(
@@ -65,6 +73,19 @@ extension FahrzeugbuchApp {
             settings.loginNotice = "Der Einrichtungslink enthält keine gültige HTTPS-Serveradresse."
             return
         }
+        if settings.mode == nil {
+            // Noch keine Betriebsart gewählt: Link bedeutet „Mit Server“
+            settings.chooseServer()
+            settings.serverURL = server
+            return
+        }
+        if settings.isLocal {
+            // Lokalmodus: nichts umstellen, Server im Übertragungs-Assistenten vorbelegen
+            ModeUIState.shared.suggestedServer = server
+            settings.loginNotice = "Die App läuft «Nur auf diesem iPhone». Um deine Daten auf \(ServerLink.host(server)) "
+                + "zu übertragen: Einstellungen › Betriebsart › Auf Server übertragen …"
+            return
+        }
         if !settings.isConfigured || settings.serverURL.isEmpty {
             settings.serverURL = server
         } else if server != settings.serverURL {
@@ -77,21 +98,52 @@ extension FahrzeugbuchApp {
 
 struct RootView: View {
     @Environment(AppSettings.self) private var settings
+    @State private var ui = ModeUIState.shared
 
     var body: some View {
-        #if DEBUG
-        if Demo.isActive {
-            DemoScreen()
-        } else {
+        Group {
+            #if DEBUG
+            if Demo.isActive {
+                DemoScreen()
+            } else {
+                content
+            }
+            #else
             content
+            #endif
         }
-        #else
-        content
-        #endif
+        // Bericht einer Übertragung Lokal → Server (die Ansichten wurden beim Wechsel neu aufgebaut)
+        .sheet(item: $ui.presentReport) { result in
+            ModalNavigation { MigrationReportView(result: result) }
+        }
+    }
+
+    /// Betriebsart: nicht gewählt → Auswahl; lokal → direkt die Fahrzeugliste; Server → Einrichtung/Anmeldung.
+    @ViewBuilder
+    private var content: some View {
+        if settings.mode == nil {
+            ModeChoiceView()
+        } else if settings.isLocal {
+            localContent
+        } else {
+            serverContent
+        }
     }
 
     @ViewBuilder
-    private var content: some View {
+    private var localContent: some View {
+        if let store = settings.store {
+            VehicleListView()
+                .environment(store)
+                .id(store.tenant.slug)
+        } else {
+            ProgressView("Lade lokale Daten …")
+                .task { settings.startLocal() }
+        }
+    }
+
+    @ViewBuilder
+    private var serverContent: some View {
         if !settings.isConfigured {
             NavigationStack { SettingsView() }
         } else if !settings.auth.isLoggedIn {

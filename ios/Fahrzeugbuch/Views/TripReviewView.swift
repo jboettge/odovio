@@ -229,13 +229,20 @@ struct TripReviewView: View {
                 }
             }
             if suggestState == .notFound {
-                Label("Kein passender Vorschlag gefunden (keine Regel, kein Termin, kein Muster – oder offline). "
-                      + "Bitte Kategorie selbst wählen.", systemImage: "info.circle")
+                Label(notFoundText, systemImage: "info.circle")
                     .font(.footnote)
                     .foregroundStyle(Color.warningText)
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
+    }
+
+    private var notFoundText: String {
+        store.isLocal
+            ? "Kein passender Vorschlag gefunden (keine Regel, kein Termin, kein Muster – auf diesem iPhone ohne KI). "
+                + "Bitte Kategorie selbst wählen."
+            : "Kein passender Vorschlag gefunden (keine Regel, kein Termin, kein Muster – oder offline). "
+                + "Bitte Kategorie selbst wählen."
     }
 
     // MARK: Kilometerstand ablesen (U3)

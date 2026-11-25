@@ -147,7 +147,7 @@ struct ScanResultView: View {
                 Section {
                     Toggle("Foto als Beleg speichern", isOn: $saveAttachment)
                 } footer: {
-                    Text("Der Beleg wird beim Sichern gespeichert und bei Verbindung auf deinen Server übertragen.")
+                    Text(attachmentFooter)
                 }
             }
 
@@ -172,7 +172,7 @@ struct ScanResultView: View {
             }
         }
         .task {
-            if !reading.isUnambiguous {
+            if !reading.isUnambiguous && !store.isLocal {
                 visionAvailable = await VisionAvailability.check(api: store.api)
             }
         }
@@ -357,8 +357,15 @@ struct ScanResultView: View {
         return km.asInt != nil
     }
 
+    /// „Mit KI auswerten“ nur mit Server (im Lokalmodus nie)
     private var showServerButton: Bool {
-        !reading.isUnambiguous && visionAvailable
+        !store.isLocal && !reading.isUnambiguous && visionAvailable
+    }
+
+    private var attachmentFooter: String {
+        store.isLocal
+            ? "Der Beleg wird beim Sichern gespeichert und bleibt auf diesem iPhone."
+            : "Der Beleg wird beim Sichern gespeichert und bei Verbindung auf deinen Server übertragen."
     }
 
     private func apply() {
