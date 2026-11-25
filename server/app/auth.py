@@ -5,11 +5,17 @@ Env:
   OIDC_CLIENT_ID      Client der iOS-App (public, PKCE)    (Pflicht, wird der App via /auth/config mitgeteilt)
   OIDC_AUDIENCE       erwartete aud; leer → stattdessen azp == OIDC_CLIENT_ID
   OIDC_REQUIRED_ROLE  optional: Realm- oder Client-Rolle, die der Benutzer haben muss
+
+Mandanten (aus dem `groups`-Claim, Keycloak-Gruppen mit vollem Pfad):
+  TENANT_GROUP_PREFIX /fahrzeugbuch/  →  /fahrzeugbuch/<mandant>        = lesen + schreiben
+                                         /fahrzeugbuch/<mandant>/lesen  = nur lesen
+  DEFAULT_TENANT      optional: Mandant, auf den jeder berechtigte Benutzer schreibend zugreift
 """
 import json
 import os
+import re
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import Annotated
 
@@ -57,10 +63,34 @@ def _roles(claims: dict, client_id: str) -> set[str]:
     return roles
 
 
+TENANT_SLUG = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
+
+
 @dataclass(frozen=True)
 class User:
     sub: str
     name: str | None
+    tenants: dict = field(default_factory=dict)  # slug -> "write" | "read"
+
+
+def tenants_from_claims(claims: dict) -> dict[str, str]:
+    prefix = "/" + os.environ.get("TENANT_GROUP_PREFIX", "/fahrzeugbuch/").strip("/") + "/"
+    result: dict[str, str] = {}
+    for group in claims.get("groups") or []:
+        if not isinstance(group, str) or not group.startswith(prefix):
+            continue
+        parts = group[len(prefix):].strip("/").split("/")
+        slug = parts[0].lower()
+        if not TENANT_SLUG.match(slug):
+            continue
+        if len(parts) == 1:
+            result[slug] = "write"
+        elif len(parts) == 2 and parts[1].lower() in ("lesen", "read"):
+            result.setdefault(slug, "read")
+    default = (os.environ.get("DEFAULT_TENANT") or "").lower()
+    if default and TENANT_SLUG.match(default):
+        result[default] = "write"
+    return result
 
 
 def verify_token(token: str, cfg: OIDCConfig) -> User:
@@ -84,7 +114,11 @@ def verify_token(token: str, cfg: OIDCConfig) -> User:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Token wurde für einen anderen Client ausgestellt")
     if cfg.required_role and cfg.required_role not in _roles(claims, cfg.client_id):
         raise HTTPException(status.HTTP_403_FORBIDDEN, f"Rolle {cfg.required_role} fehlt")
-    return User(sub=claims["sub"], name=claims.get("preferred_username") or claims.get("name"))
+    return User(
+        sub=claims["sub"],
+        name=claims.get("preferred_username") or claims.get("name"),
+        tenants=tenants_from_claims(claims),
+    )
 
 
 def require_user(authorization: Annotated[str | None, Header()] = None) -> User:

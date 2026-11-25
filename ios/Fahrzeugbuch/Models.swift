@@ -13,15 +13,36 @@ enum FuelType: String, CaseIterable, Identifiable {
     }
 }
 
-struct Vehicle: Codable, Identifiable, Hashable {
-    let id: Int
+/// Gemeinsame Eigenschaften aller synchronisierten Objekte.
+/// `id` erzeugt die App (UUID) → Erfassen offline möglich.
+protocol SyncEntity: Codable, Identifiable, Hashable where ID == String {
+    static var entityName: String { get }
+    var id: String { get }
+    var version: Int { get set }
+    var deleted: Bool { get set }
+}
+
+extension SyncEntity {
+    /// Nutzdaten für den Server (snake_case, ohne id/version/deleted).
+    func payload() throws -> Data {
+        let data = try APIClient.encoder.encode(self)
+        var dict = try JSONSerialization.jsonObject(with: data) as? [String: Any] ?? [:]
+        for key in ["id", "version", "deleted"] { dict.removeValue(forKey: key) }
+        return try JSONSerialization.data(withJSONObject: dict)
+    }
+}
+
+struct Vehicle: SyncEntity {
+    static let entityName = "vehicle"
+    var id = UUID().uuidString.lowercased()
+    var version = 0
+    var deleted = false
     var name: String
     var make: String?
     var model: String?
     var plate: String?
-    var fuelType: String
-    var initialKm: Int
-    var currentKm: Int
+    var fuelType: String = FuelType.benzin.rawValue
+    var initialKm: Int = 0
 
     var subtitle: String {
         [[make, model].compactMap { $0 }.joined(separator: " "), plate ?? ""]
@@ -29,59 +50,40 @@ struct Vehicle: Codable, Identifiable, Hashable {
     }
 }
 
-struct VehicleInput: Encodable {
-    var name: String
-    var make: String?
-    var model: String?
-    var plate: String?
-    var fuelType: String
-    var initialKm: Int
-}
-
-struct OdometerReading: Codable, Identifiable {
-    let id: Int
+struct OdometerReading: SyncEntity {
+    static let entityName = "odometer"
+    var id = UUID().uuidString.lowercased()
+    var version = 0
+    var deleted = false
+    var vehicleId: String
     var date: Date
     var km: Int
     var note: String?
 }
 
-struct OdometerInput: Encodable {
-    var date: Date
-    var km: Int
-    var note: String?
-}
-
-struct FuelEntry: Codable, Identifiable {
-    let id: Int
+struct FuelEntry: SyncEntity {
+    static let entityName = "fuel"
+    var id = UUID().uuidString.lowercased()
+    var version = 0
+    var deleted = false
+    var vehicleId: String
     var date: Date
     var km: Int
     var liters: Double
     var priceTotal: Double
-    var pricePerLiter: Double
-    var fullTank: Bool
+    var fullTank: Bool = true
     var station: String?
     var note: String?
+
+    var pricePerLiter: Double { liters > 0 ? priceTotal / liters : 0 }
 }
 
-struct FuelInput: Encodable {
-    var date: Date
-    var km: Int
-    var liters: Double
-    var priceTotal: Double
-    var fullTank: Bool
-    var station: String?
-    var note: String?
-}
-
-struct MaintenanceItem: Codable, Identifiable, Hashable {
-    let id: Int
-    var label: String
-    var done: Bool
-    var position: Int
-}
-
-struct Maintenance: Codable, Identifiable {
-    let id: Int
+struct Maintenance: SyncEntity {
+    static let entityName = "maintenance"
+    var id = UUID().uuidString.lowercased()
+    var version = 0
+    var deleted = false
+    var vehicleId: String
     var date: Date
     var km: Int?
     var title: String
@@ -89,73 +91,128 @@ struct Maintenance: Codable, Identifiable {
     var note: String?
     var nextDueKm: Int?
     var nextDueDate: Date?
-    var items: [MaintenanceItem]
-
-    var doneCount: Int { items.filter(\.done).count }
 }
 
-struct MaintenanceItemInput: Encodable {
+struct MaintenanceItem: SyncEntity {
+    static let entityName = "maintenance_item"
+    var id = UUID().uuidString.lowercased()
+    var version = 0
+    var deleted = false
+    var maintenanceId: String
     var label: String
-    var done: Bool
+    var done: Bool = false
+    var position: Int = 0
 }
 
-struct MaintenanceInput: Encodable {
-    var date: Date
-    var km: Int?
-    var title: String
-    var cost: Double?
-    var note: String?
-    var nextDueKm: Int?
-    var nextDueDate: Date?
-    var items: [MaintenanceItemInput]
+// MARK: Server-Antworten
+
+struct TenantInfo: Codable, Hashable, Identifiable {
+    var slug: String
+    var role: String
+    var id: String { slug }
+    var canWrite: Bool { role == "write" }
 }
 
-struct ItemPatch: Encodable {
-    var done: Bool
+struct MeResponse: Decodable {
+    var sub: String
+    var name: String?
+    var tenants: [TenantInfo]
 }
 
-struct ChecklistTemplate: Decodable, Identifiable {
+struct ChangesResponse: Decodable {
+    var cursor: Int
+    var vehicles: [Vehicle]
+    var odometer: [OdometerReading]
+    var fuel: [FuelEntry]
+    var maintenance: [Maintenance]
+    var maintenanceItems: [MaintenanceItem]
+}
+
+struct OpResult: Decodable {
+    var opId: String
+    var status: String
+    var entity: String
+    var id: String
+    var version: Int?
+    var error: String?
+}
+
+struct SyncResponse: Decodable {
+    var results: [OpResult]
+    var cursor: Int
+}
+
+struct ChecklistTemplate: Codable, Identifiable {
     var title: String
     var items: [String]
     var id: String { title }
 }
 
-struct ConsumptionPoint: Decodable, Identifiable {
-    var date: Date
-    var km: Int
-    var distance: Int
-    var liters: Double
-    var cost: Double
-    var consumption: Double
-    var costPerKm: Double
-    var id: Int { km }
+struct AuditResult: Decodable {
+    var ok: Bool
+    var count: Int
+    var headHash: String
+    var brokenAt: Int?
+    var reason: String?
 }
 
-struct DueItem: Decodable, Identifiable {
-    var maintenanceId: Int
-    var title: String
-    var nextDueKm: Int?
-    var nextDueDate: Date?
-    var overdue: Bool
-    var id: Int { maintenanceId }
+struct RevisionEntry: Decodable, Identifiable {
+    var seq: Int
+    var entity: String
+    var entityId: String
+    var version: Int
+    var action: String
+    var data: [String: JSONValue]
+    var actorName: String?
+    var recordedAt: String
+    var clientTs: String?
+    var conflict: Bool
+    var hash: String
+    var id: Int { seq }
 
-    var dueText: String {
-        var parts: [String] = []
-        if let km = nextDueKm { parts.append("bei \(Fmt.km(km))") }
-        if let d = nextDueDate { parts.append("bis \(Fmt.day(d))") }
-        return (overdue ? "Überfällig – " : "Fällig ") + parts.joined(separator: " oder ")
+    var actionLabel: String {
+        switch action {
+        case "create": "Erfasst"
+        case "update": "Geändert"
+        case "delete": "Storniert"
+        default: action
+        }
     }
 }
 
-struct Stats: Decodable {
-    var currentKm: Int
-    var drivenKm: Int
-    var avgConsumption: Double?
-    var avgLitersPerKm: Double?
-    var avgCostPerKm: Double?
-    var totalLiters: Double
-    var totalFuelCost: Double
-    var totalMaintenanceCost: Double
-    var points: [ConsumptionPoint]
-    var due: [DueItem]
+/// Minimaler JSON-Wert für die Anzeige von Revisionsdaten.
+enum JSONValue: Decodable, CustomStringConvertible {
+    case string(String), number(Double), bool(Bool), null
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.singleValueContainer()
+        if c.decodeNil() { self = .null }
+        else if let b = try? c.decode(Bool.self) { self = .bool(b) }
+        else if let n = try? c.decode(Double.self) { self = .number(n) }
+        else if let s = try? c.decode(String.self) { self = .string(s) }
+        else { self = .null }
+    }
+
+    var description: String {
+        switch self {
+        case .string(let s): s
+        case .number(let n): n == n.rounded() && abs(n) < 1e12 ? String(Int(n)) : String(n)
+        case .bool(let b): b ? "ja" : "nein"
+        case .null: "–"
+        }
+    }
+}
+
+// MARK: Outbox
+
+/// Ausstehende Änderung (wird bei nächster Verbindung an /sync gesendet).
+struct PendingOp: Codable, Identifiable {
+    var opId = UUID().uuidString.lowercased()
+    var entity: String
+    var entityId: String
+    var action: String          // upsert | delete
+    var baseVersion: Int?
+    var data: Data?
+    var clientTs: String
+    var id: String { opId }
 }

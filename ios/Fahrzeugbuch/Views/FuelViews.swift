@@ -1,75 +1,63 @@
 import SwiftUI
 
 struct FuelListView: View {
-    @Environment(AppSettings.self) private var settings
+    @Environment(TenantStore.self) private var store
     let vehicle: Vehicle
-    @State private var entries: [FuelEntry] = []
-    @State private var consumptionByKm: [Int: Double] = [:]
-    @State private var loaded = false
     @State private var form: EditTarget<FuelEntry>?
-    @State private var error: String?
-
-    private var latestKm: Int { max(vehicle.currentKm, entries.map(\.km).max() ?? 0) }
+    @State private var toDelete: FuelEntry?
 
     var body: some View {
+        let entries = store.fuel(for: vehicle.id)
+        let consumption = Dictionary(
+            StatsCalculator.consumptionPoints(entries).map { ($0.km, $0.consumption) },
+            uniquingKeysWith: { a, _ in a })
         List {
             ForEach(entries) { e in
                 Button { form = EditTarget(value: e) } label: {
-                    FuelRow(entry: e, consumption: consumptionByKm[e.km])
+                    FuelRow(entry: e, consumption: consumption[e.km], pending: store.isPending(e.id))
                 }
                 .foregroundStyle(.primary)
+                .swipeActions {
+                    if store.canWrite {
+                        Button("Stornieren", role: .destructive) { toDelete = e }
+                    }
+                }
             }
-            .onDelete { offsets in Task { await delete(offsets) } }
         }
         .overlay {
-            if loaded && entries.isEmpty {
+            if entries.isEmpty {
                 ContentUnavailableView("Keine Tankvorgänge", systemImage: "fuelpump",
                                        description: Text("Mit + den ersten Tankvorgang erfassen."))
             }
         }
         .toolbar {
-            ToolbarItem(placement: .topBarTrailing) {
-                Button { form = EditTarget(value: nil) } label: { Image(systemName: "plus") }
+            if store.canWrite {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button { form = EditTarget(value: nil) } label: { Image(systemName: "plus") }
+                }
             }
         }
         .sheet(item: $form) { target in
-            FuelFormView(vehicleID: vehicle.id, entry: target.value, suggestedKm: latestKm) { await load() }
+            FuelFormView(vehicle: vehicle, entry: target.value)
         }
-        .task { await load() }
-        .refreshable { await load() }
-        .errorAlert($error)
+        .stornoDialog($toDelete, title: "Tankvorgang stornieren?") { store.delete($0) }
+        .refreshable { await store.sync() }
     }
+}
 
-    private func load() async {
-        do {
-            let api = settings.api
-            async let list: [FuelEntry] = api.get("api/vehicles/\(vehicle.id)/fuel")
-            async let stats: Stats = api.get("api/vehicles/\(vehicle.id)/stats")
-            let (fetched, s) = try await (list, stats)
-            entries = fetched
-            consumptionByKm = Dictionary(s.points.map { ($0.km, $0.consumption) },
-                                         uniquingKeysWith: { a, _ in a })
-        } catch {
-            self.error = error.localizedDescription
-        }
-        loaded = true
-    }
-
-    private func delete(_ offsets: IndexSet) async {
-        let ids = offsets.map { entries[$0].id }
-        entries.remove(atOffsets: offsets)
-        do {
-            for id in ids { try await settings.api.delete("api/fuel/\(id)") }
-        } catch {
-            self.error = error.localizedDescription
-        }
-        await load()
+struct PendingBadge: View {
+    var body: some View {
+        Image(systemName: "icloud.and.arrow.up")
+            .font(.caption2)
+            .foregroundStyle(.orange)
+            .accessibilityLabel("Noch nicht synchronisiert")
     }
 }
 
 private struct FuelRow: View {
     let entry: FuelEntry
     let consumption: Double?
+    let pending: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -81,6 +69,7 @@ private struct FuelRow: View {
                         .padding(.horizontal, 6).padding(.vertical, 2)
                         .background(.orange.opacity(0.2), in: Capsule())
                 }
+                if pending { PendingBadge() }
                 Spacer()
                 Text(Fmt.chf(entry.priceTotal)).font(.headline)
             }
@@ -101,12 +90,9 @@ private struct FuelRow: View {
 }
 
 struct FuelFormView: View {
-    @Environment(AppSettings.self) private var settings
-    @Environment(\.dismiss) private var dismiss
-    let vehicleID: Int
+    @Environment(TenantStore.self) private var store
+    let vehicle: Vehicle
     let entry: FuelEntry?
-    let suggestedKm: Int
-    let onSaved: () async -> Void
 
     @State private var date = Date()
     @State private var km = ""
@@ -115,8 +101,6 @@ struct FuelFormView: View {
     @State private var fullTank = true
     @State private var station = ""
     @State private var note = ""
-    @State private var saving = false
-    @State private var error: String?
 
     private var pricePerLiter: Double? {
         guard let l = liters.asDouble, l > 0, let p = price.asDouble else { return nil }
@@ -124,7 +108,7 @@ struct FuelFormView: View {
     }
 
     private var valid: Bool {
-        km.asInt != nil && (liters.asDouble ?? 0) > 0 && price.asDouble != nil
+        store.canWrite && km.asInt != nil && (liters.asDouble ?? 0) > 0 && price.asDouble != nil
     }
 
     var body: some View {
@@ -152,17 +136,20 @@ struct FuelFormView: View {
                     TextField("Tankstelle", text: $station)
                     TextField("Notiz", text: $note, axis: .vertical)
                 }
+                if let e = entry {
+                    HistorySection(entity: FuelEntry.entityName, id: e.id)
+                }
             }
             .navigationTitle(entry == nil ? "Tankvorgang" : "Tankvorgang bearbeiten")
-            .formToolbar(canSave: valid, saving: saving) { await save() }
+            .formToolbar(canSave: valid, save: save)
             .onAppear(perform: prefill)
-            .errorAlert($error)
         }
     }
 
     private func prefill() {
         guard let e = entry else {
-            if suggestedKm > 0 { km = String(suggestedKm) }
+            let current = store.currentKm(store.vehicle(id: vehicle.id) ?? vehicle)
+            if current > 0 { km = String(current) }
             return
         }
         date = e.date
@@ -174,22 +161,16 @@ struct FuelFormView: View {
         note = e.note ?? ""
     }
 
-    private func save() async {
-        guard let km = km.asInt, let l = liters.asDouble, let p = price.asDouble else { return }
-        saving = true
-        defer { saving = false }
-        let input = FuelInput(date: date, km: km, liters: l, priceTotal: p, fullTank: fullTank,
-                              station: station.nilIfEmpty, note: note.nilIfEmpty)
-        do {
-            if let e = entry {
-                let _: FuelEntry = try await settings.api.put("api/fuel/\(e.id)", input)
-            } else {
-                let _: FuelEntry = try await settings.api.post("api/vehicles/\(vehicleID)/fuel", input)
-            }
-            await onSaved()
-            dismiss()
-        } catch {
-            self.error = error.localizedDescription
-        }
+    private func save() {
+        guard let kmValue = km.asInt, let l = liters.asDouble, let p = price.asDouble else { return }
+        var e = entry ?? FuelEntry(vehicleId: vehicle.id, date: date, km: kmValue, liters: l, priceTotal: p)
+        e.date = date
+        e.km = kmValue
+        e.liters = l
+        e.priceTotal = p
+        e.fullTank = fullTank
+        e.station = station.nilIfEmpty
+        e.note = note.nilIfEmpty
+        store.save(e)
     }
 }

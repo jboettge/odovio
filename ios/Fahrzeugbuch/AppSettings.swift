@@ -1,4 +1,5 @@
 import Foundation
+import Network
 import Observation
 import Security
 
@@ -10,8 +11,26 @@ final class AppSettings {
     }
     let auth = AuthManager()
 
+    /// Mandanten des Benutzers (aus /api/me, offline aus Cache)
+    private(set) var tenants: [TenantInfo] = []
+    private(set) var tenantsLoaded = false
+    private(set) var tenantError: String?
+    private(set) var store: TenantStore?
+
+    @ObservationIgnored private let monitor = NWPathMonitor()
+
     init() {
         serverURL = UserDefaults.standard.string(forKey: "serverURL") ?? ""
+        if let data = UserDefaults.standard.data(forKey: "tenants"),
+           let cached = try? JSONDecoder().decode([TenantInfo].self, from: data) {
+            tenants = cached
+        }
+        // Verbindung wieder da → ausstehende Änderungen übertragen
+        monitor.pathUpdateHandler = { [weak self] path in
+            guard path.status == .satisfied else { return }
+            Task { @MainActor in await self?.store?.sync() }
+        }
+        monitor.start(queue: DispatchQueue(label: "fahrzeugbuch.network"))
     }
 
     var isConfigured: Bool { URL(string: serverURL)?.host != nil }
@@ -24,6 +43,51 @@ final class AppSettings {
         return APIClient(baseURL: url) { force in
             try await auth.validAccessToken(server: url, forceRefresh: force)
         }
+    }
+
+    var currentTenantSlug: String? {
+        get { UserDefaults.standard.string(forKey: "tenant") }
+        set { UserDefaults.standard.set(newValue, forKey: "tenant") }
+    }
+
+    /// Mandanten laden (online) bzw. Cache verwenden (offline) und Store öffnen.
+    func loadTenants() async {
+        do {
+            let me: MeResponse = try await api.get("api/me")
+            tenants = me.tenants
+            tenantError = nil
+            UserDefaults.standard.set(try? JSONEncoder().encode(me.tenants), forKey: "tenants")
+        } catch {
+            if tenants.isEmpty { tenantError = error.localizedDescription }
+        }
+        tenantsLoaded = true
+        let chosen = currentTenantSlug.flatMap { s in tenants.first { $0.slug == s } } ?? tenants.first
+        if let chosen { selectTenant(chosen) } else { store = nil }
+    }
+
+    func selectTenant(_ t: TenantInfo) {
+        if store?.tenant == t { return }
+        currentTenantSlug = t.slug
+        let provider: @MainActor () -> APIClient = { [weak self] in
+            self?.api ?? APIClient(baseURL: URL(string: "http://localhost")!) { _ in throw AuthError.notLoggedIn }
+        }
+        store = TenantStore(tenant: t, api: provider)
+        Task { await store?.sync() }
+    }
+
+    /// Abmelden: Tokens widerrufen und lokale Daten entfernen.
+    func logout() async {
+        await auth.logout(server: baseURL)
+        resetLocalData()
+    }
+
+    func resetLocalData() {
+        store = nil
+        tenants = []
+        tenantsLoaded = false
+        UserDefaults.standard.removeObject(forKey: "tenants")
+        UserDefaults.standard.removeObject(forKey: "tenant")
+        TenantStore.deleteAll()
     }
 }
 

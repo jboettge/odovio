@@ -10,6 +10,10 @@
 # Optional: KC_ADMIN_REALM (master), CLIENT (fahrzeugbuch-ios),
 #           REDIRECT (net.jmb.fahrzeugbuch:/oauth2redirect), ROLE (fahrzeugbuch-user),
 #           ASSIGN_USERS ("jakob anna" → erhalten die Rolle), KCADM
+# Mandanten (Gruppen /fahrzeugbuch/<mandant> = schreiben, /fahrzeugbuch/<mandant>/lesen = lesen):
+#           TENANTS ("privat b-re.ch")       → Gruppen anlegen
+#           MEMBERS ("privat=jakob,anna b-re.ch=jakob") → Schreibzugriff
+#           READERS ("b-re.ch=treuhand")      → Lesezugriff
 set -euo pipefail
 
 : "${KC_URL:?KC_URL setzen (z. B. https://id.j-mb.net)}"
@@ -20,6 +24,10 @@ CLIENT=${CLIENT:-fahrzeugbuch-ios}
 REDIRECT=${REDIRECT:-net.jmb.fahrzeugbuch:/oauth2redirect}
 ROLE=${ROLE:-fahrzeugbuch-user}
 ASSIGN_USERS=${ASSIGN_USERS:-}
+TENANTS=${TENANTS:-}
+MEMBERS=${MEMBERS:-}
+READERS=${READERS:-}
+GROUP_ROOT=fahrzeugbuch
 if [[ -z "${KCADM:-}" ]]; then
   KCADM=$(command -v kcadm.sh || echo /opt/keycloak/bin/kcadm.sh)
 fi
@@ -78,6 +86,60 @@ if ! kc get "clients/$ID/roles/$ROLE" -r "$REALM" >/dev/null 2>&1; then
 fi
 for u in $ASSIGN_USERS; do
   kc add-roles -r "$REALM" --uusername "$u" --cclientid "$CLIENT" --rolename "$ROLE" && echo "Rolle → $u"
+done
+
+# --- Gruppen-Claim (volle Pfade) → Mandanten ----------------------------------
+mapper_exists=0
+while IFS=, read -r mname; do [[ "$mname" == "groups" ]] && mapper_exists=1; done \
+  < <(kc get "clients/$ID/protocol-mappers/models" -r "$REALM" --fields name --format csv --noquotes)
+if [[ $mapper_exists == 0 ]]; then
+  kc create "clients/$ID/protocol-mappers/models" -r "$REALM" \
+    -s name=groups -s protocol=openid-connect -s protocolMapper=oidc-group-membership-mapper \
+    -s 'config."full.path"=true' -s 'config."claim.name"=groups' \
+    -s 'config."access.token.claim"=true' -s 'config."id.token.claim"=false' \
+    -s 'config."userinfo.token.claim"=false' >/dev/null
+  echo "Mapper groups angelegt"
+fi
+
+group_id() { kc get "group-by-path/$1" -r "$REALM" --fields id --format csv --noquotes 2>/dev/null | head -1 || true; }
+ensure_group() {  # $1 = Pfad ohne führenden Slash
+  local path=$1 parent name gid pid
+  gid=$(group_id "$path")
+  [[ -n "$gid" ]] && { echo "$gid"; return; }
+  name=${path##*/}
+  if [[ "$path" == */* ]]; then
+    parent=${path%/*}
+    pid=$(ensure_group "$parent")
+    kc create "groups/$pid/children" -r "$REALM" -s name="$name" >/dev/null
+  else
+    kc create groups -r "$REALM" -s name="$name" >/dev/null
+  fi
+  echo "Gruppe /$path angelegt" >&2
+  group_id "$path"
+}
+user_id() { kc get users -r "$REALM" -q username="$1" -q exact=true --fields id --format csv --noquotes | head -1 || true; }
+join() {  # $1 = Gruppenpfad, $2 = Benutzer
+  local gid uid
+  gid=$(ensure_group "$1")
+  uid=$(user_id "$2")
+  [[ -z "$uid" ]] && { warn "Benutzer $2 nicht gefunden"; return; }
+  kc update "users/$uid/groups/$gid" -r "$REALM" -s realm="$REALM" -s userId="$uid" -s groupId="$gid" -n
+  echo "$2 → /$1"
+}
+
+for t in $TENANTS; do
+  ensure_group "$GROUP_ROOT/$t" >/dev/null
+  ensure_group "$GROUP_ROOT/$t/lesen" >/dev/null
+done
+for pair in $MEMBERS; do
+  t=${pair%%=*}
+  IFS=, read -ra users <<< "${pair#*=}"
+  for u in "${users[@]}"; do join "$GROUP_ROOT/$t" "$u"; done
+done
+for pair in $READERS; do
+  t=${pair%%=*}
+  IFS=, read -ra users <<< "${pair#*=}"
+  for u in "${users[@]}"; do join "$GROUP_ROOT/$t/lesen" "$u"; done
 done
 
 ISSUER="${KC_PUBLIC_URL:-$KC_URL}/realms/$REALM"

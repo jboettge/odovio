@@ -1,0 +1,210 @@
+"""PDF-Export je Fahrzeug und Zeitraum, inkl. Änderungsprotokoll und Integritätsvermerk."""
+import datetime as dt
+import io
+import json
+from xml.sax.saxutils import escape
+
+from reportlab.lib import colors
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+from reportlab.lib.units import mm
+from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from . import models
+from .audit import verify_chain
+from .stats import VehicleData, consumption_points, summarize
+
+STYLES = getSampleStyleSheet()
+SMALL = ParagraphStyle("small", parent=STYLES["Normal"], fontSize=8, leading=10)
+H2 = ParagraphStyle("h2", parent=STYLES["Heading2"], spaceBefore=10, spaceAfter=4)
+ACTIONS = {"create": "Erfasst", "update": "Geändert", "delete": "Storniert"}
+ENTITY_NAMES = {
+    "vehicle": "Fahrzeug", "odometer": "km-Stand", "fuel": "Tankvorgang",
+    "maintenance": "Wartung", "maintenance_item": "Checkpunkt",
+}
+
+
+def _num(v: float | None, d: int = 2) -> str:
+    if v is None:
+        return "–"
+    return f"{v:,.{d}f}".replace(",", "'")
+
+
+def _km(v: int | None) -> str:
+    return "–" if v is None else f"{v:,}".replace(",", "'")
+
+
+def _day(d: dt.date | str | None) -> str:
+    if d is None:
+        return "–"
+    if isinstance(d, str):
+        d = dt.date.fromisoformat(d[:10])
+    return d.strftime("%d.%m.%Y")
+
+
+def _p(text: str, style=SMALL) -> Paragraph:
+    return Paragraph(escape(text), style)
+
+
+def _table(header: list[str], rows: list[list], widths: list[float]) -> Table:
+    data = [[_p(h, ParagraphStyle("th", parent=SMALL, fontName="Helvetica-Bold")) for h in header]]
+    data += [[c if isinstance(c, Paragraph) else _p(str(c)) for c in r] for r in rows]
+    t = Table(data, colWidths=[w * mm for w in widths], repeatRows=1)
+    t.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#e8edf3")),
+        ("LINEBELOW", (0, 0), (-1, 0), 0.5, colors.grey),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f7f7f7")]),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("TOPPADDING", (0, 0), (-1, -1), 2),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+    ]))
+    return t
+
+
+def _describe(entity: str, data: dict) -> str:
+    match entity:
+        case "fuel":
+            return f"{_day(data.get('date'))}, {_km(data.get('km'))} km, {_num(data.get('liters'))} l, CHF {_num(data.get('price_total'))}"
+        case "odometer":
+            return f"{_day(data.get('date'))}, {_km(data.get('km'))} km"
+        case "maintenance":
+            return f"{_day(data.get('date'))}, {data.get('title')}, CHF {_num(data.get('cost'))}"
+        case "maintenance_item":
+            return f"{data.get('label')}: {'erledigt' if data.get('done') else 'offen'}"
+        case "vehicle":
+            return f"{data.get('name')} {data.get('plate') or ''}".strip()
+    return ""
+
+
+def build_report(
+    db: Session, tenant: models.Tenant, data: VehicleData, date_from: dt.date, date_to: dt.date, user_name: str | None
+) -> bytes:
+    v = data.vehicle
+
+    def in_period(d: dt.date) -> bool:
+        return date_from <= d <= date_to
+
+    fuel = sorted((f for f in data.fuel if in_period(f.date)), key=lambda f: (f.date, f.km))
+    odo = sorted((o for o in data.odometer if in_period(o.date)), key=lambda o: (o.date, o.km))
+    maint = sorted((m for m in data.maintenance if in_period(m.date)), key=lambda m: (m.date, m.id))
+    points = [p for p in consumption_points(data.fuel) if in_period(p["date"])]
+    per_km = {p["km"]: p for p in points}
+
+    def kms(until: dt.date, strict: bool) -> list[int]:
+        def ok(d):
+            return d < until if strict else d <= until
+        return ([o.km for o in data.odometer if ok(o.date)] + [f.km for f in data.fuel if ok(f.date)]
+                + [m.km for m in data.maintenance if m.km is not None and ok(m.date)])
+
+    km_start = max([v.initial_km, *kms(date_from, strict=True)])
+    km_end = max([km_start, *kms(date_to, strict=False)])
+    summary = summarize(points)
+    fuel_cost = sum(f.price_total for f in fuel)
+    maint_cost = sum(m.cost or 0 for m in maint)
+
+    audit = verify_chain(db, tenant)
+    created = dt.datetime.now().strftime("%d.%m.%Y %H:%M")
+
+    story = [
+        Paragraph(escape(f"Fahrzeugbuch – {v.name}"), STYLES["Title"]),
+        _p(f"{' '.join(x for x in [v.make, v.model] if x)}  ·  Kennzeichen: {v.plate or '–'}  ·  "
+           f"Mandant: {tenant.name}", STYLES["Normal"]),
+        _p(f"Zeitraum: {_day(date_from)} – {_day(date_to)}  ·  erstellt {created}"
+           f"{' von ' + user_name if user_name else ''}", STYLES["Normal"]),
+        Spacer(1, 4 * mm),
+        Paragraph("Übersicht", H2),
+        _table(["Kennzahl", "Wert"], [
+            ["km-Stand Beginn / Ende", f"{_km(km_start)} / {_km(km_end)} km"],
+            ["Gefahren im Zeitraum", f"{_km(km_end - km_start)} km"],
+            ["Ø Verbrauch", f"{_num(summary['avg_consumption'])} l/100 km  ({_num(summary['avg_liters_per_km'], 3)} l/km)"],
+            ["Ø Treibstoffkosten", f"CHF {_num(summary['avg_cost_per_km'], 3)} / km"],
+            ["Treibstoff", f"CHF {_num(fuel_cost)}  ({_num(sum(f.liters for f in fuel))} l)"],
+            ["Wartung", f"CHF {_num(maint_cost)}"],
+            ["Total", f"CHF {_num(fuel_cost + maint_cost)}"],
+        ], [60, 110]),
+    ]
+
+    story += [Paragraph(f"Tankvorgänge ({len(fuel)})", H2)]
+    story += [_table(
+        ["Datum", "km-Stand", "Liter", "Betrag CHF", "CHF/l", "Voll", "l/100 km", "Tankstelle"],
+        [[_day(f.date), _km(f.km), _num(f.liters), _num(f.price_total), _num(f.price_per_liter, 3),
+          "ja" if f.full_tank else "nein",
+          _num(per_km[f.km]["consumption"]) if f.full_tank and f.km in per_km else "",
+          f.station or ""] for f in fuel],
+        [20, 20, 16, 20, 15, 11, 18, 50],
+    )] if fuel else [_p("Keine Tankvorgänge im Zeitraum.")]
+
+    story += [Paragraph(f"Wartungen ({len(maint)})", H2)]
+    if maint:
+        rows = []
+        for m in maint:
+            checklist = ", ".join(f"{i.label} [{'x' if i.done else ' '}]" for i in data.items.get(m.id, []))
+            due = " / ".join(x for x in [
+                f"{_km(m.next_due_km)} km" if m.next_due_km else "",
+                _day(m.next_due_date) if m.next_due_date else "",
+            ] if x)
+            rows.append([_day(m.date), _km(m.km), m.title, _num(m.cost), due or "–",
+                         checklist + (f"\nNotiz: {m.note}" if m.note else "")])
+        story.append(_table(["Datum", "km-Stand", "Titel", "Kosten CHF", "Nächste", "Checkliste [x] erledigt"],
+                            rows, [20, 18, 28, 18, 22, 64]))
+    else:
+        story.append(_p("Keine Wartungen im Zeitraum."))
+
+    story += [Paragraph(f"Kilometerstände ({len(odo)})", H2)]
+    story += [_table(["Datum", "km-Stand", "Notiz"], [[_day(o.date), _km(o.km), o.note or ""] for o in odo],
+                     [25, 25, 120])] if odo else [_p("Keine separaten Kilometerstände im Zeitraum.")]
+
+    # Änderungsprotokoll: Änderungen/Stornos an Einträgen dieses Fahrzeugs (auch stornierte)
+    ids = {v.id}
+    for model in (models.OdometerReading, models.FuelEntry, models.Maintenance):
+        q = select(model.id, model.date).where(model.vehicle_id == v.id)
+        ids |= {i for i, d in db.execute(q) if in_period(d)}
+    ids |= set(db.scalars(select(models.MaintenanceItem.id).where(models.MaintenanceItem.maintenance_id.in_(list(ids)))))
+    revs = list(db.scalars(
+        select(models.Revision)
+        .where(models.Revision.tenant_id == tenant.id, models.Revision.entity_id.in_(ids),
+               (models.Revision.action != "create") | models.Revision.conflict.is_(True))
+        .order_by(models.Revision.seq)
+    ))
+    story += [Paragraph(f"Änderungsprotokoll ({len(revs)})", H2)]
+    if revs:
+        story.append(_table(
+            ["Seq", "Zeitpunkt (UTC)", "Benutzer", "Aktion", "Objekt", "Stand nach Änderung"],
+            [[r.seq, r.recorded_at[:19].replace("T", " "), r.actor_name or r.actor_sub[:8],
+              ACTIONS.get(r.action, r.action) + (" (Konflikt)" if r.conflict else ""),
+              f"{ENTITY_NAMES.get(r.entity, r.entity)} v{r.version}",
+              _describe(r.entity, json.loads(r.data))] for r in revs],
+            [12, 30, 22, 22, 26, 58],
+        ))
+    else:
+        story.append(_p("Keine nachträglichen Änderungen oder Stornierungen."))
+
+    status = "OK" if audit["ok"] else f"FEHLER ab Seq {audit['broken_at']}: {audit['reason']}"
+    story += [
+        Paragraph("Integrität", H2),
+        _p(f"Revisionskette des Mandanten geprüft: {status}. Revisionen: {audit['count']}."),
+        _p(f"Kettenkopf (SHA-256): {audit['head_hash']}"),
+        _p("Jede Erfassung, Änderung und Stornierung wird unveränderlich protokolliert und über eine "
+           "Hash-Kette gesichert. Der Kettenkopf-Hash dieses Berichts erlaubt den späteren Nachweis, "
+           "dass keine Einträge nachträglich verändert wurden."),
+    ]
+
+    footer = f"Fahrzeugbuch · {tenant.name} · {v.name} · Integrität: {'OK' if audit['ok'] else 'FEHLER'} " \
+             f"· Kette {audit['head_hash'][:12]}…"
+
+    def on_page(canvas, doc):
+        canvas.saveState()
+        canvas.setFont("Helvetica", 7)
+        canvas.setFillColor(colors.grey)
+        canvas.drawString(15 * mm, 10 * mm, footer)
+        canvas.drawRightString(A4[0] - 15 * mm, 10 * mm, f"Seite {doc.page}")
+        canvas.restoreState()
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=A4, leftMargin=15 * mm, rightMargin=15 * mm,
+                            topMargin=15 * mm, bottomMargin=18 * mm,
+                            title=f"Fahrzeugbuch {v.name}", author=user_name or "Fahrzeugbuch")
+    doc.build(story, onFirstPage=on_page, onLaterPages=on_page)
+    return buf.getvalue()

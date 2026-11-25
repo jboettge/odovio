@@ -1,10 +1,8 @@
 import datetime as dt
+import uuid
+from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
-
-
-class ORM(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
+from pydantic import BaseModel, Field, field_validator
 
 
 class AuthConfig(BaseModel):
@@ -13,64 +11,47 @@ class AuthConfig(BaseModel):
     scopes: str
 
 
-# Fahrzeuge
-class VehicleIn(BaseModel):
+class TenantInfo(BaseModel):
+    slug: str
+    role: Literal["write", "read"]
+
+
+class Me(BaseModel):
+    sub: str
+    name: str | None
+    tenants: list[TenantInfo]
+
+
+# ---------- Nutzdaten je Objekttyp (Sync) ----------
+class VehicleData(BaseModel):
     name: str = Field(min_length=1, max_length=100)
-    make: str | None = None
-    model: str | None = None
-    plate: str | None = None
-    fuel_type: str = "benzin"
+    make: str | None = Field(default=None, max_length=100)
+    model: str | None = Field(default=None, max_length=100)
+    plate: str | None = Field(default=None, max_length=30)
+    fuel_type: str = Field(default="benzin", max_length=20)
     initial_km: int = Field(default=0, ge=0)
 
 
-class VehicleOut(ORM, VehicleIn):
-    id: int
-    current_km: int
-
-
-# Kilometerstände
-class OdometerIn(BaseModel):
+class OdometerData(BaseModel):
+    vehicle_id: str
     date: dt.date
     km: int = Field(ge=0)
     note: str | None = None
 
 
-class OdometerOut(ORM, OdometerIn):
-    id: int
-
-
-# Tankvorgänge
-class FuelIn(BaseModel):
+class FuelData(BaseModel):
+    vehicle_id: str
     date: dt.date
     km: int = Field(ge=0)
     liters: float = Field(gt=0)
     price_total: float = Field(ge=0)
     full_tank: bool = True
-    station: str | None = None
+    station: str | None = Field(default=None, max_length=100)
     note: str | None = None
 
 
-class FuelOut(ORM, FuelIn):
-    id: int
-    price_per_liter: float
-
-
-# Wartung
-class ItemIn(BaseModel):
-    label: str = Field(min_length=1, max_length=200)
-    done: bool = False
-
-
-class ItemOut(ORM, ItemIn):
-    id: int
-    position: int
-
-
-class ItemPatch(BaseModel):
-    done: bool
-
-
-class MaintenanceIn(BaseModel):
+class MaintenanceData(BaseModel):
+    vehicle_id: str
     date: dt.date
     km: int | None = Field(default=None, ge=0)
     title: str = Field(min_length=1, max_length=150)
@@ -78,19 +59,56 @@ class MaintenanceIn(BaseModel):
     note: str | None = None
     next_due_km: int | None = Field(default=None, ge=0)
     next_due_date: dt.date | None = None
-    items: list[ItemIn] = []
 
 
-class MaintenanceOut(ORM):
-    id: int
-    date: dt.date
-    km: int | None
-    title: str
-    cost: float | None
-    note: str | None
-    next_due_km: int | None
-    next_due_date: dt.date | None
-    items: list[ItemOut]
+class MaintenanceItemData(BaseModel):
+    maintenance_id: str
+    label: str = Field(min_length=1, max_length=200)
+    done: bool = False
+    position: int = 0
+
+
+# ---------- Sync-Protokoll ----------
+class SyncOp(BaseModel):
+    op_id: str = Field(min_length=8, max_length=64)
+    entity: Literal["vehicle", "odometer", "fuel", "maintenance", "maintenance_item"]
+    id: str
+    action: Literal["upsert", "delete"]
+    base_version: int | None = None  # Version, auf der die Änderung beruht (None = neu)
+    data: dict = {}
+    client_ts: str | None = Field(default=None, max_length=40)  # Erfassungszeitpunkt auf dem Gerät
+
+    @field_validator("id")
+    @classmethod
+    def _uuid(cls, v: str) -> str:
+        return str(uuid.UUID(v))
+
+
+class SyncRequest(BaseModel):
+    ops: list[SyncOp] = Field(max_length=500)
+
+
+class OpResult(BaseModel):
+    op_id: str
+    status: Literal["applied", "conflict", "duplicate", "noop", "rejected"]
+    entity: str
+    id: str
+    version: int | None = None
+    error: str | None = None
+
+
+class SyncResponse(BaseModel):
+    results: list[OpResult]
+    cursor: int
+
+
+class Changes(BaseModel):
+    cursor: int
+    vehicles: list[dict]
+    odometer: list[dict]
+    fuel: list[dict]
+    maintenance: list[dict]
+    maintenance_items: list[dict]
 
 
 class ChecklistTemplate(BaseModel):
@@ -98,7 +116,29 @@ class ChecklistTemplate(BaseModel):
     items: list[str]
 
 
-# Statistik
+class RevisionOut(BaseModel):
+    seq: int
+    entity: str
+    entity_id: str
+    version: int
+    action: str
+    data: dict
+    actor_name: str | None
+    recorded_at: str
+    client_ts: str | None
+    conflict: bool
+    hash: str
+
+
+class AuditResult(BaseModel):
+    ok: bool
+    count: int
+    head_hash: str
+    broken_at: int | None
+    reason: str | None
+
+
+# ---------- Statistik ----------
 class ConsumptionPoint(BaseModel):
     date: dt.date
     km: int
@@ -110,7 +150,7 @@ class ConsumptionPoint(BaseModel):
 
 
 class DueItem(BaseModel):
-    maintenance_id: int
+    maintenance_id: str
     title: str
     next_due_km: int | None
     next_due_date: dt.date | None
@@ -120,7 +160,7 @@ class DueItem(BaseModel):
 class Stats(BaseModel):
     current_km: int
     driven_km: int
-    avg_consumption: float | None  # L/100 km
+    avg_consumption: float | None
     avg_liters_per_km: float | None
     avg_cost_per_km: float | None
     total_liters: float

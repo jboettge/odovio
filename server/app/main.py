@@ -1,77 +1,76 @@
+import datetime as dt
 import json
-import os
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from typing import Annotated
 
-from fastapi import Depends, FastAPI, HTTPException, Response, status
+from fastapi import Depends, FastAPI, HTTPException, Query, Response, status
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from . import models, schemas
-from .auth import get_config, require_user
+from .audit import install_triggers, verify_chain
+from .auth import TENANT_SLUG, User, get_config, require_user
 from .db import Base, engine, get_session
-from .stats import vehicle_stats
-
-DEFAULT_TEMPLATES = [
-    {
-        "title": "Service",
-        "items": [
-            "Motoröl gewechselt",
-            "Ölfilter gewechselt",
-            "Luftfilter geprüft/gewechselt",
-            "Innenraumfilter gewechselt",
-            "Bremsflüssigkeit geprüft",
-            "Kühlmittel geprüft",
-            "Scheibenwaschwasser aufgefüllt",
-            "Beleuchtung geprüft",
-            "Batterie geprüft",
-            "Serviceintervall zurückgesetzt",
-        ],
-    },
-    {
-        "title": "Reifenwechsel",
-        "items": [
-            "Räder gewechselt",
-            "Profiltiefe geprüft",
-            "Reifendruck eingestellt",
-            "Radschrauben nachgezogen (nach 50 km)",
-            "Eingelagerte Räder gereinigt",
-        ],
-    },
-    {
-        "title": "MFK-Vorbereitung",
-        "items": [
-            "Beleuchtung & Blinker",
-            "Bremsen (Beläge/Scheiben)",
-            "Reifen (Profil, Alter)",
-            "Scheibenwischer",
-            "Auspuff dicht",
-            "Keine Ölverluste",
-            "Fahrzeugausweis dabei",
-        ],
-    },
-]
-
-
-def load_templates() -> list[dict]:
-    path = os.environ.get("CHECKLIST_FILE")
-    if path and os.path.exists(path):
-        with open(path, encoding="utf-8") as f:
-            return json.load(f)
-    return DEFAULT_TEMPLATES
+from .report import build_report
+from .stats import load_vehicle, vehicle_stats
+from .sync import ENTITIES, apply_ops, changes_since
+from .templates import load_templates
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     Base.metadata.create_all(engine)
+    install_triggers(engine)
     yield
 
 
-app = FastAPI(title="Fahrzeugbuch", version="1.0.0", lifespan=lifespan)
+app = FastAPI(title="Fahrzeugbuch", version="2.0.0", lifespan=lifespan)
 DB = Annotated[Session, Depends(get_session)]
-auth = [Depends(require_user)]
+CurrentUser = Annotated[User, Depends(require_user)]
 
 
+@dataclass
+class Access:
+    tenant: models.Tenant
+    role: str
+    user: User
+
+
+def _get_or_create_tenant(db: Session, slug: str) -> models.Tenant:
+    t = db.scalar(select(models.Tenant).where(models.Tenant.slug == slug))
+    if t is not None:
+        return t
+    try:
+        t = models.Tenant(slug=slug, name=slug, seq=0, head_hash=models.GENESIS)
+        db.add(t)
+        db.commit()
+    except IntegrityError:  # parallel angelegt
+        db.rollback()
+        t = db.scalar(select(models.Tenant).where(models.Tenant.slug == slug))
+    return t
+
+
+def tenant_access(tenant: str, user: CurrentUser, db: DB) -> Access:
+    slug = tenant.lower()
+    role = user.tenants.get(slug)
+    if role is None or not TENANT_SLUG.match(slug):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, f"Kein Zugriff auf Mandant {tenant}")
+    return Access(_get_or_create_tenant(db, slug), role, user)
+
+
+TenantAccess = Annotated[Access, Depends(tenant_access)]
+
+
+def _vehicle_or_404(db: Session, access: Access, vid: str):
+    data = load_vehicle(db, access.tenant.id, vid)
+    if data is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Fahrzeug nicht gefunden")
+    return data
+
+
+# ---------- öffentlich ----------
 @app.get("/health")
 def health():
     return {"status": "ok"}
@@ -79,183 +78,98 @@ def health():
 
 @app.get("/auth/config", response_model=schemas.AuthConfig)
 def auth_config():
-    """Öffentlich: OIDC-Parameter für die App (nur Server-URL muss konfiguriert werden)."""
+    """OIDC-Parameter für die App (nur die Server-URL muss konfiguriert werden)."""
     cfg = get_config()
     return {"issuer": cfg.issuer, "client_id": cfg.client_id, "scopes": "openid profile offline_access"}
 
 
-@app.get("/api/me", dependencies=auth)
-def me(user=Depends(require_user)):
-    return {"sub": user.sub, "name": user.name}
+# ---------- Benutzer / Mandanten ----------
+@app.get("/api/me", response_model=schemas.Me)
+def me(user: CurrentUser):
+    return {
+        "sub": user.sub,
+        "name": user.name,
+        "tenants": [{"slug": s, "role": r} for s, r in sorted(user.tenants.items())],
+    }
 
 
-def get_or_404(db: Session, model, obj_id: int):
-    obj = db.get(model, obj_id)
-    if obj is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, f"{model.__name__} {obj_id} nicht gefunden")
-    return obj
-
-
-# ---------- Fahrzeuge ----------
-@app.get("/api/vehicles", response_model=list[schemas.VehicleOut], dependencies=auth)
-def list_vehicles(db: DB):
-    return db.scalars(select(models.Vehicle).order_by(models.Vehicle.name)).all()
-
-
-@app.post("/api/vehicles", response_model=schemas.VehicleOut, status_code=201, dependencies=auth)
-def create_vehicle(data: schemas.VehicleIn, db: DB):
-    v = models.Vehicle(**data.model_dump())
-    db.add(v)
-    db.commit()
-    return v
-
-
-@app.get("/api/vehicles/{vid}", response_model=schemas.VehicleOut, dependencies=auth)
-def get_vehicle(vid: int, db: DB):
-    return get_or_404(db, models.Vehicle, vid)
-
-
-@app.put("/api/vehicles/{vid}", response_model=schemas.VehicleOut, dependencies=auth)
-def update_vehicle(vid: int, data: schemas.VehicleIn, db: DB):
-    v = get_or_404(db, models.Vehicle, vid)
-    for k, val in data.model_dump().items():
-        setattr(v, k, val)
-    db.commit()
-    return v
-
-
-@app.delete("/api/vehicles/{vid}", status_code=204, dependencies=auth)
-def delete_vehicle(vid: int, db: DB):
-    db.delete(get_or_404(db, models.Vehicle, vid))
-    db.commit()
-    return Response(status_code=204)
-
-
-@app.get("/api/vehicles/{vid}/stats", response_model=schemas.Stats, dependencies=auth)
-def get_stats(vid: int, db: DB):
-    return vehicle_stats(get_or_404(db, models.Vehicle, vid))
-
-
-# ---------- Kilometerstände ----------
-@app.get("/api/vehicles/{vid}/odometer", response_model=list[schemas.OdometerOut], dependencies=auth)
-def list_odometer(vid: int, db: DB):
-    get_or_404(db, models.Vehicle, vid)
-    q = select(models.OdometerReading).where(models.OdometerReading.vehicle_id == vid)
-    return db.scalars(q.order_by(models.OdometerReading.date.desc(), models.OdometerReading.km.desc())).all()
-
-
-@app.post("/api/vehicles/{vid}/odometer", response_model=schemas.OdometerOut, status_code=201, dependencies=auth)
-def create_odometer(vid: int, data: schemas.OdometerIn, db: DB):
-    get_or_404(db, models.Vehicle, vid)
-    o = models.OdometerReading(vehicle_id=vid, **data.model_dump())
-    db.add(o)
-    db.commit()
-    return o
-
-
-@app.put("/api/odometer/{oid}", response_model=schemas.OdometerOut, dependencies=auth)
-def update_odometer(oid: int, data: schemas.OdometerIn, db: DB):
-    o = get_or_404(db, models.OdometerReading, oid)
-    for k, val in data.model_dump().items():
-        setattr(o, k, val)
-    db.commit()
-    return o
-
-
-@app.delete("/api/odometer/{oid}", status_code=204, dependencies=auth)
-def delete_odometer(oid: int, db: DB):
-    db.delete(get_or_404(db, models.OdometerReading, oid))
-    db.commit()
-    return Response(status_code=204)
-
-
-# ---------- Tankvorgänge ----------
-@app.get("/api/vehicles/{vid}/fuel", response_model=list[schemas.FuelOut], dependencies=auth)
-def list_fuel(vid: int, db: DB):
-    get_or_404(db, models.Vehicle, vid)
-    q = select(models.FuelEntry).where(models.FuelEntry.vehicle_id == vid)
-    return db.scalars(q.order_by(models.FuelEntry.km.desc(), models.FuelEntry.date.desc())).all()
-
-
-@app.post("/api/vehicles/{vid}/fuel", response_model=schemas.FuelOut, status_code=201, dependencies=auth)
-def create_fuel(vid: int, data: schemas.FuelIn, db: DB):
-    get_or_404(db, models.Vehicle, vid)
-    f = models.FuelEntry(vehicle_id=vid, **data.model_dump())
-    db.add(f)
-    db.commit()
-    return f
-
-
-@app.put("/api/fuel/{fid}", response_model=schemas.FuelOut, dependencies=auth)
-def update_fuel(fid: int, data: schemas.FuelIn, db: DB):
-    f = get_or_404(db, models.FuelEntry, fid)
-    for k, val in data.model_dump().items():
-        setattr(f, k, val)
-    db.commit()
-    return f
-
-
-@app.delete("/api/fuel/{fid}", status_code=204, dependencies=auth)
-def delete_fuel(fid: int, db: DB):
-    db.delete(get_or_404(db, models.FuelEntry, fid))
-    db.commit()
-    return Response(status_code=204)
-
-
-# ---------- Wartung ----------
-@app.get("/api/checklist-templates", response_model=list[schemas.ChecklistTemplate], dependencies=auth)
-def checklist_templates():
+@app.get("/api/checklist-templates", response_model=list[schemas.ChecklistTemplate])
+def checklist_templates(_: CurrentUser):
     return load_templates()
 
 
-@app.get("/api/vehicles/{vid}/maintenance", response_model=list[schemas.MaintenanceOut], dependencies=auth)
-def list_maintenance(vid: int, db: DB):
-    get_or_404(db, models.Vehicle, vid)
-    q = select(models.Maintenance).where(models.Maintenance.vehicle_id == vid)
-    return db.scalars(q.order_by(models.Maintenance.date.desc(), models.Maintenance.id.desc())).all()
+# ---------- Sync ----------
+@app.get("/api/t/{tenant}/changes", response_model=schemas.Changes)
+def get_changes(access: TenantAccess, db: DB, since: Annotated[int, Query(ge=0)] = 0):
+    db.refresh(access.tenant)
+    return changes_since(db, access.tenant, since)
 
 
-def _apply_maintenance(m: models.Maintenance, data: schemas.MaintenanceIn) -> None:
-    for k, val in data.model_dump(exclude={"items"}).items():
-        setattr(m, k, val)
-    m.items = [models.MaintenanceItem(label=i.label, done=i.done, position=n) for n, i in enumerate(data.items)]
-
-
-@app.post(
-    "/api/vehicles/{vid}/maintenance", response_model=schemas.MaintenanceOut, status_code=201, dependencies=auth
-)
-def create_maintenance(vid: int, data: schemas.MaintenanceIn, db: DB):
-    get_or_404(db, models.Vehicle, vid)
-    m = models.Maintenance(vehicle_id=vid)
-    _apply_maintenance(m, data)
-    db.add(m)
+@app.post("/api/t/{tenant}/sync", response_model=schemas.SyncResponse)
+def post_sync(req: schemas.SyncRequest, access: TenantAccess, db: DB):
+    if access.role != "write":
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Nur Lesezugriff auf diesen Mandanten")
+    # Mandantenzeile sperren → Revisionskette wird strikt sequenziell fortgeschrieben
+    # populate_existing: frisch lesen statt veraltetem Stand aus der Identity-Map
+    tenant = db.scalar(
+        select(models.Tenant).where(models.Tenant.id == access.tenant.id)
+        .with_for_update().execution_options(populate_existing=True)
+    )
+    results = apply_ops(db, tenant, access.user, req.ops)
     db.commit()
-    return m
+    return {"results": results, "cursor": tenant.seq}
 
 
-@app.get("/api/maintenance/{mid}", response_model=schemas.MaintenanceOut, dependencies=auth)
-def get_maintenance(mid: int, db: DB):
-    return get_or_404(db, models.Maintenance, mid)
+# ---------- Auswertungen ----------
+@app.get("/api/t/{tenant}/vehicles")
+def list_vehicles(access: TenantAccess, db: DB):
+    q = select(models.Vehicle).where(models.Vehicle.tenant_id == access.tenant.id, models.Vehicle.deleted.is_(False))
+    out = []
+    for v in db.scalars(q.order_by(models.Vehicle.name)):
+        data = load_vehicle(db, access.tenant.id, v.id)
+        out.append({"id": v.id, "name": v.name, "plate": v.plate, "current_km": data.current_km})
+    return out
 
 
-@app.put("/api/maintenance/{mid}", response_model=schemas.MaintenanceOut, dependencies=auth)
-def update_maintenance(mid: int, data: schemas.MaintenanceIn, db: DB):
-    m = get_or_404(db, models.Maintenance, mid)
-    _apply_maintenance(m, data)
-    db.commit()
-    return m
+@app.get("/api/t/{tenant}/vehicles/{vid}/stats", response_model=schemas.Stats)
+def get_stats(vid: str, access: TenantAccess, db: DB):
+    return vehicle_stats(_vehicle_or_404(db, access, vid))
 
 
-@app.delete("/api/maintenance/{mid}", status_code=204, dependencies=auth)
-def delete_maintenance(mid: int, db: DB):
-    db.delete(get_or_404(db, models.Maintenance, mid))
-    db.commit()
-    return Response(status_code=204)
+@app.get("/api/t/{tenant}/vehicles/{vid}/report.pdf", response_class=Response)
+def get_report(
+    vid: str,
+    access: TenantAccess,
+    db: DB,
+    date_from: Annotated[dt.date | None, Query(alias="from")] = None,
+    date_to: Annotated[dt.date | None, Query(alias="to")] = None,
+):
+    data = _vehicle_or_404(db, access, vid)
+    date_to = date_to or dt.date.today()
+    date_from = date_from or date_to.replace(month=1, day=1)
+    if date_from > date_to:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Zeitraum ungültig")
+    pdf = build_report(db, access.tenant, data, date_from, date_to, access.user.name)
+    filename = f"fahrzeugbuch_{data.vehicle.name}_{date_from}_{date_to}.pdf".replace(" ", "_")
+    return Response(pdf, media_type="application/pdf",
+                    headers={"Content-Disposition": f'attachment; filename="{filename}"'})
 
 
-@app.patch("/api/maintenance-items/{iid}", response_model=schemas.ItemOut, dependencies=auth)
-def toggle_item(iid: int, data: schemas.ItemPatch, db: DB):
-    item = get_or_404(db, models.MaintenanceItem, iid)
-    item.done = data.done
-    db.commit()
-    return item
+# ---------- Revisionssicherheit ----------
+@app.get("/api/t/{tenant}/history/{entity}/{eid}", response_model=list[schemas.RevisionOut])
+def get_history(entity: str, eid: str, access: TenantAccess, db: DB):
+    if entity not in ENTITIES:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Unbekannter Objekttyp")
+    q = select(models.Revision).where(
+        models.Revision.tenant_id == access.tenant.id,
+        models.Revision.entity == entity,
+        models.Revision.entity_id == eid,
+    ).order_by(models.Revision.seq)
+    return [{**{f: getattr(r, f) for f in schemas.RevisionOut.model_fields if f != "data"},
+             "data": json.loads(r.data)} for r in db.scalars(q)]
+
+
+@app.get("/api/t/{tenant}/audit/verify", response_model=schemas.AuditResult)
+def audit_verify(access: TenantAccess, db: DB):
+    db.refresh(access.tenant)
+    return verify_chain(db, access.tenant)

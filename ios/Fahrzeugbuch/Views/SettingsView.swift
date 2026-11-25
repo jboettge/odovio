@@ -6,6 +6,9 @@ struct SettingsView: View {
     @State private var url = ""
     @State private var status: String?
     @State private var testing = false
+    @State private var audit: String?
+    @State private var confirmLogout = false
+    @State private var confirmServerChange = false
 
     private var parsedURL: URL? {
         guard let u = URL(string: url.trimmed), u.host != nil else { return nil }
@@ -27,17 +30,34 @@ struct SettingsView: View {
             } header: {
                 Text("Server")
             } footer: {
-                Text("Anmeldung erfolgt über Keycloak (OIDC). Issuer und Client-ID liefert der Server.")
+                Text("Anmeldung über Keycloak (OIDC). Issuer und Client-ID liefert der Server.")
             }
 
             if settings.auth.isLoggedIn {
                 Section("Konto") {
                     LabeledContent("Angemeldet als", value: settings.auth.userName ?? "–")
-                    Button("Abmelden", role: .destructive) {
-                        Task {
-                            await settings.auth.logout(server: settings.baseURL)
-                            dismiss()
+                    ForEach(settings.tenants) { t in
+                        LabeledContent(t.slug, value: t.canWrite ? "Schreiben" : "Lesen")
+                    }
+                    Button("Abmelden", role: .destructive) { confirmLogout = true }
+                }
+
+                if let store = settings.store {
+                    Section {
+                        LabeledContent("Mandant", value: store.tenant.slug)
+                        LabeledContent("Ausstehend", value: "\(store.outbox.count) Änderung(en)")
+                        if let last = store.lastSync {
+                            LabeledContent("Zuletzt synchronisiert",
+                                           value: last.formatted(date: .abbreviated, time: .shortened))
                         }
+                        Button("Integrität prüfen") { Task { await verify(store) } }
+                        if let audit {
+                            Text(audit).font(.caption.monospaced())
+                        }
+                    } header: {
+                        Text("Daten & Revisionssicherheit")
+                    } footer: {
+                        Text("Alle Änderungen werden serverseitig unveränderlich in einer Hash-Kette protokolliert.")
                     }
                 }
             }
@@ -47,16 +67,44 @@ struct SettingsView: View {
             ToolbarItem(placement: .confirmationAction) {
                 Button("Sichern") {
                     let new = url.trimmed
-                    if new != settings.serverURL {
-                        settings.auth.clearSession()   // Tokens gehören zum alten Server
+                    if new != settings.serverURL && !settings.serverURL.isEmpty {
+                        confirmServerChange = true
+                    } else {
                         settings.serverURL = new
+                        dismiss()
                     }
-                    dismiss()
                 }
                 .disabled(parsedURL == nil)
             }
         }
+        .confirmationDialog("Server wechseln?", isPresented: $confirmServerChange, titleVisibility: .visible) {
+            Button("Wechseln und lokale Daten löschen", role: .destructive) {
+                settings.auth.clearSession()
+                settings.resetLocalData()
+                settings.serverURL = url.trimmed
+                dismiss()
+            }
+        } message: {
+            Text(pendingWarning)
+        }
+        .confirmationDialog("Abmelden?", isPresented: $confirmLogout, titleVisibility: .visible) {
+            Button("Abmelden und lokale Daten löschen", role: .destructive) {
+                Task {
+                    await settings.logout()
+                    dismiss()
+                }
+            }
+        } message: {
+            Text(pendingWarning)
+        }
         .onAppear { url = settings.serverURL }
+    }
+
+    private var pendingWarning: String {
+        let n = TenantStore.pendingCountOnDisk()
+        return n > 0
+            ? "Achtung: \(n) Änderung(en) sind noch nicht synchronisiert und gehen verloren."
+            : "Lokal gespeicherte Daten werden vom Gerät entfernt."
     }
 
     private func test() async {
@@ -69,12 +117,21 @@ struct SettingsView: View {
                 status = "❌ Server antwortet mit \((resp as? HTTPURLResponse)?.statusCode ?? 0)"
                 return
             }
-            let decoder = JSONDecoder()
-            decoder.keyDecodingStrategy = .convertFromSnakeCase
-            let cfg = try decoder.decode(AuthConfig.self, from: data)
+            let cfg = try APIClient.decoder.decode(AuthConfig.self, from: data)
             status = "✅ Server erreichbar\nIssuer: \(cfg.issuer)\nClient: \(cfg.clientId)"
         } catch {
             status = "❌ \(error.localizedDescription)"
+        }
+    }
+
+    private func verify(_ store: TenantStore) async {
+        do {
+            let r: AuditResult = try await settings.api.get("api/t/\(store.tenant.slug)/audit/verify")
+            audit = r.ok
+                ? "✅ Kette intakt · \(r.count) Revisionen\n\(r.headHash)"
+                : "❌ Kette gebrochen ab Seq \(r.brokenAt ?? 0): \(r.reason ?? "")"
+        } catch {
+            audit = "Nur online verfügbar: \(error.localizedDescription)"
         }
     }
 }

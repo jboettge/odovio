@@ -1,20 +1,22 @@
 import SwiftUI
 
 struct OdometerListView: View {
-    @Environment(AppSettings.self) private var settings
+    @Environment(TenantStore.self) private var store
     let vehicle: Vehicle
-    @State private var readings: [OdometerReading] = []
-    @State private var loaded = false
     @State private var form: EditTarget<OdometerReading>?
-    @State private var error: String?
+    @State private var toDelete: OdometerReading?
 
     var body: some View {
+        let readings = store.odometer(for: vehicle.id)
         List {
             ForEach(readings) { r in
                 Button { form = EditTarget(value: r) } label: {
                     HStack {
                         VStack(alignment: .leading) {
-                            Text(Fmt.km(r.km)).font(.headline)
+                            HStack {
+                                Text(Fmt.km(r.km)).font(.headline)
+                                if store.isPending(r.id) { PendingBadge() }
+                            }
                             if let n = r.note, !n.isEmpty {
                                 Text(n).font(.caption).foregroundStyle(.secondary)
                             }
@@ -24,103 +26,78 @@ struct OdometerListView: View {
                     }
                 }
                 .foregroundStyle(.primary)
+                .swipeActions {
+                    if store.canWrite {
+                        Button("Stornieren", role: .destructive) { toDelete = r }
+                    }
+                }
             }
-            .onDelete { offsets in Task { await delete(offsets) } }
         }
         .overlay {
-            if loaded && readings.isEmpty {
+            if readings.isEmpty {
                 ContentUnavailableView("Keine Kilometerstände", systemImage: "gauge.with.dots.needle.67percent",
                                        description: Text("Tankvorgänge und Wartungen zählen ebenfalls als Kilometerstand."))
             }
         }
         .toolbar {
-            ToolbarItem(placement: .topBarTrailing) {
-                Button { form = EditTarget(value: nil) } label: { Image(systemName: "plus") }
+            if store.canWrite {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button { form = EditTarget(value: nil) } label: { Image(systemName: "plus") }
+                }
             }
         }
         .sheet(item: $form) { target in
-            OdometerFormView(vehicleID: vehicle.id, reading: target.value,
-                             suggestedKm: max(vehicle.currentKm, readings.map(\.km).max() ?? 0)) { await load() }
+            OdometerFormView(vehicle: vehicle, reading: target.value)
         }
-        .task { await load() }
-        .refreshable { await load() }
-        .errorAlert($error)
-    }
-
-    private func load() async {
-        do {
-            readings = try await settings.api.get("api/vehicles/\(vehicle.id)/odometer")
-        } catch {
-            self.error = error.localizedDescription
-        }
-        loaded = true
-    }
-
-    private func delete(_ offsets: IndexSet) async {
-        let ids = offsets.map { readings[$0].id }
-        readings.remove(atOffsets: offsets)
-        do {
-            for id in ids { try await settings.api.delete("api/odometer/\(id)") }
-        } catch {
-            self.error = error.localizedDescription
-        }
-        await load()
+        .stornoDialog($toDelete, title: "Kilometerstand stornieren?") { store.delete($0) }
+        .refreshable { await store.sync() }
     }
 }
 
 struct OdometerFormView: View {
-    @Environment(AppSettings.self) private var settings
-    @Environment(\.dismiss) private var dismiss
-    let vehicleID: Int
+    @Environment(TenantStore.self) private var store
+    let vehicle: Vehicle
     let reading: OdometerReading?
-    let suggestedKm: Int
-    let onSaved: () async -> Void
 
     @State private var date = Date()
     @State private var km = ""
     @State private var note = ""
-    @State private var saving = false
-    @State private var error: String?
 
     var body: some View {
         NavigationStack {
             Form {
-                DatePicker("Datum", selection: $date, displayedComponents: .date)
-                LabeledContent("Kilometerstand") {
-                    TextField("km", text: $km).keyboardType(.numberPad).multilineTextAlignment(.trailing)
+                Section {
+                    DatePicker("Datum", selection: $date, displayedComponents: .date)
+                    LabeledContent("Kilometerstand") {
+                        TextField("km", text: $km).keyboardType(.numberPad).multilineTextAlignment(.trailing)
+                    }
+                    TextField("Notiz (optional)", text: $note, axis: .vertical)
                 }
-                TextField("Notiz (optional)", text: $note, axis: .vertical)
+                if let r = reading {
+                    HistorySection(entity: OdometerReading.entityName, id: r.id)
+                }
             }
             .navigationTitle(reading == nil ? "Kilometerstand" : "Kilometerstand bearbeiten")
-            .formToolbar(canSave: km.asInt != nil, saving: saving) { await save() }
+            .formToolbar(canSave: store.canWrite && km.asInt != nil, save: save)
             .onAppear {
                 if let r = reading {
                     date = r.date
                     km = String(r.km)
                     note = r.note ?? ""
-                } else if suggestedKm > 0 {
-                    km = String(suggestedKm)
+                } else {
+                    let current = store.currentKm(store.vehicle(id: vehicle.id) ?? vehicle)
+                    if current > 0 { km = String(current) }
                 }
             }
-            .errorAlert($error)
         }
     }
 
-    private func save() async {
+    private func save() {
         guard let kmValue = km.asInt else { return }
-        saving = true
-        defer { saving = false }
-        let input = OdometerInput(date: date, km: kmValue, note: note.nilIfEmpty)
-        do {
-            if let r = reading {
-                let _: OdometerReading = try await settings.api.put("api/odometer/\(r.id)", input)
-            } else {
-                let _: OdometerReading = try await settings.api.post("api/vehicles/\(vehicleID)/odometer", input)
-            }
-            await onSaved()
-            dismiss()
-        } catch {
-            self.error = error.localizedDescription
-        }
+        var r = reading ?? OdometerReading(vehicleId: vehicle.id, date: date, km: kmValue)
+        r.date = date
+        r.km = kmValue
+        r.note = note.nilIfEmpty
+        store.save(r)
     }
 }

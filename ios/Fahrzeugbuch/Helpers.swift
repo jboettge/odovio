@@ -37,17 +37,30 @@ extension View {
         }
     }
 
-    /// Standard-Toolbar für Formulare in Sheets.
-    func formToolbar(canSave: Bool, saving: Bool, save: @escaping () async -> Void) -> some View {
-        modifier(FormToolbar(canSave: canSave, saving: saving, save: save))
+    /// Standard-Toolbar für Formulare in Sheets (Speichern wirkt sofort lokal).
+    func formToolbar(canSave: Bool, save: @escaping () -> Void) -> some View {
+        modifier(FormToolbar(canSave: canSave, save: save))
+    }
+
+    /// Bestätigung für Stornierungen (revisionssicher: nichts wird physisch gelöscht).
+    func stornoDialog<T>(_ item: Binding<T?>, title: String, action: @escaping (T) -> Void) -> some View {
+        confirmationDialog(
+            title,
+            isPresented: Binding(get: { item.wrappedValue != nil }, set: { if !$0 { item.wrappedValue = nil } }),
+            titleVisibility: .visible,
+            presenting: item.wrappedValue
+        ) { value in
+            Button("Stornieren", role: .destructive) { action(value) }
+        } message: { _ in
+            Text("Der Eintrag wird als storniert markiert und bleibt im Änderungsprotokoll erhalten.")
+        }
     }
 }
 
 private struct FormToolbar: ViewModifier {
     @Environment(\.dismiss) private var dismiss
     let canSave: Bool
-    let saving: Bool
-    let save: () async -> Void
+    let save: () -> Void
 
     func body(content: Content) -> some View {
         content
@@ -57,13 +70,69 @@ private struct FormToolbar: ViewModifier {
                     Button("Abbrechen") { dismiss() }
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    if saving {
-                        ProgressView()
-                    } else {
-                        Button("Sichern") { Task { await save() } }
-                            .disabled(!canSave)
+                    Button("Sichern") {
+                        save()
+                        dismiss()
                     }
+                    .disabled(!canSave)
                 }
             }
+    }
+}
+
+/// Sync-Status als Toolbar-Symbol; Tippen synchronisiert.
+struct SyncStatusButton: View {
+    @Environment(TenantStore.self) private var store
+    @State private var showInfo = false
+
+    var body: some View {
+        Button { showInfo = true } label: {
+            if store.isSyncing {
+                ProgressView()
+            } else if store.syncError != nil {
+                Image(systemName: "exclamationmark.icloud").foregroundStyle(.orange)
+            } else if !store.outbox.isEmpty {
+                HStack(spacing: 2) {
+                    Image(systemName: "icloud.and.arrow.up")
+                    Text("\(store.outbox.count)").font(.caption2.monospacedDigit())
+                }
+            } else {
+                Image(systemName: "checkmark.icloud")
+            }
+        }
+        .popover(isPresented: $showInfo) {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Synchronisation").font(.headline)
+                Text("Ausstehend: \(store.outbox.count) Änderung(en)")
+                if let last = store.lastSync {
+                    Text("Zuletzt: \(last.formatted(date: .abbreviated, time: .shortened))")
+                }
+                if let err = store.syncError {
+                    Text(err).foregroundStyle(.orange)
+                }
+                Button("Jetzt synchronisieren") { Task { await store.sync() } }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(store.isSyncing)
+            }
+            .font(.subheadline)
+            .padding()
+            .presentationCompactAdaptation(.popover)
+        }
+    }
+}
+
+/// Zeigt Hinweise aus dem Sync (Konflikte, Ablehnungen) als Alert.
+struct SyncNoticeModifier: ViewModifier {
+    @Environment(TenantStore.self) private var store
+
+    func body(content: Content) -> some View {
+        content.alert(
+            "Synchronisation",
+            isPresented: Binding(get: { !store.notices.isEmpty }, set: { if !$0 { store.notices.removeAll() } })
+        ) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(store.notices.joined(separator: "\n\n"))
+        }
     }
 }

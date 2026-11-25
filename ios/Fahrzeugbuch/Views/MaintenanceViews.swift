@@ -1,71 +1,60 @@
 import SwiftUI
 
 struct MaintenanceListView: View {
-    @Environment(AppSettings.self) private var settings
+    @Environment(TenantStore.self) private var store
     let vehicle: Vehicle
-    @State private var entries: [Maintenance] = []
-    @State private var loaded = false
     @State private var showNew = false
-    @State private var error: String?
+    @State private var toDelete: Maintenance?
 
     var body: some View {
+        let entries = store.maintenance(for: vehicle.id)
         List {
             ForEach(entries) { m in
                 NavigationLink {
-                    MaintenanceDetailView(maintenance: m, vehicle: vehicle) { await load() }
+                    MaintenanceDetailView(maintenanceId: m.id, vehicle: vehicle)
                 } label: {
-                    MaintenanceRow(maintenance: m)
+                    MaintenanceRow(maintenance: m, items: store.items(for: m.id), pending: store.isPending(m.id))
+                }
+                .swipeActions {
+                    if store.canWrite {
+                        Button("Stornieren", role: .destructive) { toDelete = m }
+                    }
                 }
             }
-            .onDelete { offsets in Task { await delete(offsets) } }
         }
         .overlay {
-            if loaded && entries.isEmpty {
+            if entries.isEmpty {
                 ContentUnavailableView("Keine Wartungen", systemImage: "wrench.and.screwdriver",
                                        description: Text("Mit + eine Wartung mit Checkliste erfassen."))
             }
         }
         .toolbar {
-            ToolbarItem(placement: .topBarTrailing) {
-                Button { showNew = true } label: { Image(systemName: "plus") }
+            if store.canWrite {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button { showNew = true } label: { Image(systemName: "plus") }
+                }
             }
         }
         .sheet(isPresented: $showNew) {
-            MaintenanceFormView(vehicle: vehicle, maintenance: nil) { _ in await load() }
+            MaintenanceFormView(vehicle: vehicle, maintenance: nil)
         }
-        .task { await load() }
-        .refreshable { await load() }
-        .errorAlert($error)
-    }
-
-    private func load() async {
-        do {
-            entries = try await settings.api.get("api/vehicles/\(vehicle.id)/maintenance")
-        } catch {
-            self.error = error.localizedDescription
-        }
-        loaded = true
-    }
-
-    private func delete(_ offsets: IndexSet) async {
-        let ids = offsets.map { entries[$0].id }
-        entries.remove(atOffsets: offsets)
-        do {
-            for id in ids { try await settings.api.delete("api/maintenance/\(id)") }
-        } catch {
-            self.error = error.localizedDescription
-        }
-        await load()
+        .stornoDialog($toDelete, title: "Wartung stornieren?") { store.delete($0) }
+        .refreshable { await store.sync() }
     }
 }
 
 private struct MaintenanceRow: View {
     let maintenance: Maintenance
+    let items: [MaintenanceItem]
+    let pending: Bool
+
+    private var doneCount: Int { items.filter(\.done).count }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack {
                 Text(maintenance.title).font(.headline)
+                if pending { PendingBadge() }
                 Spacer()
                 if let c = maintenance.cost { Text(Fmt.chf(c)) }
             }
@@ -73,115 +62,99 @@ private struct MaintenanceRow: View {
                 Text(Fmt.day(maintenance.date))
                 if let km = maintenance.km { Text("· \(Fmt.km(km))") }
                 Spacer()
-                if !maintenance.items.isEmpty {
-                    let complete = maintenance.doneCount == maintenance.items.count
-                    Label("\(maintenance.doneCount)/\(maintenance.items.count)",
+                if !items.isEmpty {
+                    let complete = doneCount == items.count
+                    Label("\(doneCount)/\(items.count)",
                           systemImage: complete ? "checkmark.circle.fill" : "circle.dashed")
                         .foregroundStyle(complete ? .green : .secondary)
                 }
             }
             .font(.subheadline)
             .foregroundStyle(.secondary)
-            if !maintenance.items.isEmpty {
-                ProgressView(value: Double(maintenance.doneCount), total: Double(maintenance.items.count))
-                    .tint(maintenance.doneCount == maintenance.items.count ? .green : .accentColor)
+            if !items.isEmpty {
+                ProgressView(value: Double(doneCount), total: Double(items.count))
+                    .tint(doneCount == items.count ? .green : .accentColor)
             }
         }
     }
 }
 
 struct MaintenanceDetailView: View {
-    @Environment(AppSettings.self) private var settings
-    @State var maintenance: Maintenance
+    @Environment(TenantStore.self) private var store
+    let maintenanceId: String
     let vehicle: Vehicle
-    let onChange: () async -> Void
-
     @State private var editing = false
-    @State private var error: String?
 
     var body: some View {
-        List {
-            Section {
-                LabeledContent("Datum", value: Fmt.day(maintenance.date))
-                if let km = maintenance.km { LabeledContent("Kilometerstand", value: Fmt.km(km)) }
-                if let c = maintenance.cost { LabeledContent("Kosten", value: Fmt.chf(c)) }
-                if let n = maintenance.nextDueKm { LabeledContent("Nächste bei", value: Fmt.km(n)) }
-                if let d = maintenance.nextDueDate { LabeledContent("Nächste bis", value: Fmt.day(d)) }
-            }
-
-            if !maintenance.items.isEmpty {
+        if let m = store.maintenance(id: maintenanceId) {
+            let items = store.items(for: m.id)
+            List {
                 Section {
-                    ForEach(maintenance.items) { item in
-                        Button { Task { await toggle(item) } } label: {
-                            Label {
-                                Text(item.label)
-                                    .strikethrough(item.done)
-                                    .foregroundStyle(item.done ? .secondary : .primary)
-                            } icon: {
-                                Image(systemName: item.done ? "checkmark.circle.fill" : "circle")
-                                    .foregroundStyle(item.done ? .green : .secondary)
-                                    .imageScale(.large)
+                    LabeledContent("Datum", value: Fmt.day(m.date))
+                    if let km = m.km { LabeledContent("Kilometerstand", value: Fmt.km(km)) }
+                    if let c = m.cost { LabeledContent("Kosten", value: Fmt.chf(c)) }
+                    if let n = m.nextDueKm { LabeledContent("Nächste bei", value: Fmt.km(n)) }
+                    if let d = m.nextDueDate { LabeledContent("Nächste bis", value: Fmt.day(d)) }
+                    if m.deleted { Label("Storniert", systemImage: "xmark.circle").foregroundStyle(.red) }
+                }
+
+                if !items.isEmpty {
+                    Section {
+                        ForEach(items) { item in
+                            Button { store.toggle(item) } label: {
+                                Label {
+                                    Text(item.label)
+                                        .strikethrough(item.done)
+                                        .foregroundStyle(item.done ? .secondary : .primary)
+                                } icon: {
+                                    Image(systemName: item.done ? "checkmark.circle.fill" : "circle")
+                                        .foregroundStyle(item.done ? .green : .secondary)
+                                        .imageScale(.large)
+                                }
                             }
+                            .disabled(!store.canWrite || m.deleted)
                         }
+                    } header: {
+                        Text("Checkliste")
+                    } footer: {
+                        Text("\(items.filter(\.done).count) von \(items.count) erledigt – jedes Abhaken wird protokolliert.")
                     }
-                } header: {
-                    Text("Checkliste")
-                } footer: {
-                    Text("\(maintenance.doneCount) von \(maintenance.items.count) erledigt")
+                }
+
+                if let note = m.note, !note.isEmpty {
+                    Section("Notiz") { Text(note) }
+                }
+
+                HistorySection(entity: Maintenance.entityName, id: m.id)
+            }
+            .navigationTitle(m.title)
+            .toolbar {
+                if store.canWrite && !m.deleted {
+                    ToolbarItem(placement: .topBarTrailing) {
+                        Button("Bearbeiten") { editing = true }
+                    }
                 }
             }
-
-            if let note = maintenance.note, !note.isEmpty {
-                Section("Notiz") { Text(note) }
+            .sheet(isPresented: $editing) {
+                MaintenanceFormView(vehicle: vehicle, maintenance: m)
             }
-        }
-        .navigationTitle(maintenance.title)
-        .toolbar {
-            ToolbarItem(placement: .topBarTrailing) {
-                Button("Bearbeiten") { editing = true }
-            }
-        }
-        .sheet(isPresented: $editing) {
-            MaintenanceFormView(vehicle: vehicle, maintenance: maintenance) { updated in
-                maintenance = updated
-                await onChange()
-            }
-        }
-        .errorAlert($error)
-    }
-
-    private func toggle(_ item: MaintenanceItem) async {
-        let newValue = !item.done
-        setDone(item.id, newValue) // optimistisch
-        do {
-            let updated: MaintenanceItem = try await settings.api.patch(
-                "api/maintenance-items/\(item.id)", ItemPatch(done: newValue))
-            setDone(item.id, updated.done)
-            await onChange()
-        } catch {
-            setDone(item.id, item.done)
-            self.error = error.localizedDescription
-        }
-    }
-
-    private func setDone(_ id: Int, _ done: Bool) {
-        if let i = maintenance.items.firstIndex(where: { $0.id == id }) {
-            maintenance.items[i].done = done
+        } else {
+            ContentUnavailableView("Wartung nicht gefunden", systemImage: "questionmark")
         }
     }
 }
 
 struct MaintenanceFormView: View {
     @Environment(AppSettings.self) private var settings
-    @Environment(\.dismiss) private var dismiss
+    @Environment(TenantStore.self) private var store
     let vehicle: Vehicle
     let maintenance: Maintenance?
-    let onSaved: (Maintenance) async -> Void
 
     struct DraftItem: Identifiable {
-        let id = UUID()
+        var id: String = UUID().uuidString.lowercased()
         var label: String
         var done: Bool
+        var version = 0
     }
 
     @State private var title = ""
@@ -196,8 +169,6 @@ struct MaintenanceFormView: View {
     @State private var items: [DraftItem] = []
     @State private var newItem = ""
     @State private var templates: [ChecklistTemplate] = []
-    @State private var saving = false
-    @State private var error: String?
 
     var body: some View {
         NavigationStack {
@@ -268,16 +239,18 @@ struct MaintenanceFormView: View {
                 }
             }
             .navigationTitle(maintenance == nil ? "Neue Wartung" : "Wartung bearbeiten")
-            .formToolbar(canSave: !title.trimmed.isEmpty, saving: saving) { await save() }
+            .formToolbar(canSave: store.canWrite && !title.trimmed.isEmpty, save: save)
             .onAppear(perform: prefill)
             .task { await loadTemplates() }
-            .errorAlert($error)
         }
     }
 
     private func prefill() {
         guard let m = maintenance else {
-            if km.isEmpty && vehicle.currentKm > 0 { km = String(vehicle.currentKm) }
+            if km.isEmpty {
+                let current = store.currentKm(store.vehicle(id: vehicle.id) ?? vehicle)
+                if current > 0 { km = String(current) }
+            }
             return
         }
         title = m.title
@@ -289,7 +262,7 @@ struct MaintenanceFormView: View {
         dueKm = m.nextDueKm.map { String($0) } ?? ""
         hasDueDate = m.nextDueDate != nil
         if let d = m.nextDueDate { dueDate = d }
-        items = m.items.map { DraftItem(label: $0.label, done: $0.done) }
+        items = store.items(for: m.id).map { DraftItem(id: $0.id, label: $0.label, done: $0.done, version: $0.version) }
     }
 
     private func apply(_ t: ChecklistTemplate) {
@@ -304,37 +277,33 @@ struct MaintenanceFormView: View {
         newItem = ""
     }
 
+    /// Vorlagen online laden, offline aus Cache.
     private func loadTemplates() async {
         guard maintenance == nil else { return }
-        templates = (try? await settings.api.get("api/checklist-templates")) ?? []
+        let key = "checklistTemplates"
+        if let data = UserDefaults.standard.data(forKey: key),
+           let cached = try? JSONDecoder().decode([ChecklistTemplate].self, from: data) {
+            templates = cached
+        }
+        if let fresh: [ChecklistTemplate] = try? await settings.api.get("api/checklist-templates") {
+            templates = fresh
+            UserDefaults.standard.set(try? JSONEncoder().encode(fresh), forKey: key)
+        }
     }
 
-    private func save() async {
-        saving = true
-        defer { saving = false }
-        let input = MaintenanceInput(
-            date: date,
-            km: km.asInt,
-            title: title.trimmed,
-            cost: cost.asDouble,
-            note: note.nilIfEmpty,
-            nextDueKm: hasDueKm ? dueKm.asInt : nil,
-            nextDueDate: hasDueDate ? dueDate : nil,
-            items: items.compactMap { d in
-                d.label.nilIfEmpty.map { MaintenanceItemInput(label: $0, done: d.done) }
-            }
-        )
-        do {
-            let saved: Maintenance
-            if let m = maintenance {
-                saved = try await settings.api.put("api/maintenance/\(m.id)", input)
-            } else {
-                saved = try await settings.api.post("api/vehicles/\(vehicle.id)/maintenance", input)
-            }
-            await onSaved(saved)
-            dismiss()
-        } catch {
-            self.error = error.localizedDescription
+    private func save() {
+        var m = maintenance ?? Maintenance(vehicleId: vehicle.id, date: date, title: title.trimmed)
+        m.title = title.trimmed
+        m.date = date
+        m.km = km.asInt
+        m.cost = cost.asDouble
+        m.note = note.nilIfEmpty
+        m.nextDueKm = hasDueKm ? dueKm.asInt : nil
+        m.nextDueDate = hasDueDate ? dueDate : nil
+        let newItems = items.compactMap { d -> MaintenanceItem? in
+            guard let label = d.label.nilIfEmpty else { return nil }
+            return MaintenanceItem(id: d.id, version: d.version, maintenanceId: m.id, label: label, done: d.done)
         }
+        store.save(m, items: newItems)
     }
 }

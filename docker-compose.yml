@@ -30,6 +30,8 @@ services:
       OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:-fahrzeugbuch-ios}
       OIDC_AUDIENCE: ${OIDC_AUDIENCE:-}
       OIDC_REQUIRED_ROLE: ${OIDC_REQUIRED_ROLE:-}
+      TENANT_GROUP_PREFIX: ${TENANT_GROUP_PREFIX:-/fahrzeugbuch/}
+      DEFAULT_TENANT: ${DEFAULT_TENANT:-}
       # CHECKLIST_FILE: /config/checklists.json
     # volumes:
     #   - ./checklists.json:/config/checklists.json:ro

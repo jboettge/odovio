@@ -10,7 +10,7 @@ def bearer(t):
 
 
 def test_missing_token(client):
-    assert client.get("/api/vehicles", headers={"Authorization": ""}).status_code == 401
+    assert client.get("/api/me", headers={"Authorization": ""}).status_code == 401
 
 
 def test_public_endpoints(client):
@@ -21,7 +21,15 @@ def test_public_endpoints(client):
 
 
 def test_valid_token(client):
-    assert client.get("/api/me").json() == {"sub": "user-1", "name": "jakob"}
+    me = client.get("/api/me").json()
+    assert me["sub"] == "user-1" and me["name"] == "jakob"
+    assert me["tenants"] == [{"slug": "firma", "role": "read"}, {"slug": "privat", "role": "write"}]
+
+
+def test_default_tenant(client, monkeypatch):
+    monkeypatch.setenv("DEFAULT_TENANT", "Haushalt")
+    t = make_token(groups=[])
+    assert client.get("/api/me", headers=bearer(t)).json()["tenants"] == [{"slug": "haushalt", "role": "write"}]
 
 
 def test_rejects_bad_tokens(client):
@@ -33,19 +41,19 @@ def test_rejects_bad_tokens(client):
         make_token(azp="anderer-client"),
     ]
     for t in cases:
-        assert client.get("/api/vehicles", headers=bearer(t)).status_code == 401, t
+        assert client.get("/api/me", headers=bearer(t)).status_code == 401, t
 
 
 def test_audience_mode(client, monkeypatch):
     monkeypatch.setenv("OIDC_AUDIENCE", "fahrzeugbuch-api")
-    assert client.get("/api/vehicles", headers=bearer(make_token(aud="fahrzeugbuch-api", azp="x"))).status_code == 200
-    assert client.get("/api/vehicles", headers=bearer(make_token(aud="account"))).status_code == 401
+    assert client.get("/api/me", headers=bearer(make_token(aud="fahrzeugbuch-api", azp="x"))).status_code == 200
+    assert client.get("/api/me", headers=bearer(make_token(aud="account"))).status_code == 401
 
 
 def test_required_role(client, monkeypatch):
     monkeypatch.setenv("OIDC_REQUIRED_ROLE", "fahrzeugbuch-user")
-    assert client.get("/api/vehicles").status_code == 200
+    assert client.get("/api/me").status_code == 200
     t = make_token(realm_access={"roles": []})
-    assert client.get("/api/vehicles", headers=bearer(t)).status_code == 403
+    assert client.get("/api/me", headers=bearer(t)).status_code == 403
     t = make_token(realm_access={}, resource_access={CLIENT_ID: {"roles": ["fahrzeugbuch-user"]}})
-    assert client.get("/api/vehicles", headers=bearer(t)).status_code == 200
+    assert client.get("/api/me", headers=bearer(t)).status_code == 200

@@ -1,6 +1,7 @@
 import SwiftUI
 
 struct VehicleDetailView: View {
+    @Environment(TenantStore.self) private var store
     let vehicle: Vehicle
 
     enum Pane: String, CaseIterable, Identifiable {
@@ -12,6 +13,7 @@ struct VehicleDetailView: View {
     }
 
     @State private var pane: Pane = .overview
+    @State private var showReport = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -29,7 +31,16 @@ struct VehicleDetailView: View {
             case .odometer: OdometerListView(vehicle: vehicle)
             }
         }
-        .navigationTitle(vehicle.name)
+        .navigationTitle(store.vehicle(id: vehicle.id)?.name ?? vehicle.name)
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button { showReport = true } label: { Image(systemName: "doc.richtext") }
+                    .accessibilityLabel("PDF-Export")
+            }
+        }
+        .sheet(isPresented: $showReport) {
+            ReportView(vehicle: vehicle)
+        }
     }
 }
