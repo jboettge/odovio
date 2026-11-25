@@ -6,7 +6,7 @@ options:
 settings:
   base:
     SWIFT_VERSION: "5.0"
-    DEVELOPMENT_TEAM: ""   # eigenes Team in Xcode wählen
+    DEVELOPMENT_TEAM: Q66V4Q95B4   # Apple-Team odovio (TestFlight: .github/workflows/ios-testflight.yml)
 targets:
   Fahrzeugbuch:
     type: application
@@ -25,6 +25,8 @@ targets:
       properties:
         CFBundleDisplayName: Fahrzeugbuch
         CFBundleDevelopmentRegion: de
+        # Nur Standard-Krypto (HTTPS, CryptoKit-Hashes/Signaturprüfung) → keine Exportdeklaration nötig
+        ITSAppUsesNonExemptEncryption: false
         UILaunchScreen: {}
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
         # Einrichtung per Link/QR: fahrzeugbuch://setup?server=https://…

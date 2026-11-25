@@ -48,18 +48,18 @@ Kernprinzipien: local-first App mit Outbox/Sync (`/sync`, `/changes`), revisions
 |---|---|
 | Projekt/Scheme | `ios/project.yml` → `xcodegen generate` → `Fahrzeugbuch.xcodeproj`, Scheme `Fahrzeugbuch`, Test-Target `FahrzeugbuchTests` |
 | Bundle-ID | **`ch.odovio`** (Nutzerentscheid 25.11.2026; vorher `net.jmb.fahrzeugbuch`), Tests `ch.odovio.tests`, Extensions künftig `ch.odovio.<name>`; OIDC-Redirect `ch.odovio:/oauth2redirect` (Keycloak-Client `fahrzeugbuch-ios` mit `setup-client.sh` neu einrichten bzw. Redirect anpassen), Quick Actions `ch.odovio.addFuel/startTrip`, Setup-URL-Schema `fahrzeugbuch://` |
-| Team-ID | **leer** (`DEVELOPMENT_TEAM: ""`), Signing `Automatic` |
+| Team-ID | `Q66V4Q95B4`, Signing `Automatic` (Cloud-Signing per API-Key in CI) |
 | Version | `MARKETING_VERSION 1.0`, `CURRENT_PROJECT_VERSION 1` |
 | Toolchain | CI `macos-15` (Xcode 16.x Default), `SWIFT_VERSION 5.0` (Swift-5-Modus), iOS 17.0 Deployment Target, nur iPhone, Portrait |
 | Capabilities | Background Mode `location`; Usage-Strings: Location (WhenInUse/Always), Motion, Kalender, Kamera |
 | App-Icon | `ios/Fahrzeugbuch/Assets.xcassets/AppIcon.appiconset/AppIcon.png` (Single-Size) |
-| Privacy-Manifest | **fehlt** (`PrivacyInfo.xcprivacy`) – nötig für App Store: Required-Reason-APIs (UserDefaults, File-Timestamps, ggf. SystemBootTime), keine Tracking-Domains |
-| Secrets/Workflows | keine Signing-Secrets, kein Fastlane, kein TestFlight-Workflow vorhanden |
-| Export-Compliance | nur Standard-Krypto (HTTPS, CryptoKit SHA-256) → `ITSAppUsesNonExemptEncryption = NO` prüfen/setzen |
+| Privacy-Manifest | `ios/Fahrzeugbuch/PrivacyInfo.xcprivacy` (UserDefaults CA92.1, File-Timestamp C617.1, kein Tracking) |
+| Secrets/Workflows | Secrets `ASC_ISSUER_ID`, `ASC_KEY_ID`, `ASC_PRIVATE_KEY` (base64), `TEAM_ID`; Workflow `ios-testflight.yml` (ohne Fastlane), siehe `docs/TESTFLIGHT.md` |
+| Export-Compliance | `ITSAppUsesNonExemptEncryption = NO` gesetzt |
 
 ## Offene Punkte (priorisiert)
 
-1. **TestFlight**: Team-ID, Privacy-Manifest, Export-Compliance, App-Store-Connect-API-Key als Secret, Signing-Workflow (z. B. `xcodebuild archive` + `altool`/`notarytool` bzw. Fastlane), Build-Nummer automatisch.
+1. **TestFlight**: vorbereitet (`docs/TESTFLIGHT.md`); erster Lauf mit Xcode 26 ausstehend.
 2. **Echte Geräte-Tests**: Hintergrund-Aufzeichnung, Automatik, Kurzbefehle, Akku, Scan mit Kamera.
 3. **PDF-Last**: jedes PDF gleicht alle Datensätze ab (Integritätsabschnitt) → bei ~67k Fahrten p50 ≈ 28 s, ~0.2 PDF/s; begrenzt per `PDF_CONCURRENCY` (503 + Retry-After). Abhilfe (z. B. inkrementeller Abgleich / Cache je Kettenkopf) ändert Semantik → Nutzerentscheid.
 4. **Sync** schreibt je Mandant seriell (Mandantenzeilen-Lock) → p95 hoch unter Last; bewusst wegen Hash-Kette.
@@ -82,4 +82,4 @@ Kernprinzipien: local-first App mit Outbox/Sync (`/sync`, `/changes`), revisions
 - Screenshot-Workflow auf `main` zulassen?
 - Valkey standardmässig aktivieren oder Profil `scale` belassen?
 - Belege: fs (RWX) oder S3 (MinIO/RustFS/Ceph) im Zielbetrieb?
-- Apple-Developer-Team (Bundle-ID `ch.odovio` entschieden).
+- Apple-Developer-Team `Q66V4Q95B4`, Bundle-ID `ch.odovio` (entschieden). Weitere iOS-Entscheide: `docs/TESTFLIGHT.md`.

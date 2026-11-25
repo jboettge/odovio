@@ -1,0 +1,124 @@
+# iOS → TestFlight: xcodegen, Archive (Release, automatische Signierung über App-Store-Connect-API-Key),
+# Export + Upload nach App Store Connect. Keine Zertifikate/Profile im Repo: Xcode verwaltet sie (Cloud-Signing).
+#
+# Secrets (Repo → Settings → Secrets and variables → Actions):
+#   ASC_ISSUER_ID     Issuer-ID (UUID)
+#   ASC_KEY_ID        Key-ID (10 Zeichen)
+#   ASC_PRIVATE_KEY   Inhalt AuthKey_<KEY_ID>.p8, base64-kodiert
+#   TEAM_ID           Apple-Team-ID
+# Build-Nummer: run_number*10 + run_attempt (monoton, Rerun-sicher). Version: MARKETING_VERSION aus ios/project.yml.
+name: ios-testflight
+on:
+  workflow_dispatch:
+    inputs:
+      changelog:
+        description: "Was gibt es zu testen? (optional, nur Log)"
+        required: false
+  push:
+    tags: ["ios-v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-testflight
+  cancel-in-progress: false
+
+jobs:
+  testflight:
+    # App-Store-Uploads verlangen das iOS-26-SDK (Xcode 26).
+    runs-on: macos-26
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: ios
+    env:
+      ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+      ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+      TEAM_ID: ${{ secrets.TEAM_ID }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+
+      - name: Secrets prüfen
+        env:
+          ASC_PRIVATE_KEY: ${{ secrets.ASC_PRIVATE_KEY }}
+        run: |
+          miss=0
+          for v in ASC_ISSUER_ID ASC_KEY_ID ASC_PRIVATE_KEY TEAM_ID; do
+            [ -n "${!v}" ] || { echo "::error::Secret $v fehlt"; miss=1; }
+          done
+          exit $miss
+
+      - name: Xcode 26 wählen
+        run: |
+          X=$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1)
+          [ -n "$X" ] || { echo "::error::Kein Xcode 26 auf dem Runner"; ls -d /Applications/Xcode*; exit 1; }
+          sudo xcode-select -s "$X/Contents/Developer"
+          xcodebuild -version
+
+      - name: API-Key ablegen
+        env:
+          ASC_PRIVATE_KEY: ${{ secrets.ASC_PRIVATE_KEY }}
+        run: |
+          KEY="$RUNNER_TEMP/AuthKey_${ASC_KEY_ID}.p8"
+          printf '%s' "$ASC_PRIVATE_KEY" | base64 --decode > "$KEY"
+          chmod 600 "$KEY"
+          grep -q "BEGIN PRIVATE KEY" "$KEY" || { echo "::error::ASC_PRIVATE_KEY ist kein base64-kodierter .p8-Key"; exit 1; }
+          echo "ASC_KEY_PATH=$KEY" >> "$GITHUB_ENV"
+
+      - run: brew install xcodegen
+      - run: xcodegen generate
+
+      - name: Build-Nummer
+        env:
+          CHANGELOG: ${{ inputs.changelog }}
+        run: |
+          BUILD=$(( GITHUB_RUN_NUMBER * 10 + GITHUB_RUN_ATTEMPT ))
+          echo "BUILD_NUMBER=$BUILD" >> "$GITHUB_ENV"
+          echo "Version $(grep -m1 MARKETING_VERSION project.yml | tr -d ' "' | cut -d: -f2) ($BUILD)" >> "$GITHUB_STEP_SUMMARY"
+          [ -z "$CHANGELOG" ] || printf 'Zu testen: %s\n' "$CHANGELOG" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Archive
+        run: |
+          set -o pipefail
+          xcodebuild archive \
+            -project Fahrzeugbuch.xcodeproj -scheme Fahrzeugbuch -configuration Release \
+            -destination "generic/platform=iOS" \
+            -archivePath "$RUNNER_TEMP/Fahrzeugbuch.xcarchive" \
+            -allowProvisioningUpdates \
+            -authenticationKeyPath "$ASC_KEY_PATH" \
+            -authenticationKeyID "$ASC_KEY_ID" \
+            -authenticationKeyIssuerID "$ASC_ISSUER_ID" \
+            DEVELOPMENT_TEAM="$TEAM_ID" CODE_SIGN_STYLE=Automatic \
+            CURRENT_PROJECT_VERSION="$BUILD_NUMBER" \
+            2>&1 | tee "$RUNNER_TEMP/archive.log" | grep -E "error:|warning: .*(sign|provision)|ARCHIVE (SUCCEEDED|FAILED)" || true
+          test -d "$RUNNER_TEMP/Fahrzeugbuch.xcarchive" || { tail -80 "$RUNNER_TEMP/archive.log"; exit 1; }
+
+      - name: Export + Upload nach App Store Connect
+        run: |
+          set -o pipefail
+          /usr/libexec/PlistBuddy -c "Set :teamID $TEAM_ID" ExportOptions.plist
+          xcodebuild -exportArchive \
+            -archivePath "$RUNNER_TEMP/Fahrzeugbuch.xcarchive" \
+            -exportOptionsPlist ExportOptions.plist \
+            -exportPath "$RUNNER_TEMP/export" \
+            -allowProvisioningUpdates \
+            -authenticationKeyPath "$ASC_KEY_PATH" \
+            -authenticationKeyID "$ASC_KEY_ID" \
+            -authenticationKeyIssuerID "$ASC_ISSUER_ID" \
+            2>&1 | tee "$RUNNER_TEMP/export.log" | tail -40
+          echo "Build $BUILD_NUMBER hochgeladen – erscheint nach Verarbeitung (5–30 min) in TestFlight." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Logs bei Fehler
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: xcodebuild-logs
+          path: |
+            ${{ runner.temp }}/*.log
+            ${{ runner.temp }}/export/*.log
+          retention-days: 7
+
+      - name: API-Key entfernen
+        if: always()
+        run: rm -f "$RUNNER_TEMP"/AuthKey_*.p8
