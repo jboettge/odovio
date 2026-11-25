@@ -3,13 +3,14 @@
 <!--
   Privacy-Manifest odovio (Pflicht für App Store / TestFlight extern).
   - Kein Tracking, keine Tracking-Domains.
-  - Erhobene Daten: keine durch den Entwickler. Daten gehen nur an den vom Nutzer gewählten
-    eigenen Server (Betriebsart „Mit Server“) bzw. bleiben auf dem Gerät.
-    Falls ein vom Entwickler betriebener Server angeboten wird: NSPrivacyCollectedDataTypes ergänzen
-    (u. a. PreciseLocation, PhotosorVideos, OtherUserContent) – siehe docs/TESTFLIGHT.md.
-  - Required-Reason-APIs:
-    UserDefaults (CA92.1: nur eigene App-Daten), Datei-Zeitstempel (C617.1: Aufräumen eigener
-    Exportdateien im temporären App-Verzeichnis, AppSettings.cleanupExports).
+  - Erhobene Daten (Betriebsart „Mit Server“, u. a. vom Entwickler betriebener Server www.odovio.ch),
+    alle mit der Person verknüpft, nur für App-Funktionen:
+    PreciseLocation (Start/Ziel-Adresse, reduzierter Track), PhotosorVideos (Belege, KI-Scan),
+    OtherUserContent (Fahrten, Zweck inkl. Kalendertitel, Tanken, Wartung), UserID/Name/EmailAddress (OIDC-Konto, Mitglieder).
+    Lokalmodus „Nur auf diesem iPhone“: nichts verlässt das Gerät.
+    App Store Connect → App-Datenschutz muss dazu passen (docs/TESTFLIGHT.md).
+  - Required-Reason-APIs: UserDefaults (CA92.1: nur eigene App-Daten), Datei-Zeitstempel (C617.1:
+    Aufräumen eigener Exportdateien im temporären App-Verzeichnis, AppSettings.cleanupExports).
 -->
 <plist version="1.0">
 <dict>
@@ -18,7 +19,80 @@
 	<key>NSPrivacyTrackingDomains</key>
 	<array/>
 	<key>NSPrivacyCollectedDataTypes</key>
-	<array/>
+	<array>
+		<dict>
+			<key>NSPrivacyCollectedDataType</key>
+			<string>NSPrivacyCollectedDataTypePreciseLocation</string>
+			<key>NSPrivacyCollectedDataTypeLinked</key>
+			<true/>
+			<key>NSPrivacyCollectedDataTypeTracking</key>
+			<false/>
+			<key>NSPrivacyCollectedDataTypePurposes</key>
+			<array>
+				<string>NSPrivacyCollectedDataTypePurposeAppFunctionality</string>
+			</array>
+		</dict>
+		<dict>
+			<key>NSPrivacyCollectedDataType</key>
+			<string>NSPrivacyCollectedDataTypePhotosorVideos</string>
+			<key>NSPrivacyCollectedDataTypeLinked</key>
+			<true/>
+			<key>NSPrivacyCollectedDataTypeTracking</key>
+			<false/>
+			<key>NSPrivacyCollectedDataTypePurposes</key>
+			<array>
+				<string>NSPrivacyCollectedDataTypePurposeAppFunctionality</string>
+			</array>
+		</dict>
+		<dict>
+			<key>NSPrivacyCollectedDataType</key>
+			<string>NSPrivacyCollectedDataTypeOtherUserContent</string>
+			<key>NSPrivacyCollectedDataTypeLinked</key>
+			<true/>
+			<key>NSPrivacyCollectedDataTypeTracking</key>
+			<false/>
+			<key>NSPrivacyCollectedDataTypePurposes</key>
+			<array>
+				<string>NSPrivacyCollectedDataTypePurposeAppFunctionality</string>
+			</array>
+		</dict>
+		<dict>
+			<key>NSPrivacyCollectedDataType</key>
+			<string>NSPrivacyCollectedDataTypeUserID</string>
+			<key>NSPrivacyCollectedDataTypeLinked</key>
+			<true/>
+			<key>NSPrivacyCollectedDataTypeTracking</key>
+			<false/>
+			<key>NSPrivacyCollectedDataTypePurposes</key>
+			<array>
+				<string>NSPrivacyCollectedDataTypePurposeAppFunctionality</string>
+			</array>
+		</dict>
+		<dict>
+			<key>NSPrivacyCollectedDataType</key>
+			<string>NSPrivacyCollectedDataTypeName</string>
+			<key>NSPrivacyCollectedDataTypeLinked</key>
+			<true/>
+			<key>NSPrivacyCollectedDataTypeTracking</key>
+			<false/>
+			<key>NSPrivacyCollectedDataTypePurposes</key>
+			<array>
+				<string>NSPrivacyCollectedDataTypePurposeAppFunctionality</string>
+			</array>
+		</dict>
+		<dict>
+			<key>NSPrivacyCollectedDataType</key>
+			<string>NSPrivacyCollectedDataTypeEmailAddress</string>
+			<key>NSPrivacyCollectedDataTypeLinked</key>
+			<true/>
+			<key>NSPrivacyCollectedDataTypeTracking</key>
+			<false/>
+			<key>NSPrivacyCollectedDataTypePurposes</key>
+			<array>
+				<string>NSPrivacyCollectedDataTypePurposeAppFunctionality</string>
+			</array>
+		</dict>
+	</array>
 	<key>NSPrivacyAccessedAPITypes</key>
 	<array>
 		<dict>

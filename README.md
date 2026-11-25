@@ -142,7 +142,7 @@ Optionen:
 ## Skalierung
 
 **Vertikal (Docker/Portainer)**: mehr Kerne/RAM für einen Host.
-- `WEB_CONCURRENCY` = Anzahl uvicorn-Worker (`auto` = min(2 × CPU-Quota, 16)); >1 nur mit `STATE_BACKEND=redis` und Valkey (`docker compose --profile scale up -d`, `VALKEY_PASSWORD` setzen). Rate-Limits, Brute-Force-Sperren und Circuit-Breaker sind dann worker-übergreifend.
+- `WEB_CONCURRENCY` = Anzahl uvicorn-Worker (`auto` = min(2 × CPU-Quota, 16)); >1 nur mit `STATE_BACKEND=redis` und Valkey (Standard im Compose-Stack, `VALKEY_PASSWORD` setzen). Rate-Limits, Brute-Force-Sperren und Circuit-Breaker sind dann worker-übergreifend.
 - Anker, Migration und Vollprüfung laufen per PostgreSQL-Advisory-Lock nur einmal.
 - DB-Pool je Worker (`DB_POOL_SIZE`, `DB_MAX_OVERFLOW`); Startprüfung: Worker × (Pool + Overflow) + Reserve ≤ `PG_MAX_CONNECTIONS`. PostgreSQL-Tuning (`PG_*`) mit Tabelle für 8/16/32 GB in `.env.example`.
 - Ressourcen je Dienst: `API_CPUS`, `API_MEMORY`, `DB_CPUS`, `DB_MEMORY`.

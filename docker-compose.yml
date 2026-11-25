@@ -1,8 +1,8 @@
 # Portainer: Stacks → Add stack → Repository
 #   Compose path: docker-compose.yml
 #   Env: siehe .env.example (DB_PASSWORD, APP_DB_PASSWORD, OIDC_ISSUER, ANCHOR_SIGNING_KEY, API_BIND …)
-# Vertikal skalieren (ein Host, mehrere Worker): Profil "scale" startet Valkey (gemeinsamer Zustand):
-#   COMPOSE_PROFILES=scale, STATE_BACKEND=redis, VALKEY_PASSWORD, WEB_CONCURRENCY=auto|N (+ Ressourcen, PG-Tuning)
+# Valkey (gemeinsamer Zustand) läuft standardmässig mit (STATE_BACKEND=redis, VALKEY_PASSWORD Pflicht).
+# Vertikal skalieren (ein Host, mehrere Worker): WEB_CONCURRENCY=auto|N (+ Ressourcen, PG-Tuning)
 x-api: &api
   # Kontext fahrzeugbuch/: Stufe 1 baut das Web-Frontend (web/), Stufe 2 die API (server/)
   build:
@@ -127,7 +127,7 @@ services:
       DOCS_ENABLED: ${DOCS_ENABLED:-0}
       # ---------- Härtung (app/security.py) ----------
       # Host-Header (127.0.0.1/localhost sind für den Healthcheck immer erlaubt); "*" → Startwarnung
-      ALLOWED_HOSTS: ${ALLOWED_HOSTS:-fahrzeugbuch.j-mb.net,localhost}
+      ALLOWED_HOSTS: ${ALLOWED_HOSTS:-www.odovio.ch,localhost}
       # exakte Cross-Origin-Origins (leer = keine; das Web-Frontend läuft same-origin)
       CORS_ORIGINS: ${CORS_ORIGINS:-}
       FORCE_HSTS: ${FORCE_HSTS:-0}
@@ -154,8 +154,8 @@ services:
       GRACEFUL_TIMEOUT_S: ${GRACEFUL_TIMEOUT_S:-25}
       THREADPOOL_SIZE: ${THREADPOOL_SIZE:-40}
       PDF_CONCURRENCY: ${PDF_CONCURRENCY:-2}
-      # memory (Einzelbetrieb) | redis (Valkey, Profil "scale")
-      STATE_BACKEND: ${STATE_BACKEND:-memory}
+      # redis (Valkey, Standard) | memory (Einzelbetrieb ohne Valkey, nur 1 Worker)
+      STATE_BACKEND: ${STATE_BACKEND:-redis}
       REDIS_URL: ${REDIS_URL:-redis://valkey:6379/0}
       REDIS_PASSWORD: ${VALKEY_PASSWORD:-}
       DB_POOL_SIZE: ${DB_POOL_SIZE:-5}
@@ -235,24 +235,21 @@ services:
         condition: service_completed_successfully
       valkey:
         condition: service_healthy
-        required: false          # nur mit Profil "scale"
     # Dienste auf dem Docker-Host (z. B. OSRM/vLLM mit veröffentlichtem Port): http://host.docker.internal:<port>
     extra_hosts:
       - "host.docker.internal:host-gateway"
     networks: [internal, default]
 
   # Gemeinsamer, flüchtiger Zustand (Rate-Limits, Brute-Force-Sperren, Circuit-Breaker, Metrik-Schnappschüsse)
-  # für mehrere Worker – nur mit Profil "scale" (Einzelbetrieb unverändert):
-  #   COMPOSE_PROFILES=scale  +  STATE_BACKEND=redis, VALKEY_PASSWORD (openssl rand -hex 32), WEB_CONCURRENCY
+  # für alle Worker – standardmässig aktiv: VALKEY_PASSWORD (openssl rand -hex 32) setzen.
   # Keine Persistenz (Neustart = Limits/Sperren zurückgesetzt, beabsichtigt), maxmemory + allkeys-lru,
   # nur internes Netz, read-only, ohne Capabilities. Digest-Update: docker pull valkey/valkey:8-alpine
   valkey:
     image: valkey/valkey:8-alpine@sha256:9971099af41c36e887aabdfe22b80c0fe45df949163dfc9cb434febc57cfc3fc
     container_name: fahrzeugbuch-valkey
-    profiles: ["scale"]
     restart: unless-stopped
     user: "999:1000"               # valkey-Benutzer des Images (kein chown/setpriv nötig → cap_drop ALL)
-    # Passwort Pflicht (ohne → Abbruch); Werte über Env, damit Einzelbetrieb ohne VALKEY_PASSWORD startet
+    # Passwort Pflicht (ohne → Abbruch)
     entrypoint: ["/bin/sh", "-c"]
     command:
       - >-

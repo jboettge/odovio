@@ -23,7 +23,7 @@ targets:
     info:
       path: Fahrzeugbuch/Info.plist
       properties:
-        CFBundleDisplayName: Fahrzeugbuch
+        CFBundleDisplayName: odovio
         CFBundleDevelopmentRegion: de
         # Nur Standard-Krypto (HTTPS, CryptoKit-Hashes/Signaturprüfung) → keine Exportdeklaration nötig
         ITSAppUsesNonExemptEncryption: false

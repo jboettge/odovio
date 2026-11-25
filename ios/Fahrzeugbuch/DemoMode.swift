@@ -28,7 +28,7 @@ enum Demo {
 
     @MainActor
     static func setUp(_ settings: AppSettings) {
-        settings.serverURL = "https://fahrzeugbuch.j-mb.net"
+        settings.serverURL = "https://www.odovio.ch"
         settings.auth.demoLogin(name: "jakob")
         let templates = [
             ChecklistTemplate(title: "Service", items: ["Motoröl gewechselt", "Ölfilter gewechselt",
@@ -494,7 +494,7 @@ struct DemoScreen: View {
                 case "local-list": VehicleListView()
                 case "local-settings": NavigationStack { SettingsView() }
                 case "migrate":
-                    MigrationWizardView(previewStep: .summary, previewServer: "https://fahrzeugbuch.j-mb.net",
+                    MigrationWizardView(previewStep: .summary, previewServer: "https://www.odovio.ch",
                                         previewTenants: Demo.migrationTenants())
                 case "members": NavigationStack { MembersView(preview: Demo.membersSample()) }
                 case "activity": NavigationStack { ActivityView(preview: Demo.activitySample()) }

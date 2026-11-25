@@ -66,7 +66,7 @@ Kernprinzipien: local-first App mit Outbox/Sync (`/sync`, `/changes`), revisions
 5. **Helm** in echtem Cluster installieren (k3s/Proxmox), Valkey-/S3-Pfad in CI verifizieren.
 6. Lasttest auf Ziel-Hardware (EPYC) wiederholen (`server/loadtest/README.md`).
 7. Caddy/CrowdSec/fail2ban live testen.
-8. Screenshot-Workflow für `main` klären (s. o.).
+8. ~~Screenshot-Workflow für `main`~~ – bleibt auf Branches (Entscheid).
 
 ## Bekannte Probleme / Grenzen
 
@@ -78,8 +78,5 @@ Kernprinzipien: local-first App mit Outbox/Sync (`/sync`, `/changes`), revisions
 
 ## Offene Nutzerentscheide
 
-- PDF-Integritätsabschnitt vereinfachen/cachen?
-- Screenshot-Workflow auf `main` zulassen?
-- Valkey standardmässig aktivieren oder Profil `scale` belassen?
-- Belege: fs (RWX) oder S3 (MinIO/RustFS/Ceph) im Zielbetrieb?
+Entschieden 25.11.2026: PDF-Integritätsprüfung beschleunigen (inkrementell/Cache); Screenshot-Workflow bleibt auf Branches (nicht `main`); Valkey standardmässig aktiv (Compose, `STATE_BACKEND=redis`); Belege im Dateisystem (`STORAGE_BACKEND=fs`); Betrieb unter https://www.odovio.ch; IdP Authentik; iOS-Anzeigename `odovio`, Version aus Tag `ios-vX.Y.Z`.
 - Apple-Developer-Team `Q66V4Q95B4`, Bundle-ID `ch.odovio` (entschieden). Weitere iOS-Entscheide: `docs/TESTFLIGHT.md`.
