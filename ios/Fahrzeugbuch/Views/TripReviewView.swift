@@ -71,7 +71,7 @@ struct TripReviewView: View {
     }
 
     private var needsPurpose: Bool {
-        (category == .business || category == .field) && purpose.trimmed.isEmpty && customerId == nil
+        (category == .business || category == .field) && purpose.trimmed.isEmpty
     }
 
     private var odometerValue: Int? { odometerText.asInt }
@@ -324,7 +324,7 @@ struct TripReviewView: View {
     /// Hinweis: geschäftliche Fahrt ohne Zweck (U11)
     private var purposeHint: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Label("Zweck oder Kunde fehlt. Ohne Zweck ist der Monatsabschluss nicht möglich.",
+            Label("Zweck fehlt. Ohne Zweck ist der Monatsabschluss nicht möglich.",
                   systemImage: "exclamationmark.triangle")
                 .font(.footnote)
                 .foregroundStyle(Color.warningText)

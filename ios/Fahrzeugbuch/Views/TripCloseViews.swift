@@ -300,8 +300,7 @@ struct MonthChecklist {
         self.gaps = gaps
         self.missingPurpose = trips.filter { t in
             let c = t.categoryValue
-            return (c == .business || c == .field) && t.purpose?.nilIfEmpty == nil && t.customerId == nil
-                && t.customerName?.nilIfEmpty == nil
+            return (c == .business || c == .field) && t.purpose?.nilIfEmpty == nil
         }
         self.incomplete = trips.filter { $0.kmStart == nil || $0.kmEnd == nil || $0.endAt == nil }
         self.estimated = trips.filter(\.kmEstimated)
@@ -561,7 +560,7 @@ struct MonthCloseView: View {
                      detail: c.open.isEmpty ? nil : "\(c.open.count) offen")
             tripLinks(c.open)
             CheckRow(title: "Geschäftliche Fahrten mit Zweck", ok: c.missingPurpose.isEmpty,
-                     detail: c.missingPurpose.isEmpty ? nil : "\(c.missingPurpose.count) ohne Zweck oder Kunde")
+                     detail: c.missingPurpose.isEmpty ? nil : "\(c.missingPurpose.count) ohne Zweck")
             tripLinks(c.missingPurpose)
             CheckRow(title: "Kilometerstand und Endzeit erfasst", ok: c.incomplete.isEmpty,
                      detail: c.incomplete.isEmpty ? nil : "\(c.incomplete.count) unvollständig")

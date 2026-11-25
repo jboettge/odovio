@@ -13,7 +13,7 @@ enum QuickEntry: Identifiable {
         }
     }
 
-    @ViewBuilder var form: some View {
+    @MainActor @ViewBuilder var form: some View {
         switch self {
         case .fuel(let v): FuelFormView(vehicle: v, entry: nil)
         case .odometer(let v): OdometerFormView(vehicle: v, reading: nil)

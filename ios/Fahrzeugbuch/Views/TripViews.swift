@@ -691,8 +691,8 @@ struct TripRow: View {
 
     private var missingPurpose: Bool {
         let c = trip.categoryValue
-        return (c == .business || c == .field) && trip.purpose?.nilIfEmpty == nil && trip.customerId == nil
-            && customer == nil && !trip.isMaskedPrivate
+        // Server verlangt für Geschäfts-/Aussendienstfahrten einen Zweck (Kunde allein genügt nicht)
+        return (c == .business || c == .field) && trip.purpose?.nilIfEmpty == nil && !trip.isMaskedPrivate
     }
 
     private var spokenText: String {
@@ -895,7 +895,7 @@ struct TripFormView: View {
     private var noteHeader: String { noteRequired ? "Korrekturbegründung" : "Notiz" }
     private var notePrompt: String { noteRequired ? "Pflicht: Grund der Korrektur (mind. 10 Zeichen)" : "optional" }
     private var needsPurpose: Bool {
-        (category == .business || category == .field) && purpose.trimmed.isEmpty && customerId == nil
+        (category == .business || category == .field) && purpose.trimmed.isEmpty
     }
 
     // MARK: Validierung
@@ -939,7 +939,7 @@ struct TripFormView: View {
         if !hasEnd { w.append("Ohne Endzeit ist der Monatsabschluss nicht möglich.") }
         if let d = distance, d > 1500 { w.append("Distanz \(Fmt.km(d)) ungewöhnlich gross.") }
         if needsPurpose {
-            w.append("\(category.uiLabel): Zweck oder Kunde angeben – sonst ist der Monatsabschluss nicht möglich.")
+            w.append("\(category.uiLabel): Zweck angeben – sonst ist der Monatsabschluss nicht möglich.")
         }
         if category == .unknown { w.append("Ohne Kategorie bleibt die Fahrt ein Entwurf.") }
         return w
@@ -1029,7 +1029,7 @@ struct TripFormView: View {
                     }
                     TextField("Zweck (z. B. Offerte Meier)", text: $purpose, axis: .vertical)
                     if needsPurpose {
-                        Label("Zweck oder Kunde fehlt", systemImage: "exclamationmark.triangle")
+                        Label("Zweck fehlt", systemImage: "exclamationmark.triangle")
                             .font(.footnote)
                             .foregroundStyle(Color.warningText)
                     }
