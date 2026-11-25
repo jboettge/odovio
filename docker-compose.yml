@@ -60,6 +60,9 @@ services:
       ANCHOR_SIGNING_KEY: ${ANCHOR_SIGNING_KEY:-}
       ANCHOR_INTERVAL_MIN: ${ANCHOR_INTERVAL_MIN:-60}
       MAX_BODY_BYTES: ${MAX_BODY_BYTES:-1048576}
+      # Belege (Fotos/PDF): Ablage im Volume fahrzeugbuch-files, Upload-Limit nur für …/blob
+      ATTACHMENT_DIR: /data/attachments
+      MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES:-8388608}
       FORWARDED_ALLOW_IPS: ${FORWARDED_ALLOW_IPS:-127.0.0.1}
       DOCS_ENABLED: ${DOCS_ENABLED:-0}
       # Intelligente Dienste (optional, leer = aus). OSRM/vLLM laufen beim Nutzer als eigene Container:
@@ -71,14 +74,20 @@ services:
       VLLM_URL: ${VLLM_URL:-}
       VLLM_MODEL: ${VLLM_MODEL:-qwen3.5-9b}
       VLLM_API_KEY: ${VLLM_API_KEY:-}
+      # Bildauswertung (Vision-Modell); URL leer → VLLM_URL, Modell leer → aus
+      VLLM_VISION_URL: ${VLLM_VISION_URL:-}
+      VLLM_VISION_MODEL: ${VLLM_VISION_MODEL:-}
       GEO_TIMEOUT_S: ${GEO_TIMEOUT_S:-5}
       LLM_TIMEOUT_S: ${LLM_TIMEOUT_S:-10}
       INTEL_RATE_SUGGEST: ${INTEL_RATE_SUGGEST:-60}
       INTEL_RATE_GEO: ${INTEL_RATE_GEO:-300}
+      INTEL_RATE_SCAN: ${INTEL_RATE_SCAN:-20}
       N8N_WEBHOOK_URL: ${N8N_WEBHOOK_URL:-}
       TAX_CANTON: ${TAX_CANTON:-}
       # CHECKLIST_FILE: /config/checklists.json
-    # volumes:
+    volumes:
+      # Container ist read_only: Belege nur hier beschreibbar (Backup zusammen mit der DB!)
+      - fahrzeugbuch-files:/data/attachments
     #   - ./checklists.json:/config/checklists.json:ro
     ports:
       # Nur für den Reverse Proxy freigeben: API_BIND = IP der Docker-VM (+ Firewall nur OPNsense)
@@ -116,6 +125,7 @@ services:
 
 volumes:
   fahrzeugbuch-db:
+  fahrzeugbuch-files:
   fahrzeugbuch-photon:
 
 networks:

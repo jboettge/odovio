@@ -207,6 +207,41 @@ class TripData(Payload):
         return self
 
 
+# ---------- Belege ----------
+MAX_ATTACHMENT_BYTES = 8 * 1024 * 1024
+AttachmentMime = Literal["image/jpeg", "image/heic", "application/pdf"]
+
+
+class AttachmentData(Payload):
+    """Metadaten eines Belegs. Die Datei selbst kommt per PUT …/attachments/{id}/blob."""
+    fuel_id: str | None = Field(default=None, max_length=36)
+    maintenance_id: str | None = Field(default=None, max_length=36)
+    vehicle_id: str | None = Field(default=None, max_length=36)
+    kind: Literal["receipt", "pump", "odometer", "other"]
+    sha256: str = Field(pattern=r"^[0-9a-fA-F]{64}$")
+    mime: AttachmentMime
+    size: int = Field(ge=1, le=MAX_ATTACHMENT_BYTES)
+    taken_at: str | None = None
+    note: str | None = Field(default=None, max_length=300)
+
+    @field_validator("sha256")
+    @classmethod
+    def _lower(cls, v: str) -> str:
+        return v.lower()
+
+    @field_validator("taken_at", mode="before")
+    @classmethod
+    def _ts(cls, v):
+        return normalize_ts(v)
+
+    @model_validator(mode="after")
+    def _target(self):
+        if self.fuel_id is None and self.maintenance_id is None and \
+                not (self.kind == "odometer" and self.vehicle_id is not None):
+            raise ValueError("fuel_id oder maintenance_id nötig (Tacho-Foto: kind odometer mit vehicle_id)")
+        return self
+
+
 class PurposeRuleData(Payload):
     priority: int = Field(default=100, ge=0, le=1000)
     from_place_id: str | None = Field(default=None, max_length=36)
@@ -284,7 +319,8 @@ class CloseRequest(BaseModel):
 class SyncOp(BaseModel):
     op_id: str = Field(min_length=8, max_length=64)
     entity: Literal["vehicle", "odometer", "fuel", "maintenance", "maintenance_item", "maintenance_material",
-                    "material_article", "trip", "place", "customer", "purpose_rule", "tax_param", "trip_period"]
+                    "material_article", "trip", "place", "customer", "purpose_rule", "tax_param", "trip_period",
+                    "attachment"]
     id: str
     action: Literal["upsert", "delete"]
     base_version: int | None = Field(default=None, ge=0, le=2_000_000_000)  # None = neu
@@ -330,6 +366,7 @@ class Changes(BaseModel):
     purpose_rules: list[dict]
     tax_params: list[dict]
     trip_periods: list[dict]
+    attachments: list[dict]
 
 
 class ChecklistTemplate(BaseModel):
@@ -362,6 +399,8 @@ class AuditResult(BaseModel):
     problems: list[str]
     signed: bool            # Anker-Signaturschlüssel konfiguriert
     anchors: int
+    blobs_checked: int = 0  # Belegdateien mit geprüfter SHA-256
+    blobs_missing: int = 0  # Belege ohne (hochgeladene) Datei – kein Fehler
 
 
 class AnchorOut(BaseModel):

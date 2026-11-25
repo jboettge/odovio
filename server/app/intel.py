@@ -8,6 +8,7 @@ Token-Gruppen gelesen (gleiche Logik wie main.tenant_access, aber ohne DB-Zugrif
 Rate-Limits je Benutzer (In-Memory, je Prozess):
   INTEL_RATE_SUGGEST  Anfragen/Minute für /trips/suggest, Default 60
   INTEL_RATE_GEO      Anfragen/Minute für /api/geo/*, Default 300
+  INTEL_RATE_SCAN     Anfragen/Minute für /scan (Bildauswertung), Default 20
 """
 import datetime as dt
 import logging
@@ -23,13 +24,13 @@ from fastapi.responses import JSONResponse
 from fastapi.routing import APIRoute
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from . import classify, geo
+from . import classify, geo, vision
 from .auth import TENANT_SLUG, User, require_user
 from .classify import PrivateTrip, SuggestRequest
 from .geo import GeoNoResult, GeoUnavailable, InvalidTrack, UpstreamError
 
 log = logging.getLogger("fahrzeugbuch.intel")
-
+SCAN_MAX_IMAGE = vision.MAX_IMAGE_BYTES
 
 
 class _SafeRoute(APIRoute):
@@ -189,13 +190,31 @@ class IntelStatus(BaseModel):
     geo_match: bool
     geo_reverse: bool
     llm: bool
+    vision: bool
+
+
+class ScanRequest(_In):
+    image_b64: str = Field(min_length=4, max_length=vision.MAX_IMAGE_B64 + 4096,
+                           description="JPEG/PNG als Base64 (dekodiert max. 2 MiB)")
+    kind: vision.ScanKind
+
+
+class ScanResult(BaseModel):
+    liters: float | None
+    amount: float | None
+    price_per_liter: float | None
+    km: int | None
+    date: str | None
+    station: str | None
+    confidence: float
+    reason: str
 
 
 # ---------- Endpunkte ----------
 @router.get("/api/intel/status", response_model=IntelStatus)
 def intel_status(_: CurrentUser):
     """Nur ob die Dienste konfiguriert sind (keine URLs, keine Erreichbarkeitsprüfung)."""
-    return {**geo.status(), "llm": classify.configured()}
+    return {**geo.status(), "llm": classify.configured(), "vision": vision.configured()}
 
 
 @router.post("/api/geo/match", response_model=MatchResult)
@@ -245,6 +264,26 @@ def trips_suggest(req: SuggestRequest, user: Annotated[User, Depends(write_acces
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(e)) from e
     except (GeoUnavailable, UpstreamError) as e:
         raise _upstream(e, "LLM") from e
+    if result is None:
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
+    return result
+
+
+@router.post("/api/t/{tenant}/scan", response_model=ScanResult,
+             responses={204: {"description": "nichts erkannt"}})
+def scan(req: ScanRequest, user: Annotated[User, Depends(write_access)]):
+    """Werte aus einem Belegfoto lesen (Vorschlag). Das Bild wird weder gespeichert noch protokolliert."""
+    if not vision.configured():
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Bildauswertung nicht konfiguriert")
+    limiter.check(f"scan:{user.sub}", _limit("INTEL_RATE_SCAN", 20))
+    try:
+        raw, mime = vision.decode_image(req.image_b64)
+    except vision.InvalidImage as e:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(e)) from None
+    try:
+        result = vision.scan(raw, mime, req.kind)
+    except (GeoUnavailable, UpstreamError) as e:
+        raise _upstream(e, "Bildauswertung") from None
     if result is None:
         return Response(status_code=status.HTTP_204_NO_CONTENT)
     return result

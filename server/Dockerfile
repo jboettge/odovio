@@ -7,7 +7,11 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app ./app
-RUN useradd -r -u 10001 app && mkdir -p /app/data && chown app /app/data
+# /data/attachments: Mountpunkt des Beleg-Volumes; ein leeres benanntes Volume übernimmt beim ersten
+# Mount Besitzer/Rechte dieses Verzeichnisses → User app kann trotz read_only-Container schreiben.
+RUN useradd -r -u 10001 app && mkdir -p /app/data /data/attachments \
+    && chown app /app/data /data/attachments && chmod 750 /data/attachments
+ENV ATTACHMENT_DIR=/data/attachments
 USER app
 
 EXPOSE 8000

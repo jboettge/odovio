@@ -18,6 +18,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from . import models, schemas
+from .attachments import blob_path
 from .audit import append_revision
 from .auth import User
 
@@ -54,6 +55,10 @@ ENTITIES: dict[str, tuple[type, type[BaseModel], tuple[Ref, ...]]] = {
                       ("result_customer_id", models.Customer, False))),
     "tax_param": (models.TaxParam, schemas.TaxParamData, ()),
     "trip_period": (models.TripPeriod, schemas.TripPeriodData, (("vehicle_id", models.Vehicle, True),)),
+    "attachment": (models.Attachment, schemas.AttachmentData,
+                   (("fuel_id", models.FuelEntry, False),
+                    ("maintenance_id", models.Maintenance, False),
+                    ("vehicle_id", models.Vehicle, False))),
 }
 SERVER_ONLY = {"trip_period"}
 log = logging.getLogger("fahrzeugbuch.sync")
@@ -63,7 +68,7 @@ CHANGE_KEYS = {
     "maintenance": "maintenance", "maintenance_item": "maintenance_items",
     "maintenance_material": "maintenance_materials", "material_article": "material_articles",
     "customer": "customers", "place": "places", "trip": "trips", "purpose_rule": "purpose_rules",
-    "tax_param": "tax_params", "trip_period": "trip_periods",
+    "tax_param": "tax_params", "trip_period": "trip_periods", "attachment": "attachments",
 }
 
 
@@ -123,7 +128,24 @@ def _place_rules(db: Session, tenant: models.Tenant, obj, data):
     return data
 
 
-HOOKS: dict[str, Hook] = {"trip": _trip_rules, "place": _place_rules}
+def _attachment_rules(db: Session, tenant: models.Tenant, obj, data):
+    """Belege: Ist die Datei hochgeladen, sind Prüfsumme/Typ/Grösse festgeschrieben (sonst würde die
+    Integritätsprüfung die unveränderte Datei als verändert melden) → neuen Beleg anlegen.
+    Ein angegebenes Fahrzeug muss zum Tankvorgang bzw. zur Wartung passen."""
+    if data is None:            # Storno: Datei bleibt erhalten
+        return None
+    if obj is not None and (obj.sha256, obj.mime, obj.size) != (data.sha256, data.mime, data.size) \
+            and blob_path(tenant.id, obj.id).is_file():
+        raise Rejected("Datei bereits hochgeladen: sha256/mime/size unveränderlich (neuen Beleg anlegen)")
+    if data.vehicle_id is not None:
+        for field, model in (("fuel_id", models.FuelEntry), ("maintenance_id", models.Maintenance)):
+            ref_id = getattr(data, field)
+            if ref_id is not None and db.get(model, ref_id).vehicle_id != data.vehicle_id:
+                raise Rejected(f"vehicle_id passt nicht zu {field}")
+    return data
+
+
+HOOKS: dict[str, Hook] = {"trip": _trip_rules, "place": _place_rules, "attachment": _attachment_rules}
 
 
 def _apply(db: Session, tenant: models.Tenant, user: User, op: schemas.SyncOp) -> dict:

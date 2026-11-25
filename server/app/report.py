@@ -13,6 +13,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from . import models
+from .attachments import fuel_with_receipt
 from .integrity import verify_all
 from .stats import VehicleData, consumption_points, summarize
 
@@ -26,7 +27,9 @@ ENTITY_NAMES = {
     "maintenance": "Wartung", "maintenance_item": "Checkpunkt", "maintenance_material": "Material",
     "material_article": "Materialartikel", "trip": "Fahrt", "place": "Ort", "customer": "Kunde",
     "purpose_rule": "Zweckregel", "tax_param": "Steuerparameter", "trip_period": "Monatsabschluss",
+    "attachment": "Beleg",
 }
+KIND_NAMES = {"receipt": "Quittung", "pump": "Zapfsäule", "odometer": "Tacho", "other": "Beleg"}
 CATEGORY_NAMES = {"business": "geschäftlich", "private": "privat", "commute": "Arbeitsweg",
                   "field": "Aussendienst", "unknown": "unbekannt"}
 STATUS_NAMES = {"draft": "Entwurf", "suggested": "vorgeschlagen", "confirmed": "bestätigt",
@@ -99,6 +102,14 @@ def _describe(entity: str, data: dict) -> str:
                   if data.get("km_start") is not None or data.get("km_end") is not None else "")
             parts = [_day(data.get("start_at")), km, CATEGORY_NAMES.get(data.get("category"), ""),
                      STATUS_NAMES.get(data.get("status"), "")]
+            if data.get("note"):
+                parts.append(f"Notiz: {data['note']}")
+            return ", ".join(x for x in parts if x)
+        case "attachment":
+            size = data.get("size")
+            parts = [KIND_NAMES.get(data.get("kind"), str(data.get("kind") or "")), str(data.get("mime") or ""),
+                     f"{_num(size / 1024, 0)} KB" if isinstance(size, int) else "",
+                     f"SHA-256 {str(data.get('sha256') or '')[:16]}…"]
             if data.get("note"):
                 parts.append(f"Notiz: {data['note']}")
             return ", ".join(x for x in parts if x)
@@ -194,14 +205,15 @@ def build_report(
         ], [60, 110]),
     ]
 
+    receipts = fuel_with_receipt(db, tenant.id, [f.id for f in fuel])
     story += [Paragraph(f"Tankvorgänge ({len(fuel)})", H2)]
     story += [_table(
-        ["Datum", "km-Stand", "Liter", "Betrag CHF", "CHF/l", "Voll", "l/100 km", "Tankstelle"],
+        ["Datum", "km-Stand", "Liter", "Betrag CHF", "CHF/l", "Voll", "l/100 km", "Tankstelle", "Beleg"],
         [[_day(f.date), _km(f.km), _num(f.liters), _num(f.price_total), _num(f.price_per_liter, 3),
           "ja" if f.full_tank else "nein",
           _num(per_km[f.km]["consumption"]) if f.full_tank and f.km in per_km else "",
-          f.station or ""] for f in fuel],
-        [20, 20, 16, 20, 15, 11, 18, 50],
+          f.station or "", "ja" if f.id in receipts else ""] for f in fuel],
+        [20, 20, 16, 20, 15, 11, 18, 38, 12],
     )] if fuel else [_p("Keine Tankvorgänge im Zeitraum.")]
 
     story += [Paragraph(f"Wartungen ({len(maint)})", H2)]
@@ -257,6 +269,9 @@ def build_report(
     parents = list(ids)
     for child in (models.MaintenanceItem, models.MaintenanceMaterial):
         ids |= set(db.scalars(select(child.id).where(child.maintenance_id.in_(parents))))
+    ids |= set(db.scalars(select(models.Attachment.id).where(     # Belege (auch stornierte)
+        models.Attachment.tenant_id == tenant.id,
+        models.Attachment.fuel_id.in_(parents) | models.Attachment.maintenance_id.in_(parents))))
     revs = list(db.scalars(
         select(models.Revision)
         .where(models.Revision.tenant_id == tenant.id, models.Revision.entity_id.in_(ids),

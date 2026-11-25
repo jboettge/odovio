@@ -134,6 +134,24 @@ class MaterialArticle(Synced, Base):
     note: Mapped[str | None] = mapped_column(Text)
 
 
+class Attachment(Synced, Base):
+    """Beleg (Foto/PDF von Zapfsäule, Quittung, Tacho). Metadaten werden synchronisiert (Journal),
+    die Datei liegt ausserhalb der DB (ATTACHMENT_DIR/<tenant_id>/<id>) und ist über `sha256`
+    an die Revisionskette gebunden. Storno = Soft-Delete, die Datei bleibt erhalten."""
+
+    __tablename__ = "attachments"
+
+    fuel_id: Mapped[str | None] = mapped_column(ForeignKey("fuel_entries.id"), index=True)
+    maintenance_id: Mapped[str | None] = mapped_column(ForeignKey("maintenance.id"), index=True)
+    vehicle_id: Mapped[str | None] = mapped_column(ForeignKey("vehicles.id"), index=True)
+    kind: Mapped[str] = mapped_column(String(20))
+    sha256: Mapped[str] = mapped_column(String(64))
+    mime: Mapped[str] = mapped_column(String(40))
+    size: Mapped[int] = mapped_column(Integer)
+    taken_at: Mapped[str | None] = mapped_column(String(40))
+    note: Mapped[str | None] = mapped_column(String(300))
+
+
 # ---------- Fahrtenbuch ----------
 class Customer(Synced, Base):
     __tablename__ = "customers"

@@ -51,7 +51,8 @@ def http(monkeypatch):
     fake = FakeHTTP()
     monkeypatch.setattr(geo, "http_json", fake)
     for k in ("OSRM_PROFILE", "VLLM_API_KEY", "VLLM_MODEL", "GEO_TIMEOUT_S", "LLM_TIMEOUT_S",
-              "INTEL_RATE_SUGGEST", "INTEL_RATE_GEO", "OSRM_MAX_MATCHING_SIZE"):
+              "INTEL_RATE_SUGGEST", "INTEL_RATE_GEO", "OSRM_MAX_MATCHING_SIZE", "VLLM_VISION_URL",
+              "VLLM_VISION_MODEL", "INTEL_RATE_SCAN"):
         monkeypatch.delenv(k, raising=False)
     monkeypatch.setenv("OSRM_URL", "http://osrm:5000/")
     monkeypatch.setenv("PHOTON_URL", "http://photon:2322")
@@ -90,11 +91,12 @@ def test_auth_missing_401(client):
 
 
 def test_status(client, http, monkeypatch):
-    assert client.get("/api/intel/status").json() == {"geo_match": True, "geo_reverse": True, "llm": True}
+    assert client.get("/api/intel/status").json() == {"geo_match": True, "geo_reverse": True, "llm": True,
+                                                       "vision": False}
     monkeypatch.delenv("PHOTON_URL")
     monkeypatch.setenv("VLLM_URL", "file:///etc/passwd")
     r = client.get("/api/intel/status")
-    assert r.json() == {"geo_match": True, "geo_reverse": False, "llm": False}
+    assert r.json() == {"geo_match": True, "geo_reverse": False, "llm": False, "vision": False}
     assert "osrm" not in r.text
     assert http.calls == []
 

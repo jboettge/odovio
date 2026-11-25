@@ -1,8 +1,10 @@
 import datetime as dt
+import hashlib
 import json
 import logging
 import os
 import unicodedata
+import uuid
 from urllib.parse import quote
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -10,12 +12,13 @@ from typing import Annotated
 
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, Request, Response, status
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from . import intel, models, schemas
+from .attachments import EXTENSIONS, blob_path, file_sha256, max_upload, store_blob
 from .integrity import key_id, maybe_anchor, public_key_b64, signing_key, verify_all
 from .auth import TENANT_SLUG, User, get_config, require_user
 from .db import engine, get_session
@@ -44,12 +47,26 @@ async def lifespan(_: FastAPI):
     yield
 
 
+# Bildauswertung: Bild ≤ 2 MiB als Base64 im JSON (≈ 4/3) + Rand für die übrigen Felder
+SCAN_MAX_BODY = 4 * ((intel.SCAN_MAX_IMAGE + 2) // 3) + 64 * 1024
+
+
 class RequestGuard:
     """ASGI: (1) /api/* ohne Bearer-Header → 401 bevor der Body gelesen wird,
-    (2) Body-Grösse begrenzen (Content-Length und tatsächlich gestreamte Bytes)."""
+    (2) Body-Grösse begrenzen (Content-Length und tatsächlich gestreamte Bytes).
+    Belegdateien (…/blob) dürfen bis `max_upload`, die Bildauswertung (…/scan) bis SCAN_MAX_BODY,
+    alle übrigen Pfade bis `max_body`."""
 
-    def __init__(self, app, max_body: int):
+    def __init__(self, app, max_body: int, max_upload: int | None = None):
         self.app, self.max_body = app, max_body
+        self.max_upload = max_upload if max_upload is not None else max_body
+
+    def limit_for(self, path: str) -> int:
+        if path.startswith("/api/") and path.endswith("/blob"):
+            return self.max_upload
+        if path.startswith("/api/") and path.endswith("/scan"):
+            return max(self.max_body, SCAN_MAX_BODY)
+        return self.max_body
 
     async def __call__(self, scope, receive, send):
         if scope["type"] != "http":
@@ -58,8 +75,9 @@ class RequestGuard:
         if scope["path"].startswith("/api/") and \
                 not headers.get(b"authorization", b"").lower().startswith(b"bearer "):
             return await self._reply(send, 401, b'{"detail":"Token fehlt"}', [(b"www-authenticate", b"Bearer")])
+        max_body = self.limit_for(scope["path"])
         length = headers.get(b"content-length")
-        if length is not None and (not length.isdigit() or int(length) > self.max_body):
+        if length is not None and (not length.isdigit() or int(length) > max_body):
             return await self._reply(send, 413, b'{"detail":"Anfrage zu gross"}')
         received = 0
 
@@ -68,7 +86,7 @@ class RequestGuard:
             msg = await receive()
             if msg["type"] == "http.request":
                 received += len(msg.get("body", b""))
-                if received > self.max_body:
+                if received > max_body:
                     raise _TooLarge
             return msg
 
@@ -92,7 +110,8 @@ _docs = os.environ.get("DOCS_ENABLED") == "1"
 app = FastAPI(title="Fahrzeugbuch", version="2.1.0", lifespan=lifespan,
               docs_url="/docs" if _docs else None, redoc_url=None,
               openapi_url="/openapi.json" if _docs else None)
-app.add_middleware(RequestGuard, max_body=int(os.environ.get("MAX_BODY_BYTES", str(1024 * 1024))))
+app.add_middleware(RequestGuard, max_body=int(os.environ.get("MAX_BODY_BYTES", str(1024 * 1024))),
+                   max_upload=max_upload())
 app.include_router(intel.router)
 
 
@@ -181,11 +200,11 @@ def _period(date_from: dt.date | None, date_to: dt.date | None, month: str | Non
     return date_from, date_to
 
 
-def content_disposition(filename: str) -> str:
+def content_disposition(filename: str, disposition: str = "attachment") -> str:
     """RFC 6266: ASCII-Fallback + UTF-8 (filename*), keine Steuer-/Anführungszeichen."""
     clean = "".join(c if c.isprintable() and c not in '"\\/;' else "_" for c in filename).replace(" ", "_")
     ascii_name = unicodedata.normalize("NFKD", clean).encode("ascii", "ignore").decode() or "Fahrzeugbuch.pdf"
-    return f'attachment; filename="{ascii_name}"; filename*=UTF-8\'\'{quote(clean)}'
+    return f'{disposition}; filename="{ascii_name}"; filename*=UTF-8\'\'{quote(clean)}'
 
 
 # ---------- öffentlich ----------
@@ -343,6 +362,88 @@ def get_year_report_pdf(vid: str, access: TenantAccess, db: DB, year: YearQ = No
     pdf = build_year_report(db, tenant, year_report(db, tenant, data, year), access.user.name)
     return Response(pdf, media_type="application/pdf", headers={"Content-Disposition": content_disposition(
         f"Jahresbericht_{data.vehicle.name}_{year}.pdf")})
+
+
+# ---------- Belege (Dateien) ----------
+def _write_access(access: TenantAccess) -> Access:
+    """Als Abhängigkeit vor dem Body: Leserolle → 403, ohne den Upload erst einzulesen."""
+    _require_write(access)
+    return access
+
+
+async def _raw_body(request: Request) -> bytes:
+    return await request.body()
+
+
+def _attachment_or_404(db: Session, access: Access, aid: str) -> models.Attachment:
+    try:
+        aid = str(uuid.UUID(aid))
+    except ValueError:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Beleg nicht gefunden") from None
+    att = db.get(models.Attachment, aid)
+    if att is None or att.tenant_id != access.tenant.id:   # fremder Mandant → wie nicht vorhanden
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Beleg nicht gefunden")
+    return att
+
+
+def _media_type(value: str | None) -> str:
+    return (value or "").split(";", 1)[0].strip().lower()
+
+
+@app.put("/api/t/{tenant}/attachments/{aid}/blob", status_code=status.HTTP_201_CREATED,
+         responses={200: {"description": "Datei war bereits gespeichert (gleiche Prüfsumme)"}})
+def put_attachment_blob(aid: str, request: Request, background: BackgroundTasks, db: DB,
+                        access: Annotated[Access, Depends(_write_access)],
+                        body: Annotated[bytes, Depends(_raw_body)]):
+    """Datei zu bestehenden Beleg-Metadaten hochladen (Roh-Body, Content-Type = mime der Metadaten).
+    Idempotent; eine gespeicherte Datei wird nie überschrieben."""
+    att = _attachment_or_404(db, access, aid)
+    if len(body) > schemas.MAX_ATTACHMENT_BYTES:
+        raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, "Anfrage zu gross")
+    if _media_type(request.headers.get("content-type")) != att.mime:
+        raise HTTPException(status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, "Content-Type entspricht nicht dem Beleg (mime)")
+    if len(body) != att.size:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Grösse stimmt nicht")
+    if hashlib.sha256(body).hexdigest() != att.sha256:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Prüfsumme stimmt nicht")
+    path = blob_path(access.tenant.id, att.id)
+    if path.is_file():
+        if file_sha256(path) == att.sha256:
+            return JSONResponse({"stored": True, "existing": True}, status_code=status.HTTP_200_OK)
+        log.error("Beleg %s: gespeicherte Datei weicht von der Prüfsumme ab – nicht überschrieben", att.id)
+        raise HTTPException(status.HTTP_409_CONFLICT, "Datei existiert bereits mit anderem Inhalt")
+    if att.deleted:
+        raise HTTPException(status.HTTP_409_CONFLICT, "Beleg storniert")
+    try:
+        store_blob(path, body)
+    except OSError as e:
+        log.error("Beleg %s: Speichern fehlgeschlagen (%s)", att.id, type(e).__name__)
+        raise HTTPException(status.HTTP_507_INSUFFICIENT_STORAGE, "Datei konnte nicht gespeichert werden") from e
+    if url := webhook_url():
+        background.add_task(send_webhook, url, {
+            "event": "attachment.uploaded", "tenant": access.tenant.slug, "attachment_id": att.id,
+            "kind": att.kind, "fuel_id": att.fuel_id, "maintenance_id": att.maintenance_id,
+            "mime": att.mime, "sha256": att.sha256,
+            "download_path": f"/api/t/{access.tenant.slug}/attachments/{att.id}/blob",
+        })
+    return {"stored": True, "existing": False}
+
+
+@app.get("/api/t/{tenant}/attachments/{aid}/blob", response_class=FileResponse)
+def get_attachment_blob(aid: str, access: TenantAccess, db: DB):
+    """Datei eines Belegs (auch stornierter Belege: revisionssicher abrufbar)."""
+    att = _attachment_or_404(db, access, aid)
+    path = blob_path(access.tenant.id, att.id)
+    if not path.is_file():
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Datei nicht vorhanden")
+    name = f"Beleg_{att.kind}_{att.id[:8]}.{EXTENSIONS.get(att.mime, 'bin')}"
+    return FileResponse(path, media_type=att.mime, headers={
+        "Content-Disposition": content_disposition(name, "inline"),
+        "X-Content-Type-Options": "nosniff",
+        "Content-Security-Policy": "default-src 'none'; sandbox",
+        "Cache-Control": "private, max-age=0",
+        "ETag": f'"{att.sha256}"',
+    })
 
 
 # ---------- Revisionssicherheit ----------

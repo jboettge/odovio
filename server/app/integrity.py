@@ -1,4 +1,4 @@
-"""Integritätsprüfung: Hash-Kette + Abgleich Fachtabellen ↔ Journal + signierte Anker."""
+"""Integritätsprüfung: Hash-Kette + Abgleich Fachtabellen ↔ Journal + signierte Anker + Belegdateien."""
 import base64
 import datetime as dt
 import hashlib
@@ -13,6 +13,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from . import models
+from .attachments import verify_blobs
 from .audit import canonical, verify_chain
 from .sync import ENTITIES, snapshot
 
@@ -127,11 +128,14 @@ def verify_all(db: Session, tenant: models.Tenant) -> dict:
     chain = verify_chain(db, tenant)
     state = verify_state(db, tenant)
     anchors = verify_anchors(db, tenant)
+    blobs = verify_blobs(db, tenant)
     return {
         **chain,
-        "ok": chain["ok"] and not state and not anchors["anchor_problems"],
+        "ok": chain["ok"] and not state and not anchors["anchor_problems"] and not blobs["problems"],
         "chain_ok": chain["ok"],
         "state_ok": not state,
-        "problems": state[:MAX_LISTED] + anchors["anchor_problems"][:MAX_LISTED],
+        "problems": state[:MAX_LISTED] + anchors["anchor_problems"][:MAX_LISTED] + blobs["problems"][:MAX_LISTED],
         **{k: anchors[k] for k in ("signed", "anchors")},
+        "blobs_checked": blobs["checked"],
+        "blobs_missing": blobs["missing"],
     }
