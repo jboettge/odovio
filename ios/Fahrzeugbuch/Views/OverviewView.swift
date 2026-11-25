@@ -30,7 +30,14 @@ struct OverviewView: View {
                 LabeledContent("Ø pro km", value: s.avgLitersPerKm.map { "\(Fmt.num($0, 3)) l" } ?? "–")
                 LabeledContent("Kosten pro km", value: s.avgCostPerKm.map { "CHF \(Fmt.num($0, 3))" } ?? "–")
                 if s.points.count >= 2 {
-                    consumptionChart(s.points, average: s.avgConsumption)
+                    VStack(alignment: .leading, spacing: 2) {
+                        consumptionChart(s.points, average: s.avgConsumption)
+                        if let avg = s.avgConsumption {
+                            Text("- - -  Durchschnitt \(Fmt.num(avg, 2)) l/100 km")
+                                .font(.caption2).foregroundStyle(.secondary)
+                                .padding(.bottom, 6)
+                        }
+                    }
                 }
             } header: {
                 Text("Verbrauch")
@@ -92,9 +99,6 @@ struct OverviewView: View {
                 RuleMark(y: .value("Durchschnitt", average))
                     .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 3]))
                     .foregroundStyle(.secondary)
-                    .annotation(position: .top, alignment: .trailing) {
-                        Text("Ø \(Fmt.num(average, 1))").font(.caption2).foregroundStyle(.secondary)
-                    }
             }
         }
         .chartXAxis {

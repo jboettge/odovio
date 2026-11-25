@@ -81,14 +81,19 @@ private struct MaintenanceRow: View {
                         .accessibilityLabel("Material \(Fmt.chf(total))")
                 }
             }
-            HStack {
-                Text(Fmt.day(maintenance.date))
-                if let km = maintenance.km { Text("· \(Fmt.km(km))") }
-                Spacer()
+            HStack(spacing: 8) {
+                Text(Fmt.day(maintenance.date) + (maintenance.km.map { " · " + Fmt.km($0) } ?? ""))
+                    .lineLimit(1)
+                    .layoutPriority(1)
+                Spacer(minLength: 4)
                 if !materials.isEmpty {
-                    Label("\(materials.count)", systemImage: "shippingbox")
-                        .accessibilityLabel(materials.count == 1 ? "1 Materialposition"
-                                            : "\(materials.count) Materialpositionen")
+                    HStack(spacing: 2) {
+                        Image(systemName: "shippingbox")
+                        Text("\(materials.count)")
+                    }
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel(materials.count == 1 ? "1 Materialposition"
+                                        : "\(materials.count) Materialpositionen")
                 }
                 if !items.isEmpty {
                     let complete = doneCount == items.count
