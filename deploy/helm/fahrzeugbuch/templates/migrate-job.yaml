@@ -1,0 +1,136 @@
+{{- if .Values.migration.enabled }}
+{{- include "fahrzeugbuch.validate" . }}
+{{- $v := .Values }}
+{{- $full := include "fahrzeugbuch.fullname" . }}
+{{- $mig := printf "%s-migrate" $full }}
+{{- $items := include "fahrzeugbuch.migrate.secretItems" . | fromYamlArray }}
+{{- $sargs := dict "items" $items "mountPath" "/run/secrets/fahrzeugbuch-migrate" "useFile" $v.secrets.useFileEnv }}
+{{- $fileSecrets := include "fahrzeugbuch.hasFileSecrets" $sargs }}
+{{- $sa := include "fahrzeugbuch.serviceAccountName" . }}
+{{/*
+Hook-Ressourcen: werden vor allen anderen Ressourcen angelegt (pre-install: ConfigMap/Secret/ServiceAccount
+des Charts existieren dann noch nicht). Owner-Zugangsdaten liegen nur in diesem kurzlebigen Hook-Secret und
+werden nach erfolgreicher Migration zusammen mit dem Job gelöscht (hook-succeeded).
+*/}}
+{{- if not $v.database.existingSecret }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $mig }}
+  labels:
+    {{- include "fahrzeugbuch.labels" . | nindent 4 }}
+    app.kubernetes.io/component: migrate
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-10"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+type: Opaque
+stringData:
+  MIGRATION_DATABASE_PASSWORD: {{ toString $v.database.ownerPassword | quote }}
+  DATABASE_PASSWORD: {{ toString $v.database.appPassword | quote }}
+---
+{{- end }}
+{{- if $v.serviceAccount.create }}
+{{- $sa = $mig }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $mig }}
+  labels:
+    {{- include "fahrzeugbuch.labels" . | nindent 4 }}
+    app.kubernetes.io/component: migrate
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-10"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+automountServiceAccountToken: false
+---
+{{- end }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ $mig }}
+  labels:
+    {{- include "fahrzeugbuch.labels" . | nindent 4 }}
+    app.kubernetes.io/component: migrate
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: {{ $v.migration.hookWeight | int | toString | quote }}
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: {{ $v.migration.backoffLimit }}
+  activeDeadlineSeconds: {{ $v.migration.activeDeadlineSeconds }}
+  ttlSecondsAfterFinished: {{ $v.migration.ttlSecondsAfterFinished }}
+  template:
+    metadata:
+      labels:
+        {{- include "fahrzeugbuch.commonLabels" . | nindent 8 }}
+        {{- include "fahrzeugbuch.selectorLabels" (dict "ctx" . "component" "migrate") | nindent 8 }}
+    spec:
+      restartPolicy: Never
+      serviceAccountName: {{ $sa }}
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      {{- with $v.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      {{- with $v.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml $v.podSecurityContext | nindent 8 }}
+      containers:
+        - name: migrate
+          image: {{ include "fahrzeugbuch.image" . | quote }}
+          imagePullPolicy: {{ $v.image.pullPolicy }}
+          command:
+            {{- toYaml $v.migration.command | nindent 12 }}
+          securityContext:
+            {{- toYaml $v.securityContext | nindent 12 }}
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: APP_TIMEZONE
+              value: {{ default "Europe/Zurich" $v.config.APP_TIMEZONE | quote }}
+            - name: LOG_LEVEL
+              value: {{ default "INFO" $v.config.LOG_LEVEL | quote }}
+            # Owner-Rolle (Schema, Trigger, App-Rolle) – Passwort per MIGRATION_DATABASE_PASSWORD(_FILE)
+            - name: MIGRATION_DATABASE_URL
+              value: {{ include "fahrzeugbuch.db.url" (dict "ctx" . "user" $v.database.ownerUser "target" "migration") | quote }}
+            # App-Rolle (Name + Passwort werden für CREATE/ALTER ROLE verwendet)
+            - name: DATABASE_URL
+              value: {{ include "fahrzeugbuch.db.url" (dict "ctx" . "user" $v.database.appUser) | quote }}
+            {{- include "fahrzeugbuch.secretEnv" $sargs | trim | nindent 12 }}
+          resources:
+            {{- toYaml $v.migration.resources | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            {{- if $fileSecrets }}
+            - name: secrets
+              mountPath: /run/secrets/fahrzeugbuch-migrate
+              readOnly: true
+            {{- end }}
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: {{ $v.tmpVolume.sizeLimit }}
+        {{- if $fileSecrets }}
+        - name: secrets
+          projected:
+            defaultMode: 0440
+            sources:
+              {{- include "fahrzeugbuch.secretSources" $sargs | trim | nindent 14 }}
+        {{- end }}
+      {{- with $v.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $v.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

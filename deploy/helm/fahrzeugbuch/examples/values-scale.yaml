@@ -1,0 +1,143 @@
+# Variante "scale": HORIZONTALE Skalierung – HPA 2–10 auf CPU, Valkey, Belege in S3 (MinIO), PDB,
+# NetworkPolicy, ServiceMonitor, CloudNativePG mit PgBouncer-Pooler (Transaction-Pooling).
+# VPA nur auf Memory (kein Konflikt mit dem HPA auf CPU).
+
+image:
+  repository: registry.example.org/fahrzeugbuch-api
+  tag: "2.2.0"
+  # digest: sha256:…
+
+hpa:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+  targetMemoryUtilizationPercentage: null
+
+vpa:
+  enabled: true
+  updateMode: Initial              # setzt Requests nur beim Pod-Start
+  controlledResources: [memory]
+  controlledValues: RequestsAndLimits
+  minAllowed:
+    memory: 256Mi
+  maxAllowed:
+    memory: 1Gi
+
+pdb:
+  enabled: true
+  minAvailable: 1
+
+webConcurrency: 2
+stateBackend: redis
+strictBudget: true
+
+resources:
+  requests:
+    cpu: 500m
+    memory: 384Mi
+  limits:
+    cpu: "2"
+    memory: 768Mi
+
+config:
+  OIDC_ISSUER: https://id.example.org/realms/fahrzeugbuch
+  FORWARDED_ALLOW_IPS: 10.244.0.0/16
+  METRICS_ALLOW: ""
+
+secrets:
+  existingSecret: fahrzeugbuch-app
+  existingSecretKeys: [ANCHOR_SIGNING_KEY, METRICS_TOKEN, KC_ADMIN_CLIENT_SECRET]
+
+database:
+  # PgBouncer-Pooler (CloudNativePG Pooler, Transaction-Mode) → Prepared Statements aus
+  host: fahrzeugbuch-db-pooler-rw
+  # Migration direkt auf die Primary (DDL nicht über Transaction-Pooling)
+  migrationHost: fahrzeugbuch-db-rw
+  sslmode: require
+  existingSecret: fahrzeugbuch-db
+  existingOwnerSecret: fahrzeugbuch-db-owner
+  ownerPasswordKey: password
+  disablePreparedStatements: true
+  pool:
+    size: 3
+    maxOverflow: 2
+  # Budget gegen den Pooler (max_client_conn); der Pooler bündelt auf default_pool_size Server-Verbindungen
+  maxConnections: 400
+  reservedConnections: 10
+
+storage:
+  backend: s3
+  s3:
+    endpoint: https://minio.example.org
+    bucket: fahrzeugbuch
+    region: us-east-1
+    prefix: belege/
+    forcePathStyle: true
+    # kubectl create secret generic fahrzeugbuch-s3 --from-literal=S3_ACCESS_KEY_ID=… --from-literal=S3_SECRET_ACCESS_KEY=…
+    existingSecret: fahrzeugbuch-s3
+
+valkey:
+  enabled: true
+  auth:
+    existingSecret: fahrzeugbuch-valkey
+    existingSecretKey: valkey-password
+  maxmemory: 128mb
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      memory: 192Mi
+
+httpRoute:
+  enabled: true
+  parentRefs:
+    - name: public-gateway
+      namespace: gateway-system
+      sectionName: https
+  hostnames: [fahrzeugbuch.example.org]
+
+networkPolicy:
+  enabled: true
+  ingress:
+    controller:
+      namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: gateway-system
+      podSelector: {}
+    prometheus:
+      enabled: true
+      namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: monitoring
+      podSelector:
+        matchLabels:
+          app.kubernetes.io/name: prometheus
+  egress:
+    database:
+      # Pooler und Primary im selben Namespace (CloudNativePG-Labels)
+      podSelector:
+        matchExpressions:
+          - key: cnpg.io/cluster
+            operator: In
+            values: [fahrzeugbuch-db]
+      ports: [5432]
+    s3:
+      cidrs: [192.0.2.10/32]       # MinIO (Beispieladresse)
+      ports: [443]
+    oidc:
+      cidrs: [192.0.2.20/32]       # Keycloak/Issuer (Beispieladresse)
+      ports: [443]
+    extra:
+      - name: vllm
+        cidrs: [192.0.2.30/32]
+        ports: [8000]
+      - name: n8n
+        cidrs: [192.0.2.40/32]
+        ports: [443]
+
+serviceMonitor:
+  enabled: true
+  labels:
+    release: kube-prometheus-stack

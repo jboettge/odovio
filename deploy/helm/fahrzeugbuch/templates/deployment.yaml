@@ -1,0 +1,215 @@
+{{- include "fahrzeugbuch.validate" . }}
+{{- $v := .Values }}
+{{- $full := include "fahrzeugbuch.fullname" . }}
+{{- $items := include "fahrzeugbuch.api.secretItems" . | fromYamlArray }}
+{{- $sargs := dict "items" $items "mountPath" $v.secrets.mountPath "useFile" $v.secrets.useFileEnv }}
+{{- $fileSecrets := include "fahrzeugbuch.hasFileSecrets" $sargs }}
+{{- $strategy := include "fahrzeugbuch.strategyType" . }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $full }}
+  labels:
+    {{- include "fahrzeugbuch.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+spec:
+  {{- if not $v.hpa.enabled }}
+  replicas: {{ $v.replicaCount }}
+  {{- end }}
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels:
+      {{- include "fahrzeugbuch.selectorLabels" (dict "ctx" . "component" "api") | nindent 6 }}
+  strategy:
+    type: {{ $strategy }}
+    {{- if eq $strategy "RollingUpdate" }}
+    rollingUpdate:
+      maxUnavailable: {{ $v.updateStrategy.maxUnavailable }}
+      maxSurge: {{ $v.updateStrategy.maxSurge }}
+    {{- end }}
+  template:
+    metadata:
+      labels:
+        {{- include "fahrzeugbuch.commonLabels" . | nindent 8 }}
+        {{- include "fahrzeugbuch.selectorLabels" (dict "ctx" . "component" "api") | nindent 8 }}
+        {{- with $v.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        # Rollout bei Änderung von Konfiguration/Secrets (existingSecret: nicht erfasst → z. B. Reloader)
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        {{- with $v.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "fahrzeugbuch.serviceAccountName" . }}
+      automountServiceAccountToken: false
+      # keine *_SERVICE_HOST/*_PORT-Variablen (Kollisionen, z. B. mit VALKEY_*/REDIS_*)
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: {{ $v.terminationGracePeriodSeconds }}
+      {{- with $v.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      {{- with $v.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml $v.podSecurityContext | nindent 8 }}
+      containers:
+        - name: api
+          image: {{ include "fahrzeugbuch.image" . | quote }}
+          imagePullPolicy: {{ $v.image.pullPolicy }}
+          securityContext:
+            {{- toYaml $v.securityContext | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: {{ $full }}
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            {{- include "fahrzeugbuch.secretEnv" $sargs | trim | nindent 12 }}
+            {{- with $v.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- with $v.probes }}
+          startupProbe:
+            httpGet:
+              path: {{ .startup.path }}
+              port: http
+              httpHeaders:
+                - name: Host
+                  value: {{ .hostHeader | quote }}
+            periodSeconds: {{ .startup.periodSeconds }}
+            timeoutSeconds: {{ .startup.timeoutSeconds }}
+            failureThreshold: {{ .startup.failureThreshold }}
+          livenessProbe:
+            httpGet:
+              path: {{ .liveness.path }}
+              port: http
+              httpHeaders:
+                - name: Host
+                  value: {{ .hostHeader | quote }}
+            periodSeconds: {{ .liveness.periodSeconds }}
+            timeoutSeconds: {{ .liveness.timeoutSeconds }}
+            failureThreshold: {{ .liveness.failureThreshold }}
+          readinessProbe:
+            httpGet:
+              path: {{ .readiness.path }}
+              port: http
+              httpHeaders:
+                - name: Host
+                  value: {{ .hostHeader | quote }}
+            periodSeconds: {{ .readiness.periodSeconds }}
+            timeoutSeconds: {{ .readiness.timeoutSeconds }}
+            failureThreshold: {{ .readiness.failureThreshold }}
+          {{- end }}
+          lifecycle:
+            preStop:
+              # Endpoints/Ingress entfernen den Pod, bevor SIGTERM kommt (sleep ist im Image enthalten)
+              exec:
+                command: ["sleep", "{{ int $v.preStopSleepSeconds }}"]
+          resources:
+            {{- toYaml $v.resources | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            {{- if $fileSecrets }}
+            - name: secrets
+              mountPath: {{ $v.secrets.mountPath }}
+              readOnly: true
+            {{- end }}
+            {{- if eq $v.storage.backend "fs" }}
+            - name: files
+              mountPath: {{ $v.storage.fs.path }}
+            {{- end }}
+            {{- if $v.checklistTemplates }}
+            - name: checklists
+              mountPath: /config
+              readOnly: true
+            {{- end }}
+            {{- with $v.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: {{ $v.tmpVolume.sizeLimit }}
+            {{- with $v.tmpVolume.medium }}
+            medium: {{ . }}
+            {{- end }}
+        {{- if $fileSecrets }}
+        - name: secrets
+          projected:
+            defaultMode: 0440
+            sources:
+              {{- include "fahrzeugbuch.secretSources" $sargs | trim | nindent 14 }}
+        {{- end }}
+        {{- if eq $v.storage.backend "fs" }}
+        - name: files
+          {{- if $v.storage.fs.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ default (printf "%s-files" $full) $v.storage.fs.persistence.existingClaim }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+        {{- end }}
+        {{- if $v.checklistTemplates }}
+        - name: checklists
+          configMap:
+            name: {{ $full }}-checklists
+        {{- end }}
+        {{- with $v.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with $v.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $v.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      affinity:
+        {{- if $v.affinity }}
+        {{- toYaml $v.affinity | nindent 8 }}
+        {{- else }}
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    {{- include "fahrzeugbuch.selectorLabels" (dict "ctx" . "component" "api") | nindent 20 }}
+        {{- end }}
+      topologySpreadConstraints:
+        {{- if $v.topologySpreadConstraints }}
+        {{- toYaml $v.topologySpreadConstraints | nindent 8 }}
+        {{- else }}
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              {{- include "fahrzeugbuch.selectorLabels" (dict "ctx" . "component" "api") | nindent 14 }}
+          matchLabelKeys: [pod-template-hash]
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              {{- include "fahrzeugbuch.selectorLabels" (dict "ctx" . "component" "api") | nindent 14 }}
+          matchLabelKeys: [pod-template-hash]
+        {{- end }}

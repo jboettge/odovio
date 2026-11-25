@@ -1,0 +1,28 @@
+{{- $p := .Values.storage.fs.persistence }}
+{{- if and (eq .Values.storage.backend "fs") $p.enabled (not $p.existingClaim) }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "fahrzeugbuch.fullname" . }}-files
+  labels:
+    {{- include "fahrzeugbuch.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+  {{- if or $p.retain $p.annotations }}
+  annotations:
+    {{- if $p.retain }}
+    helm.sh/resource-policy: keep
+    {{- end }}
+    {{- with $p.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- end }}
+spec:
+  accessModes:
+    {{- toYaml $p.accessModes | nindent 4 }}
+  {{- if $p.storageClass }}
+  storageClassName: {{ ternary "" $p.storageClass (eq "-" $p.storageClass) | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ $p.size }}
+{{- end }}

@@ -1,0 +1,181 @@
+{{- if and .Values.valkey.enabled (eq .Values.stateBackend "redis") }}
+{{- $vk := .Values.valkey }}
+{{- $name := include "fahrzeugbuch.valkey.fullname" . }}
+{{- if not $vk.auth.existingSecret }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "fahrzeugbuch.labels" . | nindent 4 }}
+    app.kubernetes.io/component: valkey
+type: Opaque
+stringData:
+  {{ $vk.auth.existingSecretKey }}: {{ toString $vk.auth.password | quote }}
+---
+{{- end }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "fahrzeugbuch.labels" . | nindent 4 }}
+    app.kubernetes.io/component: valkey
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "fahrzeugbuch.selectorLabels" (dict "ctx" . "component" "valkey") | nindent 4 }}
+  ports:
+    - name: valkey
+      port: 6379
+      targetPort: valkey
+      protocol: TCP
+---
+# Valkey ohne Persistenz: enthält nur flüchtigen Zustand (Rate-Limits, Sperren, Caches)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "fahrzeugbuch.labels" . | nindent 4 }}
+    app.kubernetes.io/component: valkey
+spec:
+  replicas: 1
+  revisionHistoryLimit: 3
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "fahrzeugbuch.selectorLabels" (dict "ctx" . "component" "valkey") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "fahrzeugbuch.commonLabels" . | nindent 8 }}
+        {{- include "fahrzeugbuch.selectorLabels" (dict "ctx" . "component" "valkey") | nindent 8 }}
+      annotations:
+        {{- if not $vk.auth.existingSecret }}
+        checksum/secret: {{ toString $vk.auth.password | sha256sum }}
+        {{- end }}
+        {{- with $vk.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      {{- with $vk.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      securityContext:
+        {{- toYaml $vk.podSecurityContext | nindent 8 }}
+      containers:
+        - name: valkey
+          image: {{ include "fahrzeugbuch.valkey.image" . | quote }}
+          imagePullPolicy: {{ $vk.image.pullPolicy }}
+          # Passwort aus Datei in eine Konfiguration unter /tmp (nicht in der Kommandozeile/Prozessliste)
+          command:
+            - sh
+            - -c
+            - |
+              set -eu
+              umask 077
+              pw="$(cat /run/secrets/valkey/password)"
+              [ -n "$pw" ] || { echo "Valkey-Passwort leer" >&2; exit 1; }
+              {
+                printf 'requirepass %s\n' "$pw"
+                printf 'save ""\nappendonly no\ndir /data\nbind * -::*\nprotected-mode yes\n'
+                printf 'maxmemory %s\nmaxmemory-policy %s\n' "$VALKEY_MAXMEMORY" "$VALKEY_MAXMEMORY_POLICY"
+                for c in $VALKEY_DISABLED_COMMANDS; do printf 'rename-command %s ""\n' "$c"; done
+              } > /tmp/valkey.conf
+              unset pw
+              exec valkey-server /tmp/valkey.conf
+          env:
+            - name: VALKEY_MAXMEMORY
+              value: {{ $vk.maxmemory | quote }}
+            - name: VALKEY_MAXMEMORY_POLICY
+              value: {{ $vk.maxmemoryPolicy | quote }}
+            - name: VALKEY_DISABLED_COMMANDS
+              value: {{ join " " $vk.disabledCommands | quote }}
+          ports:
+            - name: valkey
+              containerPort: 6379
+              protocol: TCP
+          startupProbe:
+            tcpSocket:
+              port: valkey
+            periodSeconds: 2
+            failureThreshold: 15
+          livenessProbe:
+            tcpSocket:
+              port: valkey
+            periodSeconds: 10
+          readinessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - REDISCLI_AUTH="$(cat /run/secrets/valkey/password)" valkey-cli -h 127.0.0.1 ping | grep -q PONG
+            periodSeconds: 10
+            timeoutSeconds: 3
+          securityContext:
+            {{- toYaml $vk.securityContext | nindent 12 }}
+          resources:
+            {{- toYaml $vk.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: tmp
+              mountPath: /tmp
+            - name: password
+              mountPath: /run/secrets/valkey
+              readOnly: true
+      volumes:
+        - name: data
+          emptyDir:
+            sizeLimit: 16Mi
+        - name: tmp
+          emptyDir:
+            sizeLimit: 1Mi
+        - name: password
+          secret:
+            secretName: {{ include "fahrzeugbuch.valkey.secretName" . }}
+            defaultMode: 0440
+            items:
+              - key: {{ $vk.auth.existingSecretKey }}
+                path: password
+      {{- with $vk.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $vk.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $vk.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- if .Values.networkPolicy.enabled }}
+---
+# Valkey: nur von den API-Pods erreichbar, kein Egress
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "fahrzeugbuch.labels" . | nindent 4 }}
+    app.kubernetes.io/component: valkey
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "fahrzeugbuch.selectorLabels" (dict "ctx" . "component" "valkey") | nindent 6 }}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "fahrzeugbuch.selectorLabels" (dict "ctx" . "component" "api") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: valkey
+{{- end }}
+{{- end }}

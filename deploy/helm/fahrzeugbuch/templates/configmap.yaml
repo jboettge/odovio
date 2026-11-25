@@ -1,0 +1,67 @@
+{{- $v := .Values }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "fahrzeugbuch.fullname" . }}
+  labels:
+    {{- include "fahrzeugbuch.labels" . | nindent 4 }}
+data:
+  {{- range $k, $val := $v.config }}
+  {{- if and (not (empty (toString $val))) (not (has $k (list "ALLOWED_HOSTS" "FORWARDED_ALLOW_IPS" "DATABASE_URL" "REDIS_URL" "REPLICAS_HINT"))) }}
+  {{ $k }}: {{ toString $val | quote }}
+  {{- end }}
+  {{- end }}
+  ALLOWED_HOSTS: {{ include "fahrzeugbuch.allowedHosts" . | quote }}
+  FORWARDED_ALLOW_IPS: {{ default "127.0.0.1" $v.config.FORWARDED_ALLOW_IPS | quote }}
+  # vom Chart verwaltet
+  AUTO_MIGRATE: "0"
+  WEB_CONCURRENCY: {{ toString $v.webConcurrency | quote }}
+  STATE_BACKEND: {{ $v.stateBackend | quote }}
+  GRACEFUL_TIMEOUT_S: {{ $v.gracefulTimeoutSeconds | int | toString | quote }}
+  DB_POOL_SIZE: {{ $v.database.pool.size | int | toString | quote }}
+  DB_MAX_OVERFLOW: {{ $v.database.pool.maxOverflow | int | toString | quote }}
+  PG_MAX_CONNECTIONS: {{ $v.database.maxConnections | int | toString | quote }}
+  DB_CONNECTION_RESERVE: {{ $v.database.reservedConnections | int | toString | quote }}
+  # Prozessmodell für die Startprüfungen der API (max. Replikas; Worker je Pod aus WEB_CONCURRENCY)
+  REPLICAS_HINT: {{ include "fahrzeugbuch.replicasMax" . | quote }}
+  # ohne Passwort – DATABASE_PASSWORD(_FILE) setzt der Server ein
+  DATABASE_URL: {{ include "fahrzeugbuch.db.url" (dict "ctx" . "user" $v.database.appUser) | quote }}
+  {{- if $v.database.disablePreparedStatements }}
+  DB_DISABLE_PREPARED: "1"
+  {{- end }}
+  STORAGE_BACKEND: {{ $v.storage.backend | quote }}
+  {{- if eq $v.storage.backend "fs" }}
+  FILES_DIR: {{ $v.storage.fs.path | quote }}
+  # bisheriger Name (Server vor STORAGE_BACKEND)
+  ATTACHMENT_DIR: {{ $v.storage.fs.path | quote }}
+  {{- if include "fahrzeugbuch.fsRWX" . }}
+  # gemeinsames RWX-Volume (für die Startprüfung bei REPLICAS_HINT > 1)
+  FILES_SHARED: "1"
+  {{- end }}
+  {{- else }}
+  {{- with $v.storage.s3 }}
+  S3_ENDPOINT: {{ .endpoint | quote }}
+  S3_BUCKET: {{ .bucket | quote }}
+  S3_REGION: {{ .region | quote }}
+  S3_PREFIX: {{ .prefix | quote }}
+  S3_FORCE_PATH_STYLE: {{ ternary "1" "0" .forcePathStyle | quote }}
+  {{- end }}
+  {{- end }}
+  {{- if eq $v.stateBackend "redis" }}
+  # ohne Passwort – REDIS_PASSWORD(_FILE) setzt der Server ein
+  REDIS_URL: {{ include "fahrzeugbuch.redis.url" . | quote }}
+  {{- end }}
+  {{- if $v.checklistTemplates }}
+  CHECKLIST_FILE: /config/checklists.json
+  {{- end }}
+{{- if $v.checklistTemplates }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "fahrzeugbuch.fullname" . }}-checklists
+  labels:
+    {{- include "fahrzeugbuch.labels" . | nindent 4 }}
+data:
+  checklists.json: {{ $v.checklistTemplates | quote }}
+{{- end }}

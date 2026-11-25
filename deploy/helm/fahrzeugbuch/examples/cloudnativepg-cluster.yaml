@@ -1,0 +1,92 @@
+# BEISPIEL – nicht Teil des Charts. PostgreSQL für das Fahrzeugbuch mit CloudNativePG (Operator ≥ 1.26).
+# Anwenden: kubectl -n fahrzeugbuch apply -f examples/cloudnativepg-cluster.yaml
+#
+# Rollen:
+#   fahrzeugbuch      Owner (Schema/Migration, Backup) – Passwort im Secret fahrzeugbuch-db-owner (basic-auth)
+#   fahrzeugbuch_app  App-Rolle – legt der Migrations-Job (python -m app.migrate) an bzw. setzt ihr Passwort
+#                     aus Secret fahrzeugbuch-db (Schlüssel app-password). Dafür braucht der Owner CREATEROLE.
+#
+# Secrets vorher anlegen (Passwörter URL-sicher: hex):
+#   kubectl -n fahrzeugbuch create secret generic fahrzeugbuch-db-owner --type=kubernetes.io/basic-auth \
+#     --from-literal=username=fahrzeugbuch --from-literal=password="$(openssl rand -hex 32)"
+#   kubectl -n fahrzeugbuch create secret generic fahrzeugbuch-db \
+#     --from-literal=app-password="$(openssl rand -hex 32)"
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: fahrzeugbuch-db
+spec:
+  instances: 2                     # Primary + Standby (automatisches Failover)
+  imageName: ghcr.io/cloudnative-pg/postgresql:17.6-standard-trixie   # Version/Digest selbst pinnen
+  primaryUpdateStrategy: unsupervised
+  enableSuperuserAccess: false
+  postgresql:
+    parameters:
+      max_connections: "100"       # = database.maxConnections (PG_MAX_CONNECTIONS) im Chart
+      shared_buffers: 256MB
+      timezone: UTC
+  bootstrap:
+    initdb:
+      database: fahrzeugbuch
+      owner: fahrzeugbuch
+      secret:
+        name: fahrzeugbuch-db-owner
+  managed:
+    roles:
+      # Owner zusätzlich mit CREATEROLE, damit die Migration die App-Rolle anlegen/ändern kann
+      - name: fahrzeugbuch
+        ensure: present
+        login: true
+        createrole: true
+        passwordSecret:
+          name: fahrzeugbuch-db-owner
+  storage:
+    size: 10Gi
+    # storageClass: longhorn
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      memory: 1Gi
+  # Backup: Barman-Cloud-Plugin (plugin-barman-cloud) mit ObjectStore → S3/MinIO; zusammen mit dem
+  # Beleg-Bucket/PVC sichern und ANCHOR_SIGNING_KEY separat aufbewahren.
+  # plugins:
+  #   - name: barman-cloud.cloudnative-pg.io
+  #     isWALArchiver: true
+  #     parameters:
+  #       barmanObjectName: fahrzeugbuch-backup
+---
+# Optional: PgBouncer vor der DB (Transaction-Pooling). Im Chart dann:
+#   database.host: fahrzeugbuch-db-pooler-rw
+#   database.migrationHost: fahrzeugbuch-db-rw      (Migration direkt, nicht über den Pooler)
+#   database.disablePreparedStatements: true        (→ DB_DISABLE_PREPARED=1, psycopg ohne Prepared Statements)
+#   database.maxConnections: <max_client_conn>      (Budget gegen den Pooler)
+apiVersion: postgresql.cnpg.io/v1
+kind: Pooler
+metadata:
+  name: fahrzeugbuch-db-pooler-rw
+spec:
+  cluster:
+    name: fahrzeugbuch-db
+  instances: 2
+  type: rw
+  pgbouncer:
+    poolMode: transaction
+    parameters:
+      max_client_conn: "400"
+      default_pool_size: "20"
+---
+# Optional: regelmässiges Backup (nach Konfiguration des Plugins/ObjectStores)
+# apiVersion: postgresql.cnpg.io/v1
+# kind: ScheduledBackup
+# metadata:
+#   name: fahrzeugbuch-db-daily
+# spec:
+#   schedule: "0 30 2 * * *"
+#   cluster:
+#     name: fahrzeugbuch-db
+#   method: plugin
+#   pluginConfiguration:
+#     name: barman-cloud.cloudnative-pg.io

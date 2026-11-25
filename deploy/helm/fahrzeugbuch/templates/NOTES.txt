@@ -1,0 +1,79 @@
+{{- $v := .Values }}
+{{- $full := include "fahrzeugbuch.fullname" . }}
+{{- $b := include "fahrzeugbuch.budget" . | fromYaml }}
+Fahrzeugbuch {{ .Chart.AppVersion }} – Release {{ .Release.Name }} im Namespace {{ .Release.Namespace }}
+
+Erreichbar:
+{{- if $v.ingress.enabled }}
+{{- range $v.ingress.hosts }}
+  https://{{ .host }}/
+{{- end }}
+{{- else if $v.httpRoute.enabled }}
+{{- range $v.httpRoute.hostnames }}
+  https://{{ . }}/
+{{- end }}
+{{- else }}
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ $full }} 8080:{{ $v.service.port }}
+  → http://localhost:8080/  (ALLOWED_HOSTS enthält localhost)
+{{- end }}
+
+Status:
+  kubectl -n {{ .Release.Namespace }} rollout status deploy/{{ $full }}
+  kubectl -n {{ .Release.Namespace }} get pods -l app.kubernetes.io/instance={{ .Release.Name }}
+{{- if $v.migration.enabled }}
+  Migration lief als Hook-Job {{ $full }}-migrate (bei Erfolg gelöscht; Fehler: kubectl logs job/{{ $full }}-migrate)
+{{- end }}
+
+Skalierung:
+  Replikas:      {{ if $v.hpa.enabled }}HPA {{ $v.hpa.minReplicas }}–{{ $v.hpa.maxReplicas }}{{ else }}{{ $v.replicaCount }} (fest){{ end }}, Rollout {{ include "fahrzeugbuch.strategyType" . }}
+  Worker/Pod:    WEB_CONCURRENCY={{ $v.webConcurrency }} (max. {{ $b.workers }}{{ if eq (toString $v.webConcurrency) "auto" }} aus limits.cpu{{ if and $v.vpa.enabled (ne (toString $v.vpa.updateMode) "Off") }}/VPA maxAllowed{{ end }}{{ end }})
+  Zustand:       STATE_BACKEND={{ $v.stateBackend }}{{ if $v.valkey.enabled }} (Valkey {{ include "fahrzeugbuch.valkey.fullname" . }}){{ end }}
+  Speicher:      STORAGE_BACKEND={{ $v.storage.backend }}{{ if eq $v.storage.backend "fs" }} ({{ join "," $v.storage.fs.persistence.accessModes }}{{ if not $v.storage.fs.persistence.enabled }}, emptyDir – NUR TEST{{ end }}){{ end }}
+{{- if $v.vpa.enabled }}
+  VPA:           updateMode={{ $v.vpa.updateMode }}, controlledResources={{ join "," $v.vpa.controlledResources }}
+{{- if and $v.hpa.enabled (eq (toString $v.vpa.updateMode) "Off") }}
+  HINWEIS: HPA und VPA aktiv – VPA nur als Empfehlung (Off); Werte manuell übernehmen:
+           kubectl -n {{ .Release.Namespace }} describe vpa {{ $full }}
+{{- end }}
+{{- end }}
+
+DB-Verbindungsbudget (PG_MAX_CONNECTIONS={{ $b.max }}):
+  ({{ $b.replicas }} Replikas + {{ $b.surge }} Surge) × {{ $b.workers }} Worker × {{ $b.perWorker }} (Pool {{ $v.database.pool.size }} + Overflow {{ $v.database.pool.maxOverflow }}) + {{ $b.reserved }} Reserve = {{ $b.total }}
+{{- if $b.ok }}
+  OK ({{ $b.total }} ≤ {{ $b.max }})
+{{- else }}
+  WARNUNG: {{ $b.total }} > {{ $b.max }} – Pool/Worker/maxReplicas senken, PgBouncer (CloudNativePG Pooler,
+  dann database.disablePreparedStatements=true) einsetzen oder max_connections erhöhen. strictBudget=true erzwingt die Prüfung.
+{{- end }}
+{{- if and (or $v.ingress.enabled $v.httpRoute.enabled) (not $v.config.FORWARDED_ALLOW_IPS) }}
+
+WARNUNG: config.FORWARDED_ALLOW_IPS ist leer (→ 127.0.0.1). Hinter dem Ingress teilen sich dann alle Clients die IP
+  des Ingress-Pods (Rate-Limits/Sperren treffen alle). Pod-CIDR des Ingress-Controllers eintragen (k3s: 10.42.0.0/16).
+{{- end }}
+{{- if and (not $v.ingress.enabled) (not $v.httpRoute.enabled) (not $v.config.ALLOWED_HOSTS) }}
+
+HINWEIS: Weder Ingress noch HTTPRoute aktiv – ALLOWED_HOSTS=localhost. Öffentlichen Host in config.ALLOWED_HOSTS eintragen.
+{{- end }}
+{{- if or $v.secrets.existingSecret $v.database.existingSecret }}
+
+HINWEIS: Änderungen an existingSecret lösen keinen Rollout aus:
+  kubectl -n {{ .Release.Namespace }} rollout restart deploy/{{ $full }}
+{{- end }}
+{{- if $v.networkPolicy.enabled }}
+{{- $e := $v.networkPolicy.egress }}
+{{- if not (or $e.oidc.cidrs $e.oidc.namespaceSelector $e.oidc.podSelector) }}
+
+WARNUNG: networkPolicy.egress.oidc ist leer – der Issuer (Discovery/JWKS) ist nicht erreichbar, Anmeldungen schlagen fehl.
+{{- end }}
+{{- if not (or $e.database.cidrs $e.database.namespaceSelector $e.database.podSelector) }}
+
+WARNUNG: networkPolicy.egress.database ist leer – die Datenbank ist nicht erreichbar.
+{{- end }}
+{{- end }}
+{{- if eq (toString $v.config.STRICT_CONFIG) "0" }}
+
+HINWEIS: STRICT_CONFIG=0 – unsichere Konfiguration erzeugt nur Warnungen (Sicherheits-Log event=config_warning).
+{{- end }}
+
+Backup: Datenbank (pg_dump/CloudNativePG Backup) + {{ if eq $v.storage.backend "s3" }}Bucket {{ $v.storage.s3.bucket }}{{ else }}PVC {{ default (printf "%s-files" $full) $v.storage.fs.persistence.existingClaim }}{{ end }} gemeinsam sichern;
+ANCHOR_SIGNING_KEY separat aufbewahren (ohne ihn sind alte Anker nur noch mit ANCHOR_PUBLIC_KEYS prüfbar).

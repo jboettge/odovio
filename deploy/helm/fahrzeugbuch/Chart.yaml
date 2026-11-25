@@ -1,0 +1,16 @@
+apiVersion: v2
+name: fahrzeugbuch
+description: Digitales Fahrzeugbuch – API + Web-Frontend (ein Image), Migration als Helm-Hook, optional Valkey, HPA/VPA
+type: application
+# Chart-Version (SemVer) – bei jeder Änderung am Chart erhöhen
+version: 0.1.0
+# Version der App (Tag des Images, falls image.tag leer ist)
+appVersion: "2.2.0"
+kubeVersion: ">=1.28.0-0"
+keywords: [fahrzeugbuch, fastapi, postgresql, valkey]
+home: https://github.com/jboettge/DroidSim/tree/main/fahrzeugbuch
+sources:
+  - https://github.com/jboettge/DroidSim/tree/main/fahrzeugbuch
+annotations:
+  # keine Subcharts (Lieferkette): PostgreSQL extern/CloudNativePG, Valkey als eigenes Minimal-Deployment
+  category: Productivity

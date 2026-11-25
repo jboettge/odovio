@@ -1,0 +1,18 @@
+{{- $min := include "fahrzeugbuch.replicasMin" . | atoi }}
+{{- if and .Values.pdb.enabled (gt $min 1) }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "fahrzeugbuch.fullname" . }}
+  labels:
+    {{- include "fahrzeugbuch.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+spec:
+  minAvailable: {{ .Values.pdb.minAvailable }}
+  {{- with .Values.pdb.unhealthyPodEvictionPolicy }}
+  unhealthyPodEvictionPolicy: {{ . }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "fahrzeugbuch.selectorLabels" (dict "ctx" . "component" "api") | nindent 6 }}
+{{- end }}

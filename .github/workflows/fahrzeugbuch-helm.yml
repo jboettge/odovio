@@ -1,0 +1,75 @@
+name: fahrzeugbuch-helm
+on:
+  push:
+    paths: ["fahrzeugbuch/deploy/helm/**", ".github/workflows/fahrzeugbuch-helm.yml"]
+  pull_request:
+    paths: ["fahrzeugbuch/deploy/helm/**", ".github/workflows/fahrzeugbuch-helm.yml"]
+
+permissions:
+  contents: read
+
+env:
+  # kubeconform: Release-Tarball von GitHub, SHA-256 gepinnt (= CHECKSUMS des Releases)
+  KUBECONFORM_VERSION: v0.7.0
+  KUBECONFORM_SHA256: c31518ddd122663b3f3aa874cfe8178cb0988de944f29c74a0b9260920d115d3
+  # helm: aus dem Go-Modul gebaut; der Modul-Hash (h1: = SHA-256 über den Modulinhalt, Go-Checksum-DB) ist gepinnt.
+  # Alternativ das offizielle Tarball von get.helm.sh: HELM_SHA256 eintragen (sha256sum des
+  # helm-<version>-linux-amd64.tar.gz) – dann wird dieses statt des Go-Builds verwendet.
+  HELM_VERSION: v3.22.1
+  HELM_MODULE_SUM: "h1:uo2SouzAxMkKZTNzZ1lLP/c/Bu7xfUJKYDaYMxMHvk8="
+  HELM_SHA256: ""
+  # Kubernetes-Version, die helm als Capabilities meldet (für kubeVersion-Prüfung im Chart)
+  HELM_K8S_MINOR: "34"
+
+jobs:
+  chart:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: kubeconform installieren (SHA-256 geprüft)
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/bin" "$RUNNER_TEMP/dl"
+          cd "$RUNNER_TEMP/dl"
+          curl -fsSL -o kubeconform.tar.gz \
+            "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz"
+          echo "${KUBECONFORM_SHA256}  kubeconform.tar.gz" | sha256sum -c -
+          tar -xzf kubeconform.tar.gz -C "$RUNNER_TEMP/bin" kubeconform
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      - name: helm installieren (gepinnt, Hash geprüft)
+        env:
+          GOTOOLCHAIN: auto
+          GOFLAGS: -mod=mod
+          CGO_ENABLED: "0"
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/dl"
+          if [ -n "${HELM_SHA256}" ]; then
+            curl -fsSL -o helm.tar.gz "https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz"
+            echo "${HELM_SHA256}  helm.tar.gz" | sha256sum -c -
+            tar -xzf helm.tar.gz linux-amd64/helm
+            install -m 0755 linux-amd64/helm "$RUNNER_TEMP/bin/helm"
+          else
+            export GOPATH="$RUNNER_TEMP/gopath" GOBIN="$RUNNER_TEMP/bin"
+            sum="$(go mod download -json "helm.sh/helm/v3@${HELM_VERSION}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["Sum"])')"
+            if [ "$sum" != "${HELM_MODULE_SUM}" ]; then
+              echo "::error::Modul-Hash von helm ${HELM_VERSION} weicht ab: $sum"; exit 1
+            fi
+            ldflags="-s -w -X helm.sh/helm/v3/internal/version.version=${HELM_VERSION}"
+            for p in pkg/chartutil pkg/lint/rules; do
+              ldflags="$ldflags -X helm.sh/helm/v3/$p.k8sVersionMajor=1 -X helm.sh/helm/v3/$p.k8sVersionMinor=${HELM_K8S_MINOR}"
+            done
+            go install -ldflags "$ldflags" "helm.sh/helm/v3/cmd/helm@${HELM_VERSION}"
+          fi
+          helm version
+          kubeconform -v
+
+      - name: Lint, Template, kubeconform, Negativtests
+        env:
+          KUBE_VERSIONS: "1.30.0 1.34.0"
+        run: fahrzeugbuch/deploy/helm/test-chart.sh

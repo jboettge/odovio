@@ -1,0 +1,89 @@
+# Variante "single": 1 Pod, Belege auf RWO-Volume, VERTIKALE Skalierung per VPA.
+# Mehr CPU → mehr uvicorn-Worker (webConcurrency=auto aus limits.cpu) → dafür Valkey als gemeinsamer Zustand.
+# Ohne Valkey: stateBackend=memory, webConcurrency=1 und vpa.controlledResources=[memory].
+#
+#   helm upgrade --install fahrzeugbuch ./fahrzeugbuch/deploy/helm/fahrzeugbuch \
+#     -n fahrzeugbuch --create-namespace -f examples/values-single.yaml
+
+image:
+  repository: registry.example.org/fahrzeugbuch-api
+  tag: "2.2.0"
+  # digest: sha256:…
+
+replicaCount: 1
+webConcurrency: auto
+stateBackend: redis
+
+resources:
+  requests:
+    cpu: 500m
+    memory: 384Mi
+  limits:
+    cpu: "1"          # Startwert: auto → 2 Worker; VPA hebt Requests UND Limits (Verhältnis 1:2) an
+    memory: 768Mi
+
+vpa:
+  enabled: true
+  # InPlaceOrRecreate: VPA ≥ 1.4 / Kubernetes ≥ 1.33; sonst Recreate. Worker-Zahl ändert sich erst beim Neustart.
+  updateMode: InPlaceOrRecreate
+  controlledResources: [cpu, memory]
+  controlledValues: RequestsAndLimits
+  minAllowed:
+    cpu: 250m
+    memory: 256Mi
+  maxAllowed:
+    cpu: 1500m        # → Limit max. 3 CPU → max. 6 Worker (2 je CPU; Verbindungsbudget!)
+    memory: 2Gi
+  minReplicas: 1      # VPA darf auch den einzigen Pod neu erstellen
+
+config:
+  OIDC_ISSUER: https://id.example.org/realms/fahrzeugbuch
+  # Pod-CIDR des Ingress-Controllers
+  FORWARDED_ALLOW_IPS: 10.244.0.0/16
+
+secrets:
+  # kubectl create secret generic fahrzeugbuch-app --from-literal=ANCHOR_SIGNING_KEY="$(openssl rand -base64 32)"
+  existingSecret: fahrzeugbuch-app
+  existingSecretKeys: [ANCHOR_SIGNING_KEY]
+
+database:
+  host: fahrzeugbuch-db-rw          # CloudNativePG (examples/cloudnativepg-cluster.yaml)
+  sslmode: require
+  existingSecret: fahrzeugbuch-db   # Schlüssel app-password
+  existingOwnerSecret: fahrzeugbuch-db-owner
+  ownerPasswordKey: password        # CloudNativePG basic-auth-Secret
+  pool:
+    size: 5
+    maxOverflow: 5
+  maxConnections: 100
+
+storage:
+  backend: fs
+  fs:
+    persistence:
+      enabled: true
+      accessModes: [ReadWriteOnce]
+      size: 10Gi
+
+valkey:
+  enabled: true
+  auth:
+    existingSecret: fahrzeugbuch-valkey
+    existingSecretKey: valkey-password
+
+ingress:
+  enabled: true
+  className: nginx
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: "8m"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "60"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "60"
+    cert-manager.io/cluster-issuer: letsencrypt
+  hosts:
+    - host: fahrzeugbuch.example.org
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    - secretName: fahrzeugbuch-tls
+      hosts: [fahrzeugbuch.example.org]

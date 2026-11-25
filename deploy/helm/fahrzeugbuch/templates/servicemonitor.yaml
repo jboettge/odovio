@@ -1,0 +1,39 @@
+{{- if .Values.serviceMonitor.enabled }}
+{{- $sm := .Values.serviceMonitor }}
+{{- $tokName := "" }}{{- $tokKey := "" }}
+{{- if $sm.tokenSecret.name }}
+{{- $tokName = $sm.tokenSecret.name }}{{ $tokKey = default "METRICS_TOKEN" $sm.tokenSecret.key }}
+{{- else if and .Values.secrets.existingSecret (has "METRICS_TOKEN" .Values.secrets.existingSecretKeys) }}
+{{- $tokName = .Values.secrets.existingSecret }}{{ $tokKey = "METRICS_TOKEN" }}
+{{- else if and (not .Values.secrets.existingSecret) .Values.secrets.values.METRICS_TOKEN }}
+{{- $tokName = include "fahrzeugbuch.fullname" . }}{{ $tokKey = "METRICS_TOKEN" }}
+{{- end }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "fahrzeugbuch.fullname" . }}
+  labels:
+    {{- include "fahrzeugbuch.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+    {{- with $sm.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "fahrzeugbuch.selectorLabels" (dict "ctx" . "component" "api") | nindent 6 }}
+  namespaceSelector:
+    matchNames: [{{ .Release.Namespace | quote }}]
+  endpoints:
+    - port: http
+      path: {{ $sm.path }}
+      interval: {{ $sm.interval }}
+      scrapeTimeout: {{ $sm.scrapeTimeout }}
+      {{- if $tokName }}
+      authorization:
+        type: Bearer
+        credentials:
+          name: {{ $tokName }}
+          key: {{ $tokKey }}
+      {{- end }}
+{{- end }}

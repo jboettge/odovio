@@ -1,0 +1,102 @@
+# Variante Proxmox/k3s: Traefik (k3s-Standard), Longhorn RWX (oder NFS) für Belege, PostgreSQL extern auf der
+# Docker-VM (bisheriger Compose-Stack, Port 5432 nur für das k3s-Netz freigeben + pg_hba), Keycloak id.j-mb.net.
+# Domains/IPs sind Beispiele – anpassen.
+
+image:
+  repository: registry.j-mb.net/fahrzeugbuch-api
+  tag: "2.2.0"
+
+replicaCount: 2
+webConcurrency: auto           # limits.cpu 1 → 2 Worker je Pod
+stateBackend: redis
+
+resources:
+  requests:
+    cpu: 250m
+    memory: 256Mi
+  limits:
+    cpu: "1"
+    memory: 512Mi
+
+config:
+  OIDC_ISSUER: https://id.j-mb.net/realms/REALM
+  OIDC_REQUIRED_ROLE: fahrzeugbuch-user
+  # k3s-Pod-CIDR (Traefik-Pods) – nur von dort X-Forwarded-For übernehmen
+  FORWARDED_ALLOW_IPS: 10.42.0.0/16
+  APP_TIMEZONE: Europe/Zurich
+  # optionale Dienste auf der Docker-VM
+  # OSRM_URL: http://10.0.10.5:5000
+  # VLLM_URL: http://10.0.10.6:8000/v1
+
+secrets:
+  existingSecret: fahrzeugbuch-app
+  existingSecretKeys: [ANCHOR_SIGNING_KEY, KC_ADMIN_CLIENT_SECRET, N8N_WEBHOOK_SECRET]
+
+database:
+  host: 10.0.10.5               # Docker-VM
+  port: 5432
+  sslmode: prefer
+  existingSecret: fahrzeugbuch-db   # Schlüssel app-password, owner-password
+  pool:
+    size: 5
+    maxOverflow: 5
+  maxConnections: 100
+
+storage:
+  backend: fs
+  fs:
+    persistence:
+      enabled: true
+      storageClass: longhorn     # Longhorn RWX (share-manager/NFS) oder nfs-client
+      accessModes: [ReadWriteMany]
+      size: 20Gi
+
+valkey:
+  enabled: true
+  auth:
+    existingSecret: fahrzeugbuch-valkey
+    existingSecretKey: valkey-password
+
+ingress:
+  enabled: true
+  className: traefik
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+    traefik.ingress.kubernetes.io/router.tls: "true"
+    # cert-manager.io/cluster-issuer: letsencrypt
+  hosts:
+    - host: fahrzeugbuch.j-mb.net
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    - secretName: fahrzeugbuch-tls
+      hosts: [fahrzeugbuch.j-mb.net]
+  # Body-Limit 8 MiB (Belege …/blob) per Traefik-Middleware
+  traefikMiddleware:
+    enabled: true
+
+# k3s bringt kube-router als NetworkPolicy-Controller mit – zum Aktivieren CIDRs prüfen und enabled: true
+networkPolicy:
+  enabled: false
+  ingress:
+    controller:
+      namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+      podSelector:
+        matchLabels:
+          app.kubernetes.io/name: traefik
+    prometheus:
+      enabled: false
+  egress:
+    database:
+      cidrs: [10.0.10.5/32]
+      ports: [5432]
+    oidc:
+      cidrs: [10.0.10.2/32]      # Reverse Proxy/Keycloak vor id.j-mb.net (Beispiel)
+      ports: [443]
+    extra:
+      - name: osrm
+        cidrs: [10.0.10.5/32]
+        ports: [5000]

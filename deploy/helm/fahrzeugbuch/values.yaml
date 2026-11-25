@@ -1,0 +1,508 @@
+# Fahrzeugbuch – Helm-Values
+# Ein Image enthält API + Web-Frontend (uvicorn, Port 8000). PostgreSQL wird NICHT von diesem Chart betrieben
+# (CloudNativePG oder externe DB, siehe examples/cloudnativepg-cluster.yaml).
+# Varianten: examples/values-single.yaml (vertikal), values-scale.yaml (horizontal), values-proxmox-k3s.yaml
+
+nameOverride: ""
+fullnameOverride: ""
+
+image:
+  # lokal gebaut: docker build -f fahrzeugbuch/server/Dockerfile fahrzeugbuch -t fahrzeugbuch-api:<version>
+  repository: fahrzeugbuch-api
+  # leer → Chart.appVersion
+  tag: ""
+  # sha256:… – empfohlen (unveränderlich); wird zusätzlich zum Tag gesetzt (repo:tag@digest)
+  digest: ""
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+# ------------------------------------------------------------------------------------------------
+# Skalierung
+# ------------------------------------------------------------------------------------------------
+# Feste Replikazahl (ohne HPA). >1 erfordert stateBackend=redis UND storage s3 bzw. fs mit ReadWriteMany.
+replicaCount: 1
+
+# uvicorn-Worker je Pod (WEB_CONCURRENCY): Zahl oder "auto" = min(floor(2 × CPU-Quota), 16), mind. 1;
+# CPU-Quota = cgroup cpu.max = resources.limits.cpu (500m → 1, 1 → 2, 2 → 4 Worker). Neu berechnet bei jedem Start.
+# Mehr als 1 Worker (auto mit limits.cpu ≥ 1) erfordert stateBackend=redis.
+webConcurrency: auto
+
+# Gemeinsamer Zustand (Rate-Limits, Brute-Force-Sperren, Caches) – STATE_BACKEND:
+#   memory: nur im Prozess → genau 1 Pod mit 1 Worker
+#   redis:  Valkey/Redis (valkey.enabled oder externalRedis) → mehrere Worker/Replikas möglich
+stateBackend: memory
+
+# Verbindungsbudget: (maxReplicas + maxSurge) × Worker × (DB_POOL_SIZE + DB_MAX_OVERFLOW) + reserved
+# muss ≤ database.maxConnections sein. true → Template bricht bei Überschreitung ab, false → Warnung in NOTES.
+strictBudget: false
+
+# Rollout. type "auto": RollingUpdate (maxUnavailable 0 / maxSurge 1); bei fs-Speicher ohne ReadWriteMany
+# Recreate (ein RWO-Volume kann nicht gleichzeitig an zwei Knoten hängen → Rollout bliebe sonst stecken).
+updateStrategy:
+  type: auto   # auto | RollingUpdate | Recreate
+  maxSurge: 1
+  maxUnavailable: 0
+
+hpa:
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 10
+  # Ziele in % der Requests (null = Metrik nicht verwenden). Nicht zusammen mit VPA auf derselben Ressource!
+  targetCPUUtilizationPercentage: 70
+  targetMemoryUtilizationPercentage: null
+  # zusätzliche Metriken (autoscaling/v2 MetricSpec), z. B. Pods-Metrik aus prometheus-adapter
+  customMetrics: []
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 60
+    scaleUp:
+      stabilizationWindowSeconds: 0
+      policies:
+        - type: Pods
+          value: 2
+          periodSeconds: 60
+
+vpa:
+  # benötigt den Vertical Pod Autoscaler (CRD autoscaling.k8s.io/v1) im Cluster
+  enabled: false
+  # Off (nur Empfehlung) | Initial | Recreate | InPlaceOrRecreate (VPA ≥ 1.4, Kubernetes ≥ 1.33)
+  updateMode: "Off"
+  controlledResources: [cpu, memory]
+  # RequestsAndLimits skaliert Limits proportional mit → mit webConcurrency=auto steigt die Worker-Zahl
+  controlledValues: RequestsAndLimits
+  minAllowed:
+    cpu: 100m
+    memory: 256Mi
+  maxAllowed:
+    cpu: "2"
+    memory: 2Gi
+  # Mindestanzahl Replikas, damit VPA evicted (Standard des VPA: 2) – für Einzel-Pod 1
+  minReplicas: null
+
+pdb:
+  # wird nur gerendert, wenn mehr als 1 Replika möglich ist (replicaCount > 1 bzw. hpa.minReplicas > 1)
+  enabled: true
+  minAvailable: 1
+  unhealthyPodEvictionPolicy: AlwaysAllow
+
+# ------------------------------------------------------------------------------------------------
+# App-Konfiguration (ConfigMap → Env). Namen wie in fahrzeugbuch/.env.example; leere Werte werden weggelassen
+# (Server-Default). Vom Chart gesetzt und hier NICHT eintragen: WEB_CONCURRENCY, STATE_BACKEND, STORAGE_BACKEND,
+# FILES_DIR/ATTACHMENT_DIR, S3_*, DB_*, PG_MAX_CONNECTIONS, GRACEFUL_TIMEOUT_S, AUTO_MIGRATE, REDIS_URL.
+# Geheimnisse gehören in secrets.values bzw. secrets.existingSecret.
+# ------------------------------------------------------------------------------------------------
+config:
+  # Pflicht: Keycloak-Realm, z. B. https://id.example.org/realms/<realm>
+  OIDC_ISSUER: ""
+  OIDC_CLIENT_ID: fahrzeugbuch-ios
+  OIDC_WEB_CLIENT_ID: fahrzeugbuch-web
+  OIDC_AUDIENCE: ""
+  OIDC_ALLOWED_AZP: ""
+  OIDC_REQUIRED_ROLE: fahrzeugbuch-user
+  TENANT_GROUP_PREFIX: /fahrzeugbuch/
+  DEFAULT_TENANT: ""
+  # leer → Hosts aus ingress.hosts/httpRoute.hostnames + localhost
+  ALLOWED_HOSTS: ""
+  # Absender, deren X-Forwarded-For/-Proto übernommen wird = Pods des Ingress-Controllers/Gateways
+  # (Pod-CIDR, z. B. k3s 10.42.0.0/16). Leer → 127.0.0.1: alle Clients teilen sich dann die IP des Proxys!
+  FORWARDED_ALLOW_IPS: ""
+  # nie sperren/limitieren (CIDRs), z. B. Monitoring – NICHT den Proxy eintragen
+  SECURITY_ALLOWLIST: ""
+  CORS_ORIGINS: ""
+  FORCE_HSTS: "0"
+  # 1 → unsichere Konfiguration verhindert den Start (empfohlen; erfordert ANCHOR_SIGNING_KEY)
+  STRICT_CONFIG: "1"
+  APP_TIMEZONE: Europe/Zurich
+  LOG_LEVEL: INFO
+  DOCS_ENABLED: "0"
+  MAX_BODY_BYTES: "1048576"
+  # Belege (…/blob) – Ingress muss Bodies dieser Grösse durchlassen (8 MiB)
+  MAX_UPLOAD_BYTES: "8388608"
+  ATTACHMENT_QUOTA_MB: "2048"
+  UVICORN_LIMIT_CONCURRENCY: "200"
+  # /metrics ohne Token nur aus diesen CIDRs (alternativ/zusätzlich METRICS_TOKEN in secrets)
+  METRICS_ALLOW: ""
+  ANCHOR_INTERVAL_MIN: "60"
+  ANCHOR_PUBLIC_KEYS: ""
+  VERIFY_FULL_INTERVAL_S: "86400"
+  # Keycloak-Admin-API (Mitgliederverwaltung); Client-Secret in secrets
+  KC_ADMIN_URL: ""
+  KC_ADMIN_REALM: ""
+  KC_ADMIN_CLIENT_ID: ""
+  # Intelligente Dienste (optional, leer = aus) – bei NetworkPolicy Egress unter networkPolicy.egress.extra freigeben
+  OSRM_URL: ""
+  PHOTON_URL: ""
+  VLLM_URL: ""
+  VLLM_MODEL: ""
+  VLLM_VISION_URL: ""
+  VLLM_VISION_MODEL: ""
+  N8N_WEBHOOK_URL: ""
+  TAX_CANTON: ""
+
+# Eigene Checklisten-Vorlagen (JSON, siehe README) → ConfigMap + CHECKLIST_FILE
+checklistTemplates: ""
+
+# zusätzliche Env-Einträge (Kubernetes-EnvVar-Liste, z. B. valueFrom). Nicht NAME und NAME_FILE zugleich setzen
+# (Server bricht ab).
+extraEnv: []
+
+# ------------------------------------------------------------------------------------------------
+# Geheimnisse der App. Bevorzugt als Datei: <mountPath>/<NAME> + Env <NAME>_FILE.
+# ------------------------------------------------------------------------------------------------
+secrets:
+  # vorhandenes Secret (empfohlen für GitOps: SOPS/ExternalSecrets/SealedSecrets); Schlüssel = Variablennamen
+  existingSecret: ""
+  # Schlüssel, die existingSecret enthält (nur diese werden gemountet bzw. gesetzt)
+  existingSecretKeys:
+    - ANCHOR_SIGNING_KEY
+  # nur ohne existingSecret: vom Chart als Secret angelegt (leere Werte werden weggelassen)
+  values:
+    # Ed25519-Seed (openssl rand -base64 32) – NICHT verlieren, separat sichern!
+    ANCHOR_SIGNING_KEY: ""
+    KC_ADMIN_CLIENT_SECRET: ""
+    VLLM_API_KEY: ""
+    N8N_WEBHOOK_SECRET: ""
+    # Bearer-Token für /metrics (ServiceMonitor), mind. 32 Zeichen (openssl rand -hex 32)
+    METRICS_TOKEN: ""
+  mountPath: /run/secrets/fahrzeugbuch
+  # true: <NAME>_FILE (Datei-Mount); false: Wert direkt als Env (Fallback für Server ohne _FILE-Unterstützung)
+  useFileEnv: true
+
+# ------------------------------------------------------------------------------------------------
+# PostgreSQL (extern / CloudNativePG). App-Pods erhalten nur die App-Rolle, die Owner-Rolle nur der Migrations-Job.
+# ------------------------------------------------------------------------------------------------
+database:
+  # Pflicht, z. B. fahrzeugbuch-db-rw (CloudNativePG-Service), fahrzeugbuch-db-pooler-rw oder 10.0.10.5
+  host: ""
+  port: 5432
+  # optional abweichender Host/Port für die Migration (Owner-URL), z. B. direkt <cluster>-rw statt PgBouncer-Pooler:
+  # DDL/Session-Features gehören nicht über Transaction-Pooling
+  migrationHost: ""
+  migrationPort: null
+  name: fahrzeugbuch
+  # disable | allow | prefer | require | verify-ca | verify-full
+  sslmode: prefer
+  driver: postgresql+psycopg
+  # weitere Verbindungsparameter, z. B. {connect_timeout: "5"}
+  extraParams: {}
+  ownerUser: fahrzeugbuch
+  appUser: fahrzeugbuch_app
+  # nur ohne existingSecret (Test/Entwicklung): Passwörter im Klartext in den Values
+  ownerPassword: ""
+  appPassword: ""
+  # Secret mit den Passwörtern. App-Pods sehen nur appPasswordKey (→ DATABASE_PASSWORD_FILE), der Migrations-Job
+  # zusätzlich ownerPasswordKey (→ MIGRATION_DATABASE_PASSWORD_FILE). Die URLs enthalten kein Passwort.
+  existingSecret: ""
+  appPasswordKey: app-password
+  ownerPasswordKey: owner-password
+  # optional getrenntes Secret für die Owner-Rolle (z. B. CloudNativePG-Owner-Secret, Schlüssel "password")
+  existingOwnerSecret: ""
+  # PgBouncer im Transaction-Pooling → 1 (DB_DISABLE_PREPARED)
+  disablePreparedStatements: false
+  # je Worker-Prozess
+  pool:
+    size: 5
+    maxOverflow: 5
+  # max_connections der DB (PG_MAX_CONNECTIONS) – Grundlage der Budgetprüfung
+  maxConnections: 100
+  # Reserve für Migration, Backup, Monitoring, superuser_reserved_connections
+  reservedConnections: 10
+
+# ------------------------------------------------------------------------------------------------
+# Belege / Dateien – STORAGE_BACKEND
+# ------------------------------------------------------------------------------------------------
+storage:
+  backend: fs   # fs | s3
+  fs:
+    path: /data/attachments
+    persistence:
+      # false → emptyDir (nur Test – Daten gehen beim Neustart verloren!)
+      enabled: true
+      existingClaim: ""
+      # "" → Default-StorageClass, "-" → keine (statisches PV)
+      storageClass: ""
+      # >1 Replika nur mit ReadWriteMany (z. B. Longhorn RWX, NFS, CephFS)
+      accessModes: [ReadWriteOnce]
+      size: 10Gi
+      annotations: {}
+      # PVC bei helm uninstall behalten
+      retain: true
+  s3:
+    endpoint: ""          # leer → AWS; MinIO/Garage/Ceph: https://s3.example.org
+    bucket: ""
+    region: ""
+    prefix: ""
+    forcePathStyle: false
+    # vorhandenes Secret (empfohlen) mit den Schlüsseln unten
+    existingSecret: ""
+    accessKeyIdKey: S3_ACCESS_KEY_ID
+    secretAccessKeyKey: S3_SECRET_ACCESS_KEY
+    # nur ohne existingSecret
+    accessKeyId: ""
+    secretAccessKey: ""
+
+# ------------------------------------------------------------------------------------------------
+# Valkey (Redis-kompatibel) für stateBackend=redis – minimales Deployment ohne Persistenz, kein Subchart
+# ------------------------------------------------------------------------------------------------
+valkey:
+  enabled: false
+  image:
+    repository: valkey/valkey
+    tag: 8.1.12-alpine
+    digest: sha256:9971099af41c36e887aabdfe22b80c0fe45df949163dfc9cb434febc57cfc3fc
+    pullPolicy: IfNotPresent
+  auth:
+    # nur ohne existingSecret; erzeugen: openssl rand -hex 32
+    password: ""
+    existingSecret: ""
+    existingSecretKey: valkey-password
+  database: 0
+  maxmemory: 64mb
+  maxmemoryPolicy: volatile-lru
+  # per rename-command deaktiviert
+  disabledCommands: [CONFIG, DEBUG, MODULE]
+  resources:
+    requests:
+      cpu: 20m
+      memory: 32Mi
+    limits:
+      memory: 128Mi
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 999
+    runAsGroup: 1000
+    fsGroup: 1000
+    seccompProfile:
+      type: RuntimeDefault
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    privileged: false
+    capabilities:
+      drop: [ALL]
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  priorityClassName: ""
+  podAnnotations: {}
+
+# Alternative zu valkey.enabled: vorhandenes Redis/Valkey
+externalRedis:
+  # ohne Passwort, z. B. redis://valkey.infra:6379/0 bzw. rediss://… (TLS)
+  url: ""
+  # optional: Secret mit dem Passwort → REDIS_PASSWORD_FILE
+  existingSecret: ""
+  passwordKey: redis-password
+
+# ------------------------------------------------------------------------------------------------
+# Migration (Helm-Hook pre-install/pre-upgrade): python -m app.migrate mit Owner-Rechten
+# ------------------------------------------------------------------------------------------------
+migration:
+  enabled: true
+  command: [python, -m, app.migrate]
+  hookWeight: 0
+  backoffLimit: 2
+  activeDeadlineSeconds: 600
+  # bei Erfolg löscht Helm den Job (hook-succeeded); fehlgeschlagene Jobs räumt der TTL-Controller ab
+  ttlSecondsAfterFinished: 86400
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: "1"
+      memory: 384Mi
+
+# ------------------------------------------------------------------------------------------------
+# Pod / Container
+# ------------------------------------------------------------------------------------------------
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    # mit webConcurrency=auto bestimmt dieses Limit die Worker-Zahl (500m → 1 Worker, passend zu stateBackend=memory)
+    cpu: 500m
+    memory: 512Mi
+
+# Graceful Shutdown: preStop-Pause (Endpoints werden entfernt) + GRACEFUL_TIMEOUT_S ≤ terminationGracePeriodSeconds
+gracefulTimeoutSeconds: 25
+preStopSleepSeconds: 5
+terminationGracePeriodSeconds: 30
+
+probes:
+  # Host-Header für Probes (ALLOWED_HOSTS erlaubt localhost immer)
+  hostHeader: localhost
+  startup:
+    path: /health/live
+    periodSeconds: 2
+    timeoutSeconds: 2
+    failureThreshold: 30
+  liveness:
+    path: /health/live
+    periodSeconds: 10
+    timeoutSeconds: 3
+    failureThreshold: 3
+  readiness:
+    path: /health/ready
+    periodSeconds: 5
+    timeoutSeconds: 3
+    failureThreshold: 2
+
+tmpVolume:
+  sizeLimit: 64Mi
+  # "" (Knoten-Disk) oder Memory (zählt zum Memory-Limit)
+  medium: ""
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  runAsGroup: 10001
+  fsGroup: 10001
+  fsGroupChangePolicy: OnRootMismatch
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  privileged: false
+  runAsNonRoot: true
+  capabilities:
+    drop: [ALL]
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+podAnnotations: {}
+podLabels: {}
+priorityClassName: ""
+nodeSelector: {}
+tolerations: []
+# leer → weiche podAntiAffinity (verschiedene Knoten bevorzugt)
+affinity: {}
+# leer → weiche Verteilung über Knoten und Zonen (ScheduleAnyway)
+topologySpreadConstraints: []
+extraVolumes: []
+extraVolumeMounts: []
+
+# ------------------------------------------------------------------------------------------------
+# Netzwerk
+# ------------------------------------------------------------------------------------------------
+service:
+  type: ClusterIP
+  port: 80
+  annotations: {}
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+    # ingress-nginx (Belege bis 8 MiB, Timeouts):
+    # nginx.ingress.kubernetes.io/proxy-body-size: "8m"
+    # nginx.ingress.kubernetes.io/proxy-read-timeout: "60"
+    # nginx.ingress.kubernetes.io/proxy-send-timeout: "60"
+    # nginx.ingress.kubernetes.io/proxy-request-buffering: "on"
+    # Traefik: Body-Limit über ingress.traefikMiddleware, TLS über den Entrypoint
+    # traefik.ingress.kubernetes.io/router.entrypoints: websecure
+    # traefik.ingress.kubernetes.io/router.tls: "true"
+    # cert-manager:
+    # cert-manager.io/cluster-issuer: letsencrypt
+  hosts:
+    - host: fahrzeugbuch.example.org
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+  #  - secretName: fahrzeugbuch-tls
+  #    hosts: [fahrzeugbuch.example.org]
+  # Traefik-Middleware (traefik.io/v1alpha1) mit Body-Limit; wird automatisch am Ingress referenziert
+  traefikMiddleware:
+    enabled: false
+    maxRequestBodyBytes: 8388608
+    memRequestBodyBytes: 1048576
+
+# Gateway API (gateway.networking.k8s.io/v1) statt/zusätzlich zu Ingress
+httpRoute:
+  enabled: false
+  annotations: {}
+  parentRefs: []
+  #  - name: public-gateway
+  #    namespace: gateway-system
+  #    sectionName: https
+  hostnames: []
+  timeouts:
+    request: 60s
+    backendRequest: 55s
+
+networkPolicy:
+  enabled: false
+  ingress:
+    # Ingress-Controller/Gateway (Namespace-Label konfigurierbar)
+    controller:
+      namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: ingress-nginx
+      podSelector: {}
+    prometheus:
+      enabled: true
+      namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: monitoring
+      podSelector: {}
+    # weitere Quellen (NetworkPolicyPeer-Liste)
+    extraFrom: []
+  egress:
+    dns:
+      namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+      podSelector:
+        matchLabels:
+          k8s-app: kube-dns
+    # Ziele: cidrs (ipBlock) und/oder namespaceSelector/podSelector; ports (TCP). Leere Ziele = gesperrt.
+    database:
+      cidrs: []
+      namespaceSelector: {}
+      podSelector: {}
+      ports: [5432]
+    # externes Redis (bei valkey.enabled automatisch freigegeben)
+    redis:
+      cidrs: []
+      namespaceSelector: {}
+      podSelector: {}
+      ports: [6379]
+    s3:
+      cidrs: []
+      namespaceSelector: {}
+      podSelector: {}
+      ports: [443]
+    # Keycloak/Issuer (Discovery, JWKS, Admin-API)
+    oidc:
+      cidrs: []
+      namespaceSelector: {}
+      podSelector: {}
+      ports: [443]
+    # weitere Ziele: OSRM, Photon, vLLM, n8n …
+    extra: []
+    #  - name: osrm
+    #    cidrs: [10.0.10.20/32]
+    #    ports: [5000]
+
+serviceMonitor:
+  # benötigt prometheus-operator (CRD monitoring.coreos.com/v1)
+  enabled: false
+  labels: {}
+  interval: 30s
+  scrapeTimeout: 10s
+  path: /metrics
+  # leer → METRICS_TOKEN aus secrets (Chart-Secret bzw. existingSecret)
+  tokenSecret:
+    name: ""
+    key: ""

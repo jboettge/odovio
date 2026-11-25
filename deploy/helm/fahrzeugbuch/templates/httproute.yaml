@@ -1,0 +1,38 @@
+{{- if .Values.httpRoute.enabled }}
+{{- $full := include "fahrzeugbuch.fullname" . }}
+{{- $r := .Values.httpRoute }}
+{{- if not $r.parentRefs }}
+{{- fail "httpRoute.enabled: httpRoute.parentRefs angeben (Gateway)." }}
+{{- end }}
+# Body-Grössen begrenzt die Gateway-Implementierung (z. B. Envoy Gateway ClientTrafficPolicy, Traefik Middleware)
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: {{ $full }}
+  labels:
+    {{- include "fahrzeugbuch.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+  {{- with $r.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  parentRefs:
+    {{- toYaml $r.parentRefs | nindent 4 }}
+  {{- with $r.hostnames }}
+  hostnames:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: {{ $full }}
+          port: {{ .Values.service.port }}
+      {{- with $r.timeouts }}
+      timeouts:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

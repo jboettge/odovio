@@ -1,0 +1,57 @@
+{{- if .Values.ingress.enabled }}
+{{- $full := include "fahrzeugbuch.fullname" . }}
+{{- $ing := .Values.ingress }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ $full }}
+  labels:
+    {{- include "fahrzeugbuch.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+  {{- if or $ing.annotations $ing.traefikMiddleware.enabled }}
+  annotations:
+    {{- with $ing.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+    {{- if $ing.traefikMiddleware.enabled }}
+    traefik.ingress.kubernetes.io/router.middlewares: {{ printf "%s-%s-body@kubernetescrd" .Release.Namespace $full | quote }}
+    {{- end }}
+  {{- end }}
+spec:
+  {{- with $ing.className }}
+  ingressClassName: {{ . }}
+  {{- end }}
+  {{- with $ing.tls }}
+  tls:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  rules:
+    {{- range $ing.hosts }}
+    - host: {{ .host | quote }}
+      http:
+        paths:
+          {{- range .paths }}
+          - path: {{ .path }}
+            pathType: {{ default "Prefix" .pathType }}
+            backend:
+              service:
+                name: {{ $full }}
+                port:
+                  name: http
+          {{- end }}
+    {{- end }}
+{{- if $ing.traefikMiddleware.enabled }}
+---
+# Traefik: Request-Body begrenzen (Belege …/blob bis 8 MiB; die API prüft je Pfad feiner)
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: {{ $full }}-body
+  labels:
+    {{- include "fahrzeugbuch.labels" . | nindent 4 }}
+spec:
+  buffering:
+    maxRequestBodyBytes: {{ int $ing.traefikMiddleware.maxRequestBodyBytes }}
+    memRequestBodyBytes: {{ int $ing.traefikMiddleware.memRequestBodyBytes }}
+{{- end }}
+{{- end }}

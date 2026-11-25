@@ -1,0 +1,122 @@
+{{- if .Values.networkPolicy.enabled }}
+{{- $np := .Values.networkPolicy }}
+{{- $full := include "fahrzeugbuch.fullname" . }}
+# API: Zugriff nur vom Ingress-Controller/Gateway und Prometheus; Egress nur DNS, DB, Valkey/Redis, S3, Issuer + Extras
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $full }}
+  labels:
+    {{- include "fahrzeugbuch.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "fahrzeugbuch.selectorLabels" (dict "ctx" . "component" "api") | nindent 6 }}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - {{- with $np.ingress.controller.namespaceSelector }}
+          namespaceSelector:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with $np.ingress.controller.podSelector }}
+          podSelector:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+        {{- if $np.ingress.prometheus.enabled }}
+        - {{- with $np.ingress.prometheus.namespaceSelector }}
+          namespaceSelector:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with $np.ingress.prometheus.podSelector }}
+          podSelector:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+        {{- end }}
+        {{- with $np.ingress.extraFrom }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      ports:
+        - protocol: TCP
+          port: http
+  egress:
+    - to:
+        - {{- with $np.egress.dns.namespaceSelector }}
+          namespaceSelector:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with $np.egress.dns.podSelector }}
+          podSelector:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    {{- with (include "fahrzeugbuch.np.egressRule" $np.egress.database | trim) }}
+    {{- . | nindent 4 }}
+    {{- end }}
+    {{- if .Values.valkey.enabled }}
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "fahrzeugbuch.selectorLabels" (dict "ctx" . "component" "valkey") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: 6379
+    {{- else }}
+    {{- with (include "fahrzeugbuch.np.egressRule" $np.egress.redis | trim) }}
+    {{- . | nindent 4 }}
+    {{- end }}
+    {{- end }}
+    {{- if eq .Values.storage.backend "s3" }}
+    {{- with (include "fahrzeugbuch.np.egressRule" $np.egress.s3 | trim) }}
+    {{- . | nindent 4 }}
+    {{- end }}
+    {{- end }}
+    {{- with (include "fahrzeugbuch.np.egressRule" $np.egress.oidc | trim) }}
+    {{- . | nindent 4 }}
+    {{- end }}
+    {{- range $np.egress.extra }}
+    {{- with (include "fahrzeugbuch.np.egressRule" . | trim) }}
+    {{- . | nindent 4 }}
+    {{- end }}
+    {{- end }}
+{{- if .Values.migration.enabled }}
+---
+# Migrations-Job: kein Ingress, Egress nur DNS + DB
+# (greift ab dem ersten Upgrade; bei der Erstinstallation existiert die Policy während des pre-install-Hooks noch nicht)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $full }}-migrate
+  labels:
+    {{- include "fahrzeugbuch.labels" . | nindent 4 }}
+    app.kubernetes.io/component: migrate
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "fahrzeugbuch.selectorLabels" (dict "ctx" . "component" "migrate") | nindent 6 }}
+  policyTypes: [Ingress, Egress]
+  egress:
+    - to:
+        - {{- with $np.egress.dns.namespaceSelector }}
+          namespaceSelector:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with $np.egress.dns.podSelector }}
+          podSelector:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    {{- with (include "fahrzeugbuch.np.egressRule" $np.egress.database | trim) }}
+    {{- . | nindent 4 }}
+    {{- end }}
+{{- end }}
+{{- end }}

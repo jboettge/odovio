@@ -1,0 +1,12 @@
+# Beispiele und Doku gehören nicht ins Chart-Paket
+examples/
+.DS_Store
+.git/
+.gitignore
+*.swp
+*.bak
+*.tmp
+*.orig
+*~
+.idea/
+.vscode/
