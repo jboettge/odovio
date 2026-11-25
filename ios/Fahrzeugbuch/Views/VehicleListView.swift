@@ -206,8 +206,8 @@ private struct VehicleRow: View {
         let overdue = stats.due.filter(\.overdue).count
         VStack(alignment: .leading, spacing: 3) {
             Text(vehicle.name).font(.headline)
-            if !vehicle.subtitle.isEmpty {
-                Text(vehicle.subtitle).font(.subheadline).foregroundStyle(.secondary)
+            if !subtitle.isEmpty {
+                Text(subtitle).font(.subheadline).foregroundStyle(.secondary)
             }
             ViewThatFits(in: .horizontal) {
                 HStack(spacing: 10) { facts }
@@ -223,6 +223,14 @@ private struct VehicleRow: View {
             }
         }
         .accessibilityElement(children: .combine)
+    }
+
+    /// Wie `vehicle.subtitle`, aber das Kennzeichen mit geschützten Leerzeichen –
+    /// es wird nur als Ganzes umbrochen („ZH 123 456“ statt „ZH“ / „123 456“).
+    private var subtitle: String {
+        let model = [vehicle.make, vehicle.model].compactMap { $0?.nilIfEmpty }.joined(separator: " ")
+        let plate = (vehicle.plate?.nilIfEmpty ?? "").replacingOccurrences(of: " ", with: "\u{00A0}")
+        return [model, plate].filter { !$0.isEmpty }.joined(separator: " · ")
     }
 
     @ViewBuilder
