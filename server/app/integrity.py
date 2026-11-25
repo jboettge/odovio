@@ -68,6 +68,15 @@ def maybe_anchor(db: Session, tenant: models.Tenant, force: bool = False) -> mod
 
 
 # ---------- Prüfungen ----------
+def _same(recorded: dict, current: dict) -> bool:
+    """Später ergänzte optionale Felder (z. B. maintenance_material.article_id) fehlen in
+    Altrevisionen; solange sie im Datensatz None sind, entspricht das dem Stand der Revision."""
+    added = current.keys() - recorded.keys()
+    if any(current[k] is not None for k in added):
+        return False
+    return recorded == {k: v for k, v in current.items() if k not in added}
+
+
 def verify_state(db: Session, tenant: models.Tenant) -> list[str]:
     """Jeder Datensatz muss exakt dem Stand seiner letzten Revision entsprechen."""
     latest: dict[tuple[str, str], models.Revision] = {}
@@ -82,7 +91,8 @@ def verify_state(db: Session, tenant: models.Tenant) -> list[str]:
             rev = latest.get(key)
             if rev is None:
                 problems.append(f"{entity} {obj.id}: Datensatz ohne Revision")
-            elif rev.version != obj.version or json.loads(rev.data) != json.loads(canonical(snapshot(obj, schema))):
+            elif rev.version != obj.version or not _same(json.loads(rev.data),
+                                                         json.loads(canonical(snapshot(obj, schema)))):
                 problems.append(f"{entity} {obj.id}: weicht von Revision {rev.seq} ab")
     problems += [f"{e} {i}: Revision ohne Datensatz" for (e, i) in latest if (e, i) not in seen]
     return problems

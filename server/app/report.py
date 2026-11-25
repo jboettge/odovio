@@ -24,6 +24,7 @@ ACTIONS = {"create": "Erfasst", "update": "Geändert", "delete": "Storniert"}
 ENTITY_NAMES = {
     "vehicle": "Fahrzeug", "odometer": "km-Stand", "fuel": "Tankvorgang",
     "maintenance": "Wartung", "maintenance_item": "Checkpunkt", "maintenance_material": "Material",
+    "material_article": "Materialartikel",
 }
 
 

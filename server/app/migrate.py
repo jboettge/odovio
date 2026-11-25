@@ -14,7 +14,7 @@ import os
 import re
 import sys
 
-from sqlalchemy import Engine, create_engine, text
+from sqlalchemy import Engine, create_engine, inspect, text
 from sqlalchemy.engine import make_url
 
 from . import models  # noqa: F401  (Tabellen registrieren)
@@ -22,11 +22,29 @@ from .audit import IMMUTABLE_TABLES, install_triggers
 from .db import Base
 
 DML_TABLES = ("tenants", "vehicles", "odometer_readings", "fuel_entries", "maintenance", "maintenance_items",
-              "maintenance_materials")
+              "maintenance_materials", "material_articles")
 ROLE = re.compile(r"^[a-z_][a-z0-9_]{0,62}$")
 
 
+# Spalten, die nach dem ersten Deploy ergänzt wurden (create_all ergänzt keine Spalten in
+# bestehenden Tabellen): (Tabelle, Spalte, DDL-Typ). Nur nullable, ohne Fremdschlüssel.
+ADDED_COLUMNS = (
+    ("maintenance_materials", "article_id", "VARCHAR(36)"),
+)
+
+
+def add_missing_columns(engine: Engine) -> None:
+    """Idempotente Nachrüstung fehlender Spalten (SQLite und PostgreSQL)."""
+    with engine.begin() as conn:
+        insp = inspect(conn)
+        tables = set(insp.get_table_names())
+        for table, column, ddl in ADDED_COLUMNS:
+            if table in tables and column not in {c["name"] for c in insp.get_columns(table)}:
+                conn.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+
+
 def create_schema(engine: Engine) -> None:
+    add_missing_columns(engine)
     Base.metadata.create_all(engine)
     install_triggers(engine)
 

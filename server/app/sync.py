@@ -19,22 +19,31 @@ from . import models, schemas
 from .audit import append_revision
 from .auth import User
 
-# entity -> (Modell, Schema, (Eltern-Feld, Eltern-Modell) | None)
-ENTITIES: dict[str, tuple[type, type[BaseModel], tuple[str, type] | None]] = {
-    "vehicle": (models.Vehicle, schemas.VehicleData, None),
-    "odometer": (models.OdometerReading, schemas.OdometerData, ("vehicle_id", models.Vehicle)),
-    "fuel": (models.FuelEntry, schemas.FuelData, ("vehicle_id", models.Vehicle)),
-    "maintenance": (models.Maintenance, schemas.MaintenanceData, ("vehicle_id", models.Vehicle)),
-    "maintenance_item": (models.MaintenanceItem, schemas.MaintenanceItemData, ("maintenance_id", models.Maintenance)),
+# Verweis auf ein anderes Objekt desselben Mandanten: (Feld, Modell, Pflicht).
+# Pflicht-Verweise müssen immer existieren; optionale nur, wenn der Wert nicht None ist.
+# Stornierte Ziele sind zulässig (Altdaten bleiben editierbar).
+Ref = tuple[str, type, bool]
+
+# entity -> (Modell, Schema, Verweise)
+ENTITIES: dict[str, tuple[type, type[BaseModel], tuple[Ref, ...]]] = {
+    "vehicle": (models.Vehicle, schemas.VehicleData, ()),
+    "odometer": (models.OdometerReading, schemas.OdometerData, (("vehicle_id", models.Vehicle, True),)),
+    "fuel": (models.FuelEntry, schemas.FuelData, (("vehicle_id", models.Vehicle, True),)),
+    "maintenance": (models.Maintenance, schemas.MaintenanceData, (("vehicle_id", models.Vehicle, True),)),
+    "maintenance_item": (models.MaintenanceItem, schemas.MaintenanceItemData,
+                         (("maintenance_id", models.Maintenance, True),)),
     "maintenance_material": (models.MaintenanceMaterial, schemas.MaintenanceMaterialData,
-                             ("maintenance_id", models.Maintenance)),
+                             (("maintenance_id", models.Maintenance, True),
+                              ("article_id", models.MaterialArticle, False))),
+    "material_article": (models.MaterialArticle, schemas.MaterialArticleData,
+                         (("vehicle_id", models.Vehicle, False),)),
 }
 log = logging.getLogger("fahrzeugbuch.sync")
 
 CHANGE_KEYS = {
     "vehicle": "vehicles", "odometer": "odometer", "fuel": "fuel",
     "maintenance": "maintenance", "maintenance_item": "maintenance_items",
-    "maintenance_material": "maintenance_materials",
+    "maintenance_material": "maintenance_materials", "material_article": "material_articles",
 }
 
 
@@ -57,7 +66,7 @@ def entity_out(obj, schema: type[BaseModel]) -> dict:
 
 
 def _apply(db: Session, tenant: models.Tenant, user: User, op: schemas.SyncOp) -> dict:
-    model, schema, parent = ENTITIES[op.entity]
+    model, schema, refs = ENTITIES[op.entity]
     base = {"op_id": op.op_id, "entity": op.entity, "id": op.id}
 
     dup = db.scalar(
@@ -85,11 +94,13 @@ def _apply(db: Session, tenant: models.Tenant, user: User, op: schemas.SyncOp) -
             data = schema.model_validate(op.data)
         except ValidationError as e:
             raise Rejected("; ".join(f"{'.'.join(map(str, x['loc']))}: {x['msg']}" for x in e.errors())) from e
-        if parent is not None:
-            field, parent_model = parent
-            p = db.get(parent_model, getattr(data, field))
+        for field, ref_model, required in refs:
+            ref_id = getattr(data, field)
+            if ref_id is None and not required:
+                continue
+            p = db.get(ref_model, ref_id)
             if p is None or p.tenant_id != tenant.id:
-                raise Rejected(f"Übergeordnetes Objekt ({field}) fehlt")
+                raise Rejected(f"{'Übergeordnetes' if required else 'Referenziertes'} Objekt ({field}) fehlt")
         if obj is None:
             obj = model(id=op.id, tenant_id=tenant.id, version=0, deleted=False, last_seq=0)
             db.add(obj)

@@ -100,6 +100,9 @@ class MaintenanceMaterial(Synced, Base):
     __tablename__ = "maintenance_materials"
 
     maintenance_id: Mapped[str] = mapped_column(ForeignKey("maintenance.id"), index=True)
+    # Herkunft aus dem Materialstamm (nur Referenz; Werte der Position sind eine Kopie).
+    # Kein Fremdschlüssel: Prüfung im Sync, Spalte wird in migrate.create_schema nachgerüstet.
+    article_id: Mapped[str | None] = mapped_column(String(36))
     name: Mapped[str] = mapped_column(String(150))
     part_number: Mapped[str | None] = mapped_column(String(60))
     quantity: Mapped[float] = mapped_column(Float)
@@ -110,6 +113,20 @@ class MaintenanceMaterial(Synced, Base):
     @property
     def total(self) -> float | None:
         return None if self.unit_price is None else self.quantity * self.unit_price
+
+
+class MaterialArticle(Synced, Base):
+    """Materialstamm (mandantenweit). `vehicle_id` = None → für alle Fahrzeuge."""
+
+    __tablename__ = "material_articles"
+
+    name: Mapped[str] = mapped_column(String(150))
+    part_number: Mapped[str | None] = mapped_column(String(60))
+    unit: Mapped[str] = mapped_column(String(20), default="Stk")
+    unit_price: Mapped[float | None] = mapped_column(Float)
+    category: Mapped[str | None] = mapped_column(String(50))
+    vehicle_id: Mapped[str | None] = mapped_column(ForeignKey("vehicles.id"), index=True)
+    note: Mapped[str | None] = mapped_column(Text)
 
 
 class Revision(Base):
