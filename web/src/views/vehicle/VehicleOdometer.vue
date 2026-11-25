@@ -6,9 +6,11 @@ import HistoryPanel from '../../components/HistoryPanel.vue'
 import ConfirmDialog from '../../components/ConfirmDialog.vue'
 import EmptyState from '../../components/EmptyState.vue'
 import LineChart from '../../components/LineChart.vue'
+import Pager from '../../components/Pager.vue'
 import { useHistory, useStorno, useVehicle } from '../../composables'
+import { usePager } from '../../use/pager'
 import type { OdometerReading } from '../../api/types'
-import { date, km, num } from '../../lib/format'
+import { date, km, num, byCode } from '../../lib/format'
 
 const { vehicle, odometer, fuel, maintenance, tenant, writable } = useVehicle()
 const history = useHistory()
@@ -29,10 +31,16 @@ const readings = computed<Reading[]>(() => {
   for (const o of odometer.value) if (!o.deleted) out.push({ key: `o${o.id}`, date: o.date, km: o.km, source: 'odometer', label: o.note || 'Abgelesen', rec: o, entityId: o.id })
   for (const f of fuel.value) if (!f.deleted) out.push({ key: `f${f.id}`, date: f.date, km: f.km, source: 'fuel', label: `Tanken${f.station ? ` · ${f.station}` : ''}`, entityId: f.id })
   for (const m of maintenance.value) if (!m.deleted && m.km !== null) out.push({ key: `m${m.id}`, date: m.date, km: m.km, source: 'maintenance', label: m.title, entityId: m.id })
-  out.sort((a, b) => b.date.localeCompare(a.date) || b.km - a.km)
+  out.sort((a, b) => byCode(b.date, a.date) || b.km - a.km || byCode(a.key, b.key))
   return out
 })
-const withDelta = computed(() => readings.value.map((r, i) => ({ ...r, delta: i + 1 < readings.value.length ? r.km - readings.value[i + 1]!.km : null })))
+// Zeitachse seitenweise (Abstand zum Vorgänger auch über Seitengrenzen korrekt)
+const pager = usePager(readings)
+const withDelta = computed(() => {
+  const all = readings.value
+  const offset = pager.from ? pager.from - 1 : 0
+  return pager.items.map((r, i) => ({ ...r, delta: offset + i + 1 < all.length ? r.km - all[offset + i + 1]!.km : null }))
+})
 const chartPoints = computed(() => [...readings.value].reverse().map((r) => ({ label: date(r.date), value: r.km, detail: r.label })))
 const ICON = { odometer: 'gauge', fuel: 'fuel', maintenance: 'wrench', start: 'car' } as const
 const SOURCE = { odometer: 'Kilometerstand', fuel: 'Tankvorgang', maintenance: 'Wartung', start: 'Start' } as const
@@ -42,7 +50,7 @@ const SOURCE = { odometer: 'Kilometerstand', fuel: 'Tankvorgang', maintenance: '
   <div class="grid grid-2">
     <section class="card" aria-labelledby="odo-h">
       <div class="card-header"><h2 id="odo-h">Zeitachse</h2><span class="muted small">Start-km {{ km(vehicle?.initial_km) }}</span></div>
-      <EmptyState v-if="!withDelta.length" title="Keine Kilometerstände" icon="gauge" />
+      <EmptyState v-if="!readings.length" title="Keine Kilometerstände" icon="gauge" />
       <ol v-else class="timeline">
         <li v-for="r in withDelta" :key="r.key">
           <span :class="['timeline-dot', r.source === 'odometer' ? '' : 'dot-muted']" aria-hidden="true"></span>
@@ -60,6 +68,7 @@ const SOURCE = { odometer: 'Kilometerstand', fuel: 'Tankvorgang', maintenance: '
           </div>
         </li>
       </ol>
+      <Pager v-model:page="pager.page" v-model:size="pager.size" :total="pager.total" label="Seiten der Zeitachse" />
     </section>
     <section class="card" aria-labelledby="odo-chart">
       <h2 id="odo-chart" class="section-title">Verlauf</h2>

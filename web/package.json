@@ -10,16 +10,26 @@
   "scripts": {
     "dev": "vite",
     "mock": "node mock/server.mjs",
+    "mock:large": "node mock/server.mjs --seed large",
     "dev:mock": "node mock/server.mjs --port 8787 & vite",
-    "build": "vite build",
+    "build": "vite build && node scripts/compress.mjs dist",
+    "size": "node scripts/size.mjs dist",
     "preview": "node mock/server.mjs --static dist --port 4319",
     "lint": "eslint . --max-warnings 0",
     "typecheck": "vue-tsc --noEmit -p tsconfig.app.json && tsc --noEmit -p tsconfig.node.json",
     "test": "vitest run",
     "test:watch": "vitest",
     "e2e": "playwright test --trace off",
+    "e2e:perf": "playwright test --trace off --project perf",
     "screenshots": "node tests/e2e/screenshots.mjs",
     "audit": "npm audit --omit=dev --audit-level=high"
+  },
+  "budgets": {
+    "startJsGzipKiB": 72,
+    "dashboardJsGzipKiB": 85,
+    "cssGzipKiB": 8,
+    "chunkJsGzipKiB": 32,
+    "workerJsGzipKiB": 8
   },
   "dependencies": {
     "oidc-client-ts": "3.5.0",

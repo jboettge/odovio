@@ -52,7 +52,8 @@ export async function loadMe(force = false): Promise<Me> {
     session.loading = true
     session.error = null
     try {
-      const me = await endpoints.me()
+      // eigenes Signal: /api/me gehört nicht zur aktuellen Seite und wird beim Routenwechsel nicht abgebrochen
+      const me = await endpoints.me(new AbortController().signal)
       session.me = me
       pickDefaultTenant()
       return me

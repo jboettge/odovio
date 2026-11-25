@@ -7,17 +7,19 @@ import Loading from '../components/Loading.vue'
 import EmptyState from '../components/EmptyState.vue'
 import AlertBox from '../components/AlertBox.vue'
 import ActivityFeed from '../components/ActivityFeed.vue'
-import { active, all, dataState, stats } from '../store/data'
+import { dataState, stats, tick, vehiclesByName } from '../store/data'
 import { role, session } from '../store/session'
 import { endpoints } from '../api/endpoints'
 import type { ActivityItem, Stats } from '../api/types'
 import { ApiError } from '../api/client'
 import { chf, date, km, num } from '../lib/format'
 import { FUEL_TYPE_LABELS } from '../lib/labels'
-import { tripHealth } from '../lib/vehicle'
+import { analytics } from '../lib/analyticsClient'
+import type { HealthResult } from '../lib/slim'
+import { useAsync } from '../use/async'
 import { canWrite } from '../lib/roles'
 
-const vehicles = computed(() => active('vehicle').sort((a, b) => a.name.localeCompare(b.name, 'de-CH')))
+const vehicles = computed(() => vehiclesByName())
 const statMap = reactive<Record<string, Stats | 'error'>>({})
 
 watch(
@@ -37,11 +39,13 @@ watch(
   { immediate: true },
 )
 
-const health = computed(() => {
-  const trips = all('trip')
-  const periods = all('trip_period')
-  return Object.fromEntries(vehicles.value.map((v) => [v.id, tripHealth(trips, periods, v.id)]))
-})
+// Kilometerkette/offene Bestätigungen über alle Fahrten: im Web Worker (Hauptthread bleibt frei)
+const healthRes = useAsync(
+  () => ({ vids: vehicles.value.map((v) => v.id), data: tick('trip', 'trip_period'), loaded: dataState.loaded }),
+  (a) => (a.loaded ? analytics().health(a.vids) : Promise.resolve({} as Record<string, HealthResult>)),
+  {} as Record<string, HealthResult>,
+)
+const health = computed(() => healthRes.data.value)
 
 function st(id: string): Stats | null {
   const s = statMap[id]
@@ -70,7 +74,7 @@ const totals = computed(() => {
   let overdue = 0
   for (const v of vehicles.value) {
     open += health.value[v.id]?.open ?? 0
-    gaps += health.value[v.id]?.gaps.length ?? 0
+    gaps += health.value[v.id]?.gaps ?? 0
     overdue += st(v.id)?.due.filter((d) => d.overdue).length ?? 0
   }
   return { open, gaps, overdue }
@@ -121,13 +125,13 @@ const totals = computed(() => {
         </dl>
         <ul class="callout-list">
           <li v-if="health[v.id]?.open"><Icon name="check" class="warn" /><span class="warn">{{ health[v.id]!.open }} Fahrt{{ health[v.id]!.open === 1 ? '' : 'en' }} bestätigen</span></li>
-          <li v-if="health[v.id]?.gaps.length"><Icon name="alert" class="danger" /><span class="danger">Lücke von {{ km(health[v.id]!.gapKm) }} in der Kilometerkette</span></li>
+          <li v-if="health[v.id]?.gaps"><Icon name="alert" class="danger" /><span class="danger">Lücke von {{ km(health[v.id]!.gapKm) }} in der Kilometerkette</span></li>
           <li v-for="d in st(v.id)?.due.slice(0, 2) ?? []" :key="d.maintenance_id">
             <Icon name="wrench" :class="d.overdue ? 'danger' : ''" />
             <span :class="d.overdue ? 'danger' : ''">{{ d.title }}: {{ d.overdue ? 'überfällig' : 'fällig' }}
               <span class="muted small">{{ [d.next_due_km !== null ? km(d.next_due_km) : '', d.next_due_date ? date(d.next_due_date) : ''].filter(Boolean).join(' / ') }}</span></span>
           </li>
-          <li v-if="!health[v.id]?.open && !health[v.id]?.gaps.length && !st(v.id)?.due.length"><Icon name="checkCircle" /><span class="muted">Alles erledigt</span></li>
+          <li v-if="health[v.id] && !health[v.id]!.open && !health[v.id]!.gaps && !st(v.id)?.due.length"><Icon name="checkCircle" /><span class="muted">Alles erledigt</span></li>
         </ul>
       </RouterLink>
     </div>

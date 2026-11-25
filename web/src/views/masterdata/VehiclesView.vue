@@ -6,16 +6,20 @@ import HistoryPanel from '../../components/HistoryPanel.vue'
 import ConfirmDialog from '../../components/ConfirmDialog.vue'
 import EditorModal from './EditorModal.vue'
 import RowActions from './RowActions.vue'
+import Pager from '../../components/Pager.vue'
+import { usePager } from '../../use/pager'
 import { numOrNull, strOrNull, useEditor, useHistory, useStorno } from '../../composables'
 import { all } from '../../store/data'
 import { role, session } from '../../store/session'
 import { canWrite } from '../../lib/roles'
-import { chf, km } from '../../lib/format'
+import { chf, km, byText } from '../../lib/format'
 import { FUEL_TYPE_LABELS, METHOD_LABELS, OWNERSHIP_LABELS } from '../../lib/labels'
 
 const writable = computed(() => canWrite(role.value))
 const showDeleted = ref(false)
-const rows = computed(() => all('vehicle').filter((v) => showDeleted.value || !v.deleted).sort((a, b) => a.name.localeCompare(b.name, 'de-CH')))
+const rows = computed(() => all('vehicle').filter((v) => showDeleted.value || !v.deleted).sort((a, b) => byText(a.name, b.name)))
+// Seitenaufteilung (50/100/200) – auch bei tausenden Einträgen kleines DOM
+const pager = usePager(rows, { resetOn: [showDeleted] })
 const ed = useEditor('vehicle', () => ({ name: '', make: '', model: '', plate: '', fuel_type: 'benzin', initial_km: 0, purchase_price: null, ownership: 'private', private_use_method: null, annual_fixed_costs: null }))
 const history = useHistory()
 const storno = useStorno()
@@ -50,7 +54,7 @@ function save() {
       <table class="table">
         <thead><tr><th scope="col">Name</th><th scope="col">Kennzeichen</th><th scope="col">Treibstoff</th><th scope="col" class="num">Start-km</th><th scope="col">Halter / Privatanteil</th><th scope="col" class="num">Kaufpreis</th><th scope="col" class="num">Fixkosten/Jahr</th><th scope="col"><span class="sr-only">Aktionen</span></th></tr></thead>
         <tbody>
-          <tr v-for="v in rows" :key="v.id" :class="{ 'is-deleted': v.deleted }">
+          <tr v-for="v in pager.items" :key="v.id" :class="{ 'is-deleted': v.deleted }">
             <td class="strike-cell"><strong>{{ v.name }}</strong><span class="cell-sub">{{ [v.make, v.model].filter(Boolean).join(' ') }}</span><span v-if="v.deleted" class="badge badge-danger">storniert</span></td>
             <td><span v-if="v.plate" class="plate">{{ v.plate }}</span></td>
             <td>{{ FUEL_TYPE_LABELS[v.fuel_type] ?? v.fuel_type }}</td>
@@ -63,6 +67,7 @@ function save() {
         </tbody>
       </table>
     </div>
+    <Pager v-model:page="pager.page" v-model:size="pager.size" :total="pager.total" label="Seiten der Fahrzeuge" />
   </section>
 
   <EditorModal :open="ed.state.open" :title="ed.state.id ? 'Fahrzeug bearbeiten' : 'Fahrzeug erfassen'" :busy="ed.state.busy" :error="ed.state.error" @close="ed.close" @save="save">

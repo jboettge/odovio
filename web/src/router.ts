@@ -2,6 +2,7 @@ import { createRouter, createWebHistory, type RouteRecordRaw } from 'vue-router'
 import { authState, isAuthenticated, login } from './auth/oidc'
 import { gate, type GateMeta } from './lib/roles'
 import { loadMe, role, selectTenant, session } from './store/session'
+import { abortNavigation } from './api/navigation'
 
 declare module 'vue-router' {
   interface RouteMeta extends GateMeta {
@@ -81,7 +82,9 @@ router.beforeEach(async (to) => {
   return true
 })
 
-router.afterEach((to) => {
+router.afterEach((to, from, failure) => {
+  // Seite verlassen: noch offene GETs der alten Seite abbrechen (nicht bei reinen Query-Änderungen)
+  if (!failure && to.path !== from.path) abortNavigation()
   const title = [...to.matched].reverse().find((r) => r.meta.title)?.meta.title
   document.title = title ? `${title} – Fahrzeugbuch` : 'Fahrzeugbuch'
 })

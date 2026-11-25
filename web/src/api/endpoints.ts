@@ -1,5 +1,6 @@
 // Typisierte Endpunkte der Server-API.
 import { ApiClient, type BlobResult } from './client'
+import { navigationSignal } from './navigation'
 import { tokenProvider } from '../auth/oidc'
 import type {
   ActivityPage,
@@ -18,7 +19,8 @@ import type {
   YearReport,
 } from './types'
 
-export const api = new ApiClient(tokenProvider)
+// GETs ohne eigenes Signal werden beim Routenwechsel abgebrochen (siehe router.ts)
+export const api = new ApiClient(tokenProvider, '', undefined, { maxConcurrent: 4, retries: 2, defaultSignal: navigationSignal })
 
 const t = (tenant: string) => `/api/t/${encodeURIComponent(tenant)}`
 const v = (tenant: string, vid: string) => `${t(tenant)}/vehicles/${encodeURIComponent(vid)}`
@@ -26,10 +28,11 @@ const v = (tenant: string, vid: string) => `${t(tenant)}/vehicles/${encodeURICom
 export const CHANGES_PAGE = 5000
 
 export const endpoints = {
-  me: () => api.get<Me>('/api/me'),
-  changes: (tenant: string, since: number, limit = CHANGES_PAGE) => api.get<Changes>(`${t(tenant)}/changes`, { since, limit }),
+  me: (signal?: AbortSignal) => api.get<Me>('/api/me', undefined, signal),
+  changes: (tenant: string, since: number, limit = CHANGES_PAGE, signal?: AbortSignal) =>
+    api.get<Changes>(`${t(tenant)}/changes`, { since, limit }, signal),
   sync: (tenant: string, ops: SyncOp[]) => api.post<SyncResponse>(`${t(tenant)}/sync`, { ops }),
-  stats: (tenant: string, vid: string) => api.get<Stats>(`${v(tenant, vid)}/stats`),
+  stats: (tenant: string, vid: string, signal?: AbortSignal) => api.get<Stats>(`${v(tenant, vid)}/stats`, undefined, signal),
   tripCheck: (tenant: string, vid: string, month: string) => api.get<TripCheck>(`${v(tenant, vid)}/trips/check`, { month }),
   closeMonth: (tenant: string, vid: string, month: string, force: boolean, reason: string | null) =>
     api.post<CloseResult>(`${v(tenant, vid)}/periods/${encodeURIComponent(month)}/close`, { force, reason }),
@@ -43,7 +46,8 @@ export const endpoints = {
     api.get<Revision[]>(`${t(tenant)}/history/${encodeURIComponent(entity)}/${encodeURIComponent(id)}`),
   verify: (tenant: string, full: boolean) => api.get<AuditResult>(`${t(tenant)}/audit/verify`, full ? { full: 1 } : {}),
   anchors: (tenant: string) => api.get<AnchorList>(`${t(tenant)}/audit/anchors`),
-  attachmentBlob: (tenant: string, id: string): Promise<BlobResult> => api.blob(`${t(tenant)}/attachments/${encodeURIComponent(id)}/blob`),
+  attachmentBlob: (tenant: string, id: string, signal?: AbortSignal): Promise<BlobResult> =>
+    api.blob(`${t(tenant)}/attachments/${encodeURIComponent(id)}/blob`, undefined, signal),
   activity: (tenant: string, limit: number, beforeSeq?: number | null) =>
     api.get<ActivityPage>(`${t(tenant)}/activity`, { limit, before_seq: beforeSeq ?? undefined }),
   members: (tenant: string) => api.get<MemberList>(`${t(tenant)}/members`),

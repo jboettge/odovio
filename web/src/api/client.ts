@@ -1,4 +1,7 @@
 // HTTP-Client mit Bearer-Token, 401 → einmal erneuern + wiederholen, verständlichen Fehlermeldungen.
+// Lastschutz: höchstens 4 parallele Anfragen (Warteschlange), gleichzeitige identische GETs werden zusammengelegt,
+// GETs sind abbrechbar (Routenwechsel, Mandantenwechsel) und werden bei 502/503/504 höchstens zweimal mit
+// exponentiellem Backoff + Jitter wiederholt. 429 wird nie automatisch wiederholt (Retry-After wird angezeigt).
 
 export interface TokenProvider {
   /** Aktuelles Access-Token (oder null, wenn nicht angemeldet). */
@@ -106,6 +109,104 @@ export interface RequestOptions {
   signal?: AbortSignal
 }
 
+export interface ClientOptions {
+  /** Höchstzahl gleichzeitiger Anfragen (Standard 4). */
+  maxConcurrent?: number
+  /** Wiederholungen für GET bei 502/503/504 (Standard 2). */
+  retries?: number
+  /** Basis-Wartezeit für den Backoff in ms (Standard 500): base · 2^Versuch + Jitter. */
+  retryBaseMs?: number
+  /** Längstes Retry-After (s), das noch automatisch abgewartet wird (Standard 10). */
+  maxRetryAfterS?: number
+  /** Standard-Abbruchsignal für GETs ohne eigenes Signal (z. B. aktuelle Route). */
+  defaultSignal?: () => AbortSignal | undefined
+  sleep?: (ms: number, signal?: AbortSignal) => Promise<void>
+  random?: () => number
+}
+
+export const RETRY_STATUS: ReadonlySet<number> = new Set([502, 503, 504])
+
+export function abortError(): DOMException {
+  return new DOMException('Abgebrochen', 'AbortError')
+}
+
+export function isAbort(e: unknown): boolean {
+  return (e instanceof DOMException || e instanceof Error) && e.name === 'AbortError'
+}
+
+function defaultSleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) return reject(abortError())
+    const t = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort)
+      resolve()
+    }, ms)
+    const onAbort = () => {
+      clearTimeout(t)
+      reject(abortError())
+    }
+    signal?.addEventListener('abort', onAbort, { once: true })
+  })
+}
+
+/** Warteschlange mit fester Anzahl Plätze; wartende Aufträge sind abbrechbar. */
+export class Limiter {
+  private active = 0
+  private readonly queue: (() => void)[] = []
+
+  constructor(readonly max: number) {}
+
+  get running(): number {
+    return this.active
+  }
+
+  get waiting(): number {
+    return this.queue.length
+  }
+
+  private acquire(signal?: AbortSignal): Promise<void> {
+    if (signal?.aborted) return Promise.reject(abortError())
+    if (this.active < this.max) {
+      this.active++
+      return Promise.resolve()
+    }
+    return new Promise((resolve, reject) => {
+      const entry = () => {
+        signal?.removeEventListener('abort', onAbort)
+        this.active++
+        resolve()
+      }
+      const onAbort = () => {
+        const i = this.queue.indexOf(entry)
+        if (i >= 0) this.queue.splice(i, 1)
+        reject(abortError())
+      }
+      this.queue.push(entry)
+      signal?.addEventListener('abort', onAbort, { once: true })
+    })
+  }
+
+  private release(): void {
+    this.active--
+    this.queue.shift()?.()
+  }
+
+  async run<T>(fn: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+    await this.acquire(signal)
+    try {
+      return await fn()
+    } finally {
+      this.release()
+    }
+  }
+}
+
+interface Shared {
+  promise: Promise<unknown>
+  ctrl: AbortController
+  waiters: number
+}
+
 export interface BlobResult {
   blob: Blob
   filename: string | null
@@ -152,13 +253,32 @@ export function buildUrl(base: string, path: string, query?: Query): string {
 export class ApiClient {
   private readonly fetchImpl: typeof fetch
   private refreshing: Promise<string | null> | null = null
+  private readonly limiter: Limiter
+  private readonly shared = new Map<string, Shared>()
+  private readonly opts: Required<Omit<ClientOptions, 'defaultSignal'>> & Pick<ClientOptions, 'defaultSignal'>
 
   constructor(
     private readonly tokens: TokenProvider,
     private readonly baseUrl = '',
     fetchImpl?: typeof fetch,
+    options: ClientOptions = {},
   ) {
     this.fetchImpl = fetchImpl ?? ((...a) => fetch(...a))
+    this.opts = {
+      maxConcurrent: 4,
+      retries: 2,
+      retryBaseMs: 500,
+      maxRetryAfterS: 10,
+      sleep: defaultSleep,
+      random: Math.random,
+      ...options,
+    }
+    this.limiter = new Limiter(this.opts.maxConcurrent)
+  }
+
+  /** Laufende und wartende Anfragen (für Tests/Diagnose). */
+  get load(): { running: number; waiting: number; shared: number } {
+    return { running: this.limiter.running, waiting: this.limiter.waiting, shared: this.shared.size }
   }
 
   private async refreshOnce(): Promise<string | null> {
@@ -169,7 +289,7 @@ export class ApiClient {
     return this.refreshing
   }
 
-  private async send(method: string, url: string, token: string | null, opts: RequestOptions): Promise<Response> {
+  private async send(method: string, url: string, token: string | null, opts: RequestOptions, signal?: AbortSignal): Promise<Response> {
     const headers: Record<string, string> = { Accept: opts.blob ? '*/*' : 'application/json' }
     if (token) headers.Authorization = `Bearer ${token}`
     let body: string | undefined
@@ -178,15 +298,89 @@ export class ApiClient {
       body = JSON.stringify(opts.body)
     }
     try {
-      return await this.fetchImpl(url, { method, headers, body, signal: opts.signal, credentials: 'omit', cache: 'no-store' })
+      return await this.fetchImpl(url, { method, headers, body, signal, credentials: 'omit', cache: 'no-store' })
     } catch (e) {
-      if (e instanceof DOMException && e.name === 'AbortError') throw e
+      if (isAbort(e) || signal?.aborted) throw abortError()
       throw new ApiError(0, errorMessage(0, null, null))
     }
   }
 
   async request<T>(method: string, path: string, opts: RequestOptions = {}): Promise<T> {
-    const res = await this.raw(method, path, opts)
+    const url = buildUrl(this.baseUrl, path, opts.query)
+    const signal = opts.signal ?? (method === 'GET' ? this.opts.defaultSignal?.() : undefined)
+    if (method !== 'GET') return this.execute<T>(method, url, opts, signal)
+    // gleichzeitige identische GETs zusammenlegen
+    const key = `${opts.blob ? 'blob' : 'json'} ${url}`
+    return this.dedupe<T>(key, (s) => this.execute<T>(method, url, opts, s), signal)
+  }
+
+  private dedupe<T>(key: string, run: (signal: AbortSignal) => Promise<T>, callerSignal?: AbortSignal): Promise<T> {
+    if (callerSignal?.aborted) return Promise.reject(abortError())
+    let entry = this.shared.get(key)
+    if (!entry) {
+      const ctrl = new AbortController()
+      const created: Shared = { promise: Promise.resolve(), ctrl, waiters: 0 }
+      created.promise = run(ctrl.signal).finally(() => {
+        if (this.shared.get(key) === created) this.shared.delete(key)
+      })
+      created.promise.catch(() => undefined) // Ablehnung wird an die Wartenden weitergegeben
+      this.shared.set(key, created)
+      entry = created
+    }
+    const e = entry
+    e.waiters++
+    return new Promise<T>((resolve, reject) => {
+      let done = false
+      const finish = (): boolean => {
+        if (done) return false
+        done = true
+        e.waiters--
+        callerSignal?.removeEventListener('abort', onAbort)
+        return true
+      }
+      const onAbort = () => {
+        if (!finish()) return
+        reject(abortError())
+        // niemand wartet mehr: Anfrage wirklich abbrechen
+        if (e.waiters === 0) {
+          e.ctrl.abort()
+          if (this.shared.get(key) === e) this.shared.delete(key)
+        }
+      }
+      callerSignal?.addEventListener('abort', onAbort, { once: true })
+      e.promise.then(
+        (v) => {
+          if (finish()) resolve(v as T)
+        },
+        (err: unknown) => {
+          if (finish()) reject(err)
+        },
+      )
+    })
+  }
+
+  /** Mit Platz in der Warteschlange ausführen; GET bei 502/503/504 begrenzt wiederholen. */
+  private async execute<T>(method: string, url: string, opts: RequestOptions, signal?: AbortSignal): Promise<T> {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await this.limiter.run(() => this.once<T>(method, url, opts, signal), signal)
+      } catch (e) {
+        if (!(method === 'GET' && e instanceof ApiError && RETRY_STATUS.has(e.status)) || attempt >= this.opts.retries || signal?.aborted) throw e
+        if (e.retryAfter !== null && e.retryAfter > this.opts.maxRetryAfterS) throw e
+        await this.opts.sleep(this.retryDelay(attempt, e.retryAfter), signal)
+      }
+    }
+  }
+
+  /** Backoff: base · 2^Versuch + Jitter (0…base), mindestens Retry-After. */
+  retryDelay(attempt: number, retryAfter: number | null): number {
+    const base = this.opts.retryBaseMs
+    const backoff = base * 2 ** attempt + Math.floor(this.opts.random() * base)
+    return Math.max(backoff, (retryAfter ?? 0) * 1000)
+  }
+
+  private async once<T>(method: string, url: string, opts: RequestOptions, signal?: AbortSignal): Promise<T> {
+    const res = await this.fetchChecked(method, url, opts, signal)
     if (opts.blob) {
       return {
         blob: await res.blob(),
@@ -199,14 +393,12 @@ export class ApiClient {
     return (text ? JSON.parse(text) : undefined) as T
   }
 
-  /** Anfrage mit Fehlerbehandlung; liefert die erfolgreiche Response. */
-  async raw(method: string, path: string, opts: RequestOptions = {}): Promise<Response> {
-    const url = buildUrl(this.baseUrl, path, opts.query)
+  private async fetchChecked(method: string, url: string, opts: RequestOptions, signal?: AbortSignal): Promise<Response> {
     let token = await this.tokens.getToken()
-    let res = await this.send(method, url, token, opts)
+    let res = await this.send(method, url, token, opts, signal)
     if (res.status === 401) {
       token = await this.refreshOnce()
-      if (token) res = await this.send(method, url, token, opts)
+      if (token) res = await this.send(method, url, token, opts, signal)
       if (res.status === 401) {
         this.tokens.onUnauthorized()
         throw new ApiError(401, errorMessage(401, null, null))
@@ -227,6 +419,11 @@ export class ApiClient {
     return res
   }
 
+  /** Anfrage mit Fehlerbehandlung (ohne Warteschlange/Wiederholung); liefert die erfolgreiche Response. */
+  async raw(method: string, path: string, opts: RequestOptions = {}): Promise<Response> {
+    return this.fetchChecked(method, buildUrl(this.baseUrl, path, opts.query), opts, opts.signal)
+  }
+
   get<T>(path: string, query?: Query, signal?: AbortSignal): Promise<T> {
     return this.request<T>('GET', path, { query, signal })
   }
@@ -243,7 +440,7 @@ export class ApiClient {
     return this.request<T>('DELETE', path)
   }
 
-  blob(path: string, query?: Query): Promise<BlobResult> {
-    return this.request<BlobResult>('GET', path, { query, blob: true })
+  blob(path: string, query?: Query, signal?: AbortSignal): Promise<BlobResult> {
+    return this.request<BlobResult>('GET', path, { query, blob: true, signal })
   }
 }

@@ -8,11 +8,13 @@ import HistoryPanel from '../../components/HistoryPanel.vue'
 import ConfirmDialog from '../../components/ConfirmDialog.vue'
 import EditorModal from './EditorModal.vue'
 import RowActions from './RowActions.vue'
+import Pager from '../../components/Pager.vue'
+import { usePager } from '../../use/pager'
 import { numOrNull, strOrNull, useEditor, useHistory, useStorno } from '../../composables'
 import { active, all, byId } from '../../store/data'
 import { role, session } from '../../store/session'
 import { canWrite } from '../../lib/roles'
-import { num } from '../../lib/format'
+import { num, byText } from '../../lib/format'
 import { CATEGORIES, CATEGORY_LABELS, PLACE_KIND_LABELS } from '../../lib/labels'
 import { placeCoordinateText } from '../../lib/privacy'
 import type { PlaceKind } from '../../api/types'
@@ -23,9 +25,11 @@ const ORDER: PlaceKind[] = ['home', 'work', 'customer', 'other']
 const rows = computed(() =>
   all('place')
     .filter((p) => showDeleted.value || !p.deleted)
-    .sort((a, b) => ORDER.indexOf(a.kind) - ORDER.indexOf(b.kind) || a.name.localeCompare(b.name, 'de-CH')),
+    .sort((a, b) => ORDER.indexOf(a.kind) - ORDER.indexOf(b.kind) || byText(a.name, b.name)),
 )
 const customers = computed(() => active('customer'))
+// Seitenaufteilung (50/100/200) – auch bei tausenden Einträgen kleines DOM
+const pager = usePager(rows, { resetOn: [showDeleted] })
 const ed = useEditor('place', () => ({ name: '', kind: 'other', lat: null, lon: null, radius_m: 150, customer_id: null, default_category: null, private: false }))
 const history = useHistory()
 const storno = useStorno()
@@ -60,7 +64,7 @@ function save() {
       <table class="table">
         <thead><tr><th scope="col">Name</th><th scope="col">Art</th><th scope="col">Kunde</th><th scope="col">Standardkategorie</th><th scope="col" class="num">Radius</th><th scope="col">Koordinaten</th><th scope="col"><span class="sr-only">Aktionen</span></th></tr></thead>
         <tbody>
-          <tr v-for="p in rows" :key="p.id" :class="{ 'is-deleted': p.deleted }">
+          <tr v-for="p in pager.items" :key="p.id" :class="{ 'is-deleted': p.deleted }">
             <td class="strike-cell"><strong>{{ p.name }}</strong> <span v-if="p.private" class="badge badge-outline"><Icon name="eyeOff" size="sm" />vertraulich</span><span v-if="p.deleted" class="badge badge-danger">storniert</span></td>
             <td>{{ PLACE_KIND_LABELS[p.kind] }}</td>
             <td>{{ byId('customer', p.customer_id)?.name ?? '–' }}</td>
@@ -72,6 +76,7 @@ function save() {
         </tbody>
       </table>
     </div>
+    <Pager v-model:page="pager.page" v-model:size="pager.size" :total="pager.total" label="Seiten der Orte" />
   </section>
 
   <EditorModal :open="ed.state.open" :title="ed.state.id ? 'Ort bearbeiten' : 'Ort erfassen'" :busy="ed.state.busy" :error="ed.state.error" @close="ed.close" @save="save">

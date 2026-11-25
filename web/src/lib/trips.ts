@@ -2,13 +2,13 @@
 import type { FuelEntry, Maintenance, Trip, TripGap, TripPeriod } from '../api/types'
 import { monthOf } from './format'
 
-export function tripKm(t: Trip): number {
+export function tripKm(t: Pick<Trip, 'km_start' | 'km_end' | 'distance_route' | 'distance_gps'>): number {
   if (t.km_start !== null && t.km_end !== null) return t.km_end - t.km_start
   if (t.distance_route !== null) return t.distance_route
   return t.distance_gps ?? 0
 }
 
-export function needsReview(t: Trip): boolean {
+export function needsReview(t: Pick<Trip, 'status' | 'category'>): boolean {
   return !(t.status === 'confirmed' || t.status === 'locked') || t.category === 'unknown'
 }
 

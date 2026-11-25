@@ -3,7 +3,11 @@
 // (Pfeiltasten) und Datentabelle. Reines SVG, keine Inline-Styles.
 import { computed, ref } from 'vue'
 import { niceTicks, scale } from '../lib/chart'
+import { downsample } from '../lib/downsample'
+import { num } from '../lib/format'
 import { useWidth } from './useWidth'
+import Pager from './Pager.vue'
+import { usePager } from '../use/pager'
 
 export interface LinePoint {
   label: string
@@ -30,24 +34,41 @@ const width = useWidth(wrap)
 const active = ref<number | null>(null)
 const M = { top: 16, right: 64, bottom: 30, left: 52 }
 
+/** gezeichnete Punkte: bei langen Reihen ausgedünnt (≈ 1 Punkt je 4 px), Datentabelle zeigt alle Werte */
+const shown = computed(() => {
+  const w = Math.max(280, width.value)
+  return downsample(props.points, Math.max(40, Math.floor((w - M.left - M.right) / 4)), (p) => p.value)
+})
+const thinned = computed(() => shown.value.length < props.points.length)
+const tableOpen = ref(false)
+const pager = usePager(() => props.points)
+const hasDetail = computed(() => props.points.some((p) => p.detail))
+
 const geo = computed(() => {
   const w = Math.max(280, width.value)
   const h = props.height
-  const vals = props.points.map((p) => p.value)
+  const points = shown.value
+  const vals = points.map((p) => p.value)
   if (props.refValue !== null && props.refValue !== undefined) vals.push(props.refValue)
-  const ticks = niceTicks(Math.min(...vals), Math.max(...vals), 5)
+  let lo = Infinity
+  let hi = -Infinity
+  for (const v of vals) {
+    if (v < lo) lo = v
+    if (v > hi) hi = v
+  }
+  const ticks = niceTicks(lo, hi, 5)
   const y = scale(ticks[0]!, ticks[ticks.length - 1]!, h - M.bottom, M.top)
-  const n = props.points.length
+  const n = points.length
   const x = (i: number) => (n <= 1 ? (M.left + w - M.right) / 2 : M.left + (i * (w - M.left - M.right)) / (n - 1))
-  const pts = props.points.map((p, i) => ({ ...p, cx: x(i), cy: y(p.value) }))
+  const pts = points.map((p, i) => ({ ...p, cx: x(i), cy: y(p.value) }))
   const path = pts.map((p, i) => `${i ? 'L' : 'M'}${p.cx.toFixed(1)},${p.cy.toFixed(1)}`).join(' ')
   const step = Math.max(1, Math.ceil(n / Math.max(2, Math.floor((w - M.left - M.right) / 90))))
   const xLabels = pts.filter((_, i) => i % step === 0 || i === n - 1)
   const slot = n > 1 ? (w - M.left - M.right) / (n - 1) : w - M.left - M.right
   const tickStep = ticks.length > 1 ? Math.abs(ticks[1]! - ticks[0]!) : 1
   const decimals = Math.max(0, Math.min(3, -Math.floor(Math.log10(tickStep))))
-  const tickFmt = new Intl.NumberFormat('de-CH', { minimumFractionDigits: decimals, maximumFractionDigits: decimals })
-  const tickLabel = (v: number) => `${tickFmt.format(v)}${props.unit ? ` ${props.unit}` : ''}`
+  // Formatierer aus dem Cache (lib/format), nicht je Neuberechnung neu instanziieren
+  const tickLabel = (v: number) => `${num(v, decimals)}${props.unit ? ` ${props.unit}` : ''}`
   return { w, h, ticks, y, pts, path, xLabels, slot, tickLabel }
 })
 
@@ -70,7 +91,7 @@ const tip = computed(() => {
 const liveText = computed(() => (tip.value ? tip.value.lines.join(', ') : ''))
 
 function onKey(e: KeyboardEvent) {
-  const n = props.points.length
+  const n = shown.value.length
   if (!n) return
   if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') {
     e.preventDefault()
@@ -131,14 +152,18 @@ function onKey(e: KeyboardEvent) {
       <span><span class="legend-swatch s1"></span>{{ seriesLabel }}</span>
       <span v-if="refValue !== null && refValue !== undefined"><span class="legend-swatch ref"></span>{{ refLabel }} {{ format(refValue) }}</span>
     </div>
-    <details class="data-table">
+    <p v-if="thinned" class="muted small data-table-note">{{ num(points.length) }} Werte, für die Darstellung auf {{ num(shown.length) }} Punkte verdichtet.</p>
+    <details class="data-table" @toggle="tableOpen = ($event.target as HTMLDetailsElement).open">
       <summary>Daten als Tabelle</summary>
-      <table class="table mt-1">
-        <thead><tr><th scope="col">Datum</th><th scope="col" class="num">{{ seriesLabel }}</th><th v-if="points.some((p) => p.detail)" scope="col">Details</th></tr></thead>
-        <tbody>
-          <tr v-for="(p, i) in points" :key="i"><td>{{ p.label }}</td><td class="num">{{ format(p.value) }}</td><td v-if="points.some((q) => q.detail)">{{ p.detail }}</td></tr>
-        </tbody>
-      </table>
+      <template v-if="tableOpen">
+        <table class="table mt-1">
+          <thead><tr><th scope="col">Datum</th><th scope="col" class="num">{{ seriesLabel }}</th><th v-if="hasDetail" scope="col">Details</th></tr></thead>
+          <tbody>
+            <tr v-for="(p, i) in pager.items" :key="i"><td>{{ p.label }}</td><td class="num">{{ format(p.value) }}</td><td v-if="hasDetail">{{ p.detail }}</td></tr>
+          </tbody>
+        </table>
+        <Pager v-model:page="pager.page" v-model:size="pager.size" :total="pager.total" label="Seiten der Datentabelle" />
+      </template>
     </details>
   </div>
 </template>

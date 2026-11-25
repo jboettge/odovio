@@ -15,6 +15,16 @@ function nf(min: number, max: number): Intl.NumberFormat {
   return f
 }
 
+const collator = new Intl.Collator(LOCALE)
+/** Alphabetisch (de-CH), mit einmal instanziiertem Collator (statt localeCompare je Vergleich). */
+export function byText(a: string, b: string): number {
+  return collator.compare(a, b)
+}
+/** Schneller Vergleich nach Codepunkten (ISO-Daten, IDs). */
+export function byCode(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0
+}
+
 export function isNum(v: unknown): v is number {
   return typeof v === 'number' && Number.isFinite(v)
 }

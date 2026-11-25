@@ -55,7 +55,7 @@ export default [
     },
   },
   {
-    files: ['mock/**/*.mjs', 'tests/**/*.{ts,mjs}', '*.config.{js,ts}'],
+    files: ['mock/**/*.mjs', 'scripts/**/*.{mjs,d.mts}', 'tests/**/*.{ts,mjs}', '*.config.{js,ts}'],
     languageOptions: { globals: { ...globals.node } },
     rules: {
       // Entwicklungs-/Testwerkzeuge (nicht ausgeliefert): Pfade und Muster stammen aus eigenem Code

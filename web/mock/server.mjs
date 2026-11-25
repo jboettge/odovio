@@ -1,13 +1,15 @@
 #!/usr/bin/env node
 // Mock-Server für Entwicklung und E2E-Tests: OIDC-Issuer (Code + PKCE), Fahrzeugbuch-API, statische SPA mit CSP.
-//   node mock/server.mjs [--port 8787] [--static dist]
+//   node mock/server.mjs [--port 8787] [--static dist] [--seed large]
 // Teststeuerung: POST /__mock/reset, POST /__mock/config {members501, rate429, tokenTtl}, POST /__mock/expire-tokens
+// --seed large: Lasttest-Bestand (Mandant «privat»: 3 Fahrzeuge × 30k Fahrten, 5k Tankvorgänge, > 90k Journal-Einträge).
+// --static: liefert vorkomprimierte Varianten (<datei>.br/.gz aus scripts/compress.mjs) bei passendem Accept-Encoding.
 import { createServer } from 'node:http'
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
-import { readFile, stat } from 'node:fs/promises'
+import { access, readFile, stat } from 'node:fs/promises'
 import { extname, join, normalize, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { buildDemo, ENTITY_KEYS, USERS, isoDate, monthOf } from './data.mjs'
+import { buildDemo, buildLarge, ENTITY_KEYS, USERS, isoDate, monthOf } from './data.mjs'
 
 const here = fileURLToPath(new URL('.', import.meta.url))
 const args = process.argv.slice(2)
@@ -18,19 +20,24 @@ const opt = (name, def) => {
 const PORT = Number(opt('port', process.env.PORT ?? 8787))
 const STATIC = opt('static', null)
 const STATIC_DIR = STATIC ? resolve(process.cwd(), STATIC) : null
+const SEED = opt('seed', process.env.MOCK_SEED ?? 'demo')
+if (!['demo', 'large'].includes(SEED)) throw new Error(`--seed ${SEED}: erwartet demo oder large`)
+const build = () => (SEED === 'large' ? buildLarge() : buildDemo())
 const REALM = '/oidc/realms/demo'
 const WEB_CLIENT = 'fahrzeugbuch-web'
 const APP_CLIENT = 'fahrzeugbuch-ios'
 
 // ---------- Zustand ----------
-let tenants = buildDemo()
-let cfg = { members501: false, rate429: null, tokenTtl: Number(process.env.MOCK_TOKEN_TTL ?? 300), pageMax: Number(process.env.MOCK_PAGE_MAX ?? 400) }
+let tenants = build()
+// Seitengrösse /changes: Demo klein (Paging wird getestet), grosser Bestand wie der Server (CHANGES_MAX 5000)
+let cfg = { members501: false, rate429: null, tokenTtl: Number(process.env.MOCK_TOKEN_TTL ?? 300), pageMax: Number(process.env.MOCK_PAGE_MAX ?? (SEED === 'large' ? 5000 : 400)) }
 const codes = new Map() // code -> {user, client_id, challenge, redirect_uri, nonce}
 const tokens = new Map() // access -> {user, azp, exp}
 const refreshTokens = new Map() // refresh -> {user, azp}
 
 function reset() {
-  tenants = buildDemo()
+  // grosser Bestand: nur Steuerung zurücksetzen (Neuaufbau dauert Sekunden; Perf-Tests schreiben nicht)
+  if (SEED !== 'large') tenants = build()
   cfg = { ...cfg, members501: false, rate429: null }
   for (const u of Object.values(USERS)) u.tenants = { ...ORIGINAL_TENANTS[u.username] }
 }
@@ -175,7 +182,7 @@ function out(entity, row, role) {
 
 const tripKm = (t) => (t.km_start !== null && t.km_end !== null ? t.km_end - t.km_start : (t.distance_route ?? t.distance_gps ?? 0))
 const needsReview = (t) => !['confirmed', 'locked'].includes(t.status) || t.category === 'unknown'
-const sortTrips = (a) => [...a].sort((x, y) => new Date(x.start_at) - new Date(y.start_at))
+const sortTrips = (a) => a.map((x) => [Date.parse(x.start_at), x]).sort((x, y) => x[0] - y[0]).map((x) => x[1])
 const currentMonth = () => monthOf(new Date().toISOString())
 const closedPeriod = (t, vid, month) => t.list('trip_period').find((p) => p.vehicle_id === vid && p.month === month && !p.deleted && p.status === 'closed')
 
@@ -190,8 +197,8 @@ function maintenanceCost(t, m) {
 
 function stats(t, v) {
   const d = vehicleData(t, v.id)
-  const kms = [v.initial_km, ...d.fuel.map((f) => f.km), ...d.odometer.map((o) => o.km), ...d.maintenance.filter((m) => m.km !== null).map((m) => m.km), ...d.trips.map((x) => x.km_end ?? 0)]
-  const current = Math.max(...kms)
+  let current = v.initial_km
+  for (const k of [...d.fuel.map((f) => f.km), ...d.odometer.map((o) => o.km), ...d.maintenance.filter((m) => m.km !== null).map((m) => m.km), ...d.trips.map((x) => x.km_end ?? 0)]) if (k > current) current = k
   const fuel = [...d.fuel].sort((a, b) => a.km - b.km)
   const points = []
   let last = null
@@ -457,9 +464,7 @@ async function api(req, res, url) {
     if (rateLimited('changes')) return
     const since = Number(q.get('since') ?? 0)
     const limit = Math.min(Number(q.get('limit') ?? 2000), 5000, cfg.pageMax)
-    const rows = []
-    for (const [entity] of Object.entries(ENTITY_KEYS)) for (const r of t.list(entity)) if (r.last_seq > since) rows.push([r.last_seq, entity, r])
-    rows.sort((a, b) => a[0] - b[0])
+    const rows = t.changesSince(since, limit)
     const hasMore = rows.length > limit
     const page = rows.slice(0, limit)
     const body = { cursor: hasMore ? page.at(-1)[0] : t.seq, has_more: hasMore, ...Object.fromEntries(Object.values(ENTITY_KEYS).map((k) => [k, []])) }
@@ -549,7 +554,7 @@ async function api(req, res, url) {
   if (route === 'activity') {
     const limit = Math.min(Number(q.get('limit') ?? 50), 200)
     const before = q.get('before_seq') ? Number(q.get('before_seq')) : Infinity
-    const revs = t.revisions.filter((r) => r.seq < before).slice(-limit).reverse()
+    const revs = t.revisionsBefore(before, limit)
     const items = revs.map((r) => ({ seq: r.seq, at: r.recorded_at, actor_name: r.actor_name, action: r.action, entity: r.entity, entity_id: r.entity_id, vehicle_id: vehicleOf(t, r), summary: summary(t, r, role) }))
     const oldest = revs.at(-1)?.seq
     return json(res, 200, { items, next_before_seq: oldest && oldest > 1 ? oldest : null })
@@ -609,10 +614,25 @@ function securityHeaders(origin) {
     'Permissions-Policy': 'camera=(), microphone=(), geolocation=()',
   }
 }
+/** Akzeptierte Kodierung (q > 0) laut Accept-Encoding. */
+function acceptsEncoding(header, enc) {
+  for (const part of String(header ?? '').split(',')) {
+    const [name, ...params] = part.trim().split(';')
+    if (name.trim().toLowerCase() !== enc && name.trim() !== '*') continue
+    const q = params.map((p) => p.trim()).find((p) => p.startsWith('q='))
+    return !q || Number(q.slice(2)) > 0
+  }
+  return false
+}
+const COMPRESSIBLE = new Set(['.html', '.js', '.mjs', '.css', '.svg', '.json', '.txt', '.xml', '.webmanifest'])
+const exists = (p) => access(p).then(() => true, () => false)
+
 async function serveStatic(req, res, url) {
   const rel = normalize(decodeURIComponent(url.pathname)).replace(/^([/\\])+/, '')
   let file = join(STATIC_DIR, rel)
   if (!file.startsWith(STATIC_DIR)) return send(res, 403, 'Verboten')
+  // vorkomprimierte Varianten nur über Accept-Encoding, nicht direkt (wie der Server)
+  if (/\.(br|gz)$/.test(rel)) return send(res, 404, 'Nicht gefunden')
   let s = await stat(file).catch(() => null)
   if (!s || s.isDirectory()) {
     // SPA-Fallback (Dateien mit Endung → 404)
@@ -621,9 +641,23 @@ async function serveStatic(req, res, url) {
     s = await stat(file).catch(() => null)
     if (!s) return send(res, 404, 'dist fehlt – zuerst npm run build')
   }
-  const body = await readFile(file)
   const immutable = file.includes(`${join(STATIC_DIR, 'assets')}`)
-  return send(res, 200, body, { 'Content-Type': TYPES[extname(file)] ?? 'application/octet-stream', 'Cache-Control': immutable ? 'public, max-age=31536000, immutable' : 'no-cache', ...securityHeaders(originOf(req)) })
+  const headers = { 'Content-Type': TYPES[extname(file)] ?? 'application/octet-stream', 'Cache-Control': immutable ? 'public, max-age=31536000, immutable' : 'no-cache', ...securityHeaders(originOf(req)) }
+  // vorkomprimierte Variante (wie der Produktionsserver): br vor gzip, sonst unkomprimiert
+  let body = null
+  if (COMPRESSIBLE.has(extname(file))) {
+    headers.Vary = 'Accept-Encoding'
+    const ae = req.headers['accept-encoding']
+    for (const [enc, suffix] of [['br', '.br'], ['gzip', '.gz']]) {
+      if (acceptsEncoding(ae, enc) && (await exists(`${file}${suffix}`))) {
+        body = await readFile(`${file}${suffix}`)
+        headers['Content-Encoding'] = enc
+        break
+      }
+    }
+  }
+  body ??= await readFile(file)
+  return send(res, 200, body, headers)
 }
 
 // ---------- Server ----------
@@ -658,5 +692,5 @@ const server = createServer(async (req, res) => {
 })
 
 server.listen(PORT, '127.0.0.1', () => {
-  console.log(`Mock-Server: http://127.0.0.1:${PORT}${STATIC_DIR ? ` (SPA aus ${STATIC_DIR})` : ''}`)
+  console.log(`Mock-Server: http://127.0.0.1:${PORT}${STATIC_DIR ? ` (SPA aus ${STATIC_DIR})` : ''}${SEED === 'large' ? ' – grosser Datenbestand' : ''}`)
 })

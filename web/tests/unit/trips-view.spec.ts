@@ -15,6 +15,7 @@ const changes = {
 }
 
 vi.mock('../../src/api/endpoints', () => ({
+  CHANGES_PAGE: 5000,
   endpoints: { changes: vi.fn(async () => ({ ...emptyChanges(), ...changes })), me: vi.fn() },
 }))
 function emptyChanges() {

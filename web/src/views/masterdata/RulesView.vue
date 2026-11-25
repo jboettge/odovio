@@ -7,6 +7,8 @@ import HistoryPanel from '../../components/HistoryPanel.vue'
 import ConfirmDialog from '../../components/ConfirmDialog.vue'
 import EditorModal from './EditorModal.vue'
 import RowActions from './RowActions.vue'
+import Pager from '../../components/Pager.vue'
+import { usePager } from '../../use/pager'
 import { numOrNull, strOrNull, useEditor, useHistory, useStorno } from '../../composables'
 import { active, all, byId } from '../../store/data'
 import { role, session } from '../../store/session'
@@ -20,6 +22,8 @@ const rows = computed(() => all('purpose_rule').filter((r) => showDeleted.value 
 const places = computed(() => active('place'))
 const customers = computed(() => active('customer'))
 const vehicles = computed(() => active('vehicle'))
+// Seitenaufteilung (50/100/200) – auch bei tausenden Einträgen kleines DOM
+const pager = usePager(rows, { resetOn: [showDeleted] })
 const ed = useEditor('purpose_rule', () => ({
   priority: 100, from_place_id: null, to_place_id: null, weekdays: '1,2,3,4,5', time_from: null, time_to: null, vehicle_id: null,
   result_category: 'business', result_purpose: '', result_customer_id: null, auto_confirm: false, origin: 'user', active: true,
@@ -70,7 +74,7 @@ function save() {
       <table class="table">
         <thead><tr><th scope="col" class="num">Priorität</th><th scope="col">Wenn</th><th scope="col">Dann</th><th scope="col">Fahrzeug</th><th scope="col">Status</th><th scope="col"><span class="sr-only">Aktionen</span></th></tr></thead>
         <tbody>
-          <tr v-for="r in rows" :key="r.id" :class="{ 'is-deleted': r.deleted }">
+          <tr v-for="r in pager.items" :key="r.id" :class="{ 'is-deleted': r.deleted }">
             <td class="num">{{ r.priority }}</td>
             <td class="strike-cell">{{ describe(r) }}</td>
             <td><CategoryBadge :category="r.result_category" /> {{ r.result_purpose || '' }}<span v-if="r.result_customer_id" class="cell-sub">{{ byId('customer', r.result_customer_id)?.name }}</span></td>
@@ -87,6 +91,7 @@ function save() {
         </tbody>
       </table>
     </div>
+    <Pager v-model:page="pager.page" v-model:size="pager.size" :total="pager.total" label="Seiten der Regeln" />
   </section>
   <EditorModal :open="ed.state.open" :title="ed.state.id ? 'Regel bearbeiten' : 'Regel erfassen'" :busy="ed.state.busy" :error="ed.state.error" @close="ed.close" @save="save">
     <Field v-slot="f" label="Von Ort"><select :id="f.id" v-model="ed.state.form.from_place_id" class="select"><option :value="null">beliebig</option><option v-for="p in places" :key="p.id" :value="p.id">{{ p.name }}</option></select></Field>

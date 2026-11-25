@@ -11,8 +11,10 @@ export function isPrivateTrip(t: Pick<Trip, 'category' | 'private_mode'>): boole
 /** Felder, die der Server für die Leserolle entfernt. */
 const MASKED_FIELDS = ['start_label', 'end_label', 'start_place_id', 'end_place_id', 'purpose', 'customer_id', 'note'] as const
 
+type MaskFields = 'category' | 'private_mode' | (typeof MASKED_FIELDS)[number]
+
 /** Ist diese Fahrt maskiert geliefert worden (privat und alle Detailfelder leer)? */
-export function isMaskedTrip(t: Trip): boolean {
+export function isMaskedTrip(t: Pick<Trip, MaskFields>): boolean {
   return isPrivateTrip(t) && MASKED_FIELDS.every((f) => t[f] === null || t[f] === undefined)
 }
 
@@ -32,7 +34,7 @@ function placeName(id: string | null, label: string | null, lookup: PlaceLookup)
 }
 
 /** „Start → Ziel“ bzw. „Privatfahrt“ für maskierte/private Fahrten ohne Orte. */
-export function routeText(t: Trip, lookup: PlaceLookup): RouteText {
+export function routeText(t: Pick<Trip, MaskFields>, lookup: PlaceLookup): RouteText {
   const from = placeName(t.start_place_id, t.start_label, lookup)
   const to = placeName(t.end_place_id, t.end_label, lookup)
   if (!from && !to) {

@@ -8,7 +8,7 @@ import AlertBox from './components/AlertBox.vue'
 import { authState, logout } from './auth/oidc'
 import { watchIdle, type IdleWatch } from './auth/idle'
 import { currentTenant, displayName, role, selectTenant, session, tenants } from './store/session'
-import { active, dataState, load, reset } from './store/data'
+import { dataState, load, reset, vehiclesByName } from './store/data'
 import { visibleNav, type NavItem } from './lib/roles'
 import { ROLE_LABELS } from './lib/roles'
 
@@ -27,7 +27,7 @@ const adminNav: NavItem[] = [{ to: '/verwaltung/mitglieder', label: 'Mitglieder'
 
 const nav = computed(() => visibleNav(mainNav, role.value))
 const admin = computed(() => visibleNav(adminNav, role.value))
-const vehicles = computed(() => active('vehicle').sort((a, b) => a.name.localeCompare(b.name, 'de-CH')))
+const vehicles = computed(() => vehiclesByName())
 
 watch(
   () => session.tenant,
@@ -38,13 +38,20 @@ watch(
   { immediate: true },
 )
 
+/** Abmelden: laufende Ladevorgänge abbrechen und Fachdaten aus dem Speicher entfernen, dann Keycloak-Logout. */
+function signOut(reason?: 'idle') {
+  reset(null)
+  void logout(reason)
+}
+
 // Abmeldung nach Inaktivität
 let idle: IdleWatch | null = null
 watch(
   () => authState.user !== null,
   (loggedIn) => {
     idle?.stop()
-    idle = loggedIn ? watchIdle(() => void logout('idle')) : null
+    idle = loggedIn ? watchIdle(() => signOut('idle')) : null
+    if (!loggedIn) reset(null)
   },
   { immediate: true },
 )
@@ -83,7 +90,7 @@ function retry() {
       <RoleBadge v-if="role" :role="role" />
       <span class="topbar-spacer"></span>
       <RouterLink to="/konto" class="topbar-user"><Icon name="user" />{{ displayName }}</RouterLink>
-      <button type="button" class="btn btn-sm" @click="logout()"><Icon name="logout" size="sm" />Abmelden</button>
+      <button type="button" class="btn btn-sm" @click="signOut()"><Icon name="logout" size="sm" />Abmelden</button>
     </header>
     <nav class="sidenav" aria-label="Hauptnavigation">
       <ul>

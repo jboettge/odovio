@@ -28,11 +28,15 @@ jobs:
         run: npm run typecheck
       - name: Unit-Tests
         run: npm test
-      - name: Build
+      - name: Build (inkl. vorkomprimierter .br/.gz)
         run: npm run build
+      - name: Bundle-Budget (gzip), keine Source-Maps, Vorkomprimierung verlustfrei
+        run: npm run size
       - name: Abhängigkeiten auf Schwachstellen prüfen
         run: npm run audit
       - name: Playwright-Browser
         run: npx playwright install --with-deps chromium
       - name: E2E-Tests (Mock, Produktions-CSP)
-        run: npm run e2e
+        run: npx playwright test --trace off --project functional
+      - name: E2E-Performance (grosser Datenbestand, Budgets)
+        run: npm run e2e:perf

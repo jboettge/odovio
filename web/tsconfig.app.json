@@ -16,5 +16,6 @@
     "noEmit": true,
     "types": ["vite/client"]
   },
-  "include": ["src/**/*.ts", "src/**/*.vue", "src/env.d.ts", "tests/unit/**/*.ts"]
+  "include": ["src/**/*.ts", "src/**/*.vue", "src/env.d.ts", "tests/unit/**/*.ts"],
+  "exclude": ["tests/unit/build-scripts.spec.ts"]
 }

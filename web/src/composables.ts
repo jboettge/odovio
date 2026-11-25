@@ -2,7 +2,7 @@
 import { computed, reactive, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import type { EntityMap, EntityName, FuelEntry, Maintenance, OdometerReading, Trip } from './api/types'
-import { active, all, byId, sync, SyncRejected } from './store/data'
+import { all, byId, ofVehicle, sync, SyncRejected } from './store/data'
 import { role, session } from './store/session'
 import { notify, errorText } from './store/toasts'
 import { canWrite } from './lib/roles'
@@ -14,8 +14,8 @@ export function useVehicle() {
   const route = useRoute()
   const vid = computed(() => String(route.params.vid ?? ''))
   const vehicle = computed(() => byId('vehicle', vid.value))
-  const of = <E extends 'trip' | 'fuel' | 'odometer' | 'maintenance'>(e: E) =>
-    computed(() => all(e).filter((r) => (r as { vehicle_id: string }).vehicle_id === vid.value) as EntityMap[E][])
+  // aus dem Fahrzeug-Index (kein Filtern über alle Datensätze des Mandanten)
+  const of = <E extends 'trip' | 'fuel' | 'odometer' | 'maintenance'>(e: E) => computed(() => ofVehicle(e, vid.value))
   return {
     vid,
     vehicle,
@@ -23,7 +23,7 @@ export function useVehicle() {
     fuel: of('fuel'),
     odometer: of('odometer'),
     maintenance: of('maintenance'),
-    periods: computed(() => active('trip_period').filter((p) => p.vehicle_id === vid.value)),
+    periods: computed(() => ofVehicle('trip_period', vid.value).filter((p) => !p.deleted)),
     tenant: computed(() => session.tenant ?? ''),
     writable: computed(() => canWrite(role.value)),
   }

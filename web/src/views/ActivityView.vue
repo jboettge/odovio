@@ -1,20 +1,24 @@
 <script setup lang="ts">
 import { errorText } from '../store/toasts'
-import { computed, ref, watch } from 'vue'
+import { computed, ref, shallowRef, watch } from 'vue'
 import PageHeader from '../components/PageHeader.vue'
 import ActivityFeed from '../components/ActivityFeed.vue'
 import AlertBox from '../components/AlertBox.vue'
 import Loading from '../components/Loading.vue'
 import Field from '../components/Field.vue'
 import Icon from '../components/Icon.vue'
+import Pager from '../components/Pager.vue'
+import { useDebounced } from '../use/debounced'
+import { usePager } from '../use/pager'
 import { endpoints } from '../api/endpoints'
 import type { ActivityItem } from '../api/types'
-import { active } from '../store/data'
+import { vehiclesByName } from '../store/data'
 import { session } from '../store/session'
 import { ACTION_LABELS, ENTITY_LABELS } from '../lib/labels'
 
 const PAGE = 50
-const items = ref<ActivityItem[]>([])
+// shallowRef: geladene Einträge nicht tief reaktiv machen (nur ersetzt, nie verändert)
+const items = shallowRef<ActivityItem[]>([])
 const next = ref<number | null>(null)
 const loading = ref(false)
 const error = ref<string | null>(null)
@@ -22,6 +26,7 @@ const entity = ref('')
 const action = ref('')
 const vehicle = ref('')
 const q = ref('')
+const qDebounced = useDebounced(q)
 
 async function fetchPage(reset: boolean) {
   if (!session.tenant) return
@@ -29,7 +34,10 @@ async function fetchPage(reset: boolean) {
   error.value = null
   try {
     const page = await endpoints.activity(session.tenant, PAGE, reset ? null : next.value)
+    const before = reset ? 0 : items.value.length
     items.value = reset ? page.items : [...items.value, ...page.items]
+    // nach «Ältere laden» zur Seite mit den ersten neuen Einträgen
+    if (!reset && page.items.length && filtered.value.length > before) pager.page = Math.floor(before / pager.size) + 1
     next.value = page.next_before_seq ?? null
   } catch (e) {
     error.value = errorText(e)
@@ -40,9 +48,9 @@ async function fetchPage(reset: boolean) {
 
 watch(() => session.tenant, () => fetchPage(true), { immediate: true })
 
-const vehicles = computed(() => active('vehicle'))
+const vehicles = computed(() => vehiclesByName())
 const filtered = computed(() => {
-  const s = q.value.trim().toLowerCase()
+  const s = qDebounced.value.trim().toLowerCase()
   return items.value.filter(
     (i) =>
       (!entity.value || i.entity === entity.value) &&
@@ -52,6 +60,8 @@ const filtered = computed(() => {
   )
 })
 const entities = computed(() => [...new Set(items.value.map((i) => i.entity))].sort())
+// nachgeladene Einträge seitenweise anzeigen (DOM bleibt klein, auch nach vielen «Ältere laden»)
+const pager = usePager(filtered, { size: 200, resetOn: [qDebounced, entity, action, vehicle] })
 </script>
 
 <template>
@@ -73,7 +83,8 @@ const entities = computed(() => [...new Set(items.value.map((i) => i.entity))].s
     </div>
     <AlertBox v-if="error" kind="danger" live>{{ error }}</AlertBox>
     <p class="muted small" aria-live="polite">{{ filtered.length }} von {{ items.length }} geladenen Einträgen</p>
-    <ActivityFeed :items="filtered" :tenant="session.tenant ?? ''" group-by-day />
+    <ActivityFeed :items="pager.items" :tenant="session.tenant ?? ''" group-by-day />
+    <Pager v-model:page="pager.page" v-model:size="pager.size" :total="pager.total" label="Seiten der Aktivität" />
     <Loading v-if="loading" />
     <div v-else-if="next" class="row mt-2">
       <button type="button" class="btn" @click="fetchPage(false)">Ältere laden</button>

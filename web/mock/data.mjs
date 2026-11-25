@@ -62,6 +62,8 @@ export class Tenant {
     this.anchors = []
     this.members = []
     this.blobs = new Map()
+    /** Änderungsprotokoll [seq, entity, id] in Seq-Reihenfolge (für effizientes /changes bei grossen Daten) */
+    this.log = []
   }
 
   /** Revision schreiben (Hash-Kette) und Objekt aktualisieren. */
@@ -82,6 +84,7 @@ export class Tenant {
     this.seq++
     row.last_seq = this.seq
     map.set(obj.id, row)
+    this.log.push([this.seq, entity, obj.id])
     const data = { ...strip(row), ...meta }
     const body = JSON.stringify({ seq: this.seq, entity, id: obj.id, version, action, data })
     this.head = createHash('sha256').update(this.head + body).digest('hex')
@@ -116,6 +119,7 @@ export class Tenant {
     this.seq = revs.length
     this.head = head
     for (const [entity, map] of Object.entries(this.rows)) for (const row of map.values()) row.last_seq = last.get(`${entity}:${row.id}`) ?? row.last_seq
+    this.log = revs.map((r) => [r.seq, r.entity, r.entity_id])
     // Anker zu den ursprünglichen Zeitpunkten neu setzen
     for (const at of [...new Set(anchorTimes)].sort()) {
       const upTo = revs.filter((r) => r.recorded_at <= at).at(-1)
@@ -127,6 +131,36 @@ export class Tenant {
 
   get(entity, id) {
     return this.rows[entity].get(id)
+  }
+
+  /** Aktuelle Datensätze mit last_seq > since in Seq-Reihenfolge, höchstens `limit` (Binärsuche im Protokoll). */
+  changesSince(since, limit) {
+    let lo = 0
+    let hi = this.log.length
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1
+      if (this.log[mid][0] <= since) lo = mid + 1
+      else hi = mid
+    }
+    const out = []
+    for (let i = lo; i < this.log.length && out.length <= limit; i++) {
+      const [seq, entity, id] = this.log[i]
+      const row = this.rows[entity].get(id)
+      if (row && row.last_seq === seq) out.push([seq, entity, row])
+    }
+    return out
+  }
+
+  /** Revisionen mit seq < before (neueste zuerst), höchstens `limit`. Revisionen liegen nach Seq sortiert vor. */
+  revisionsBefore(before, limit) {
+    let lo = 0
+    let hi = this.revisions.length
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1
+      if (this.revisions[mid].seq < before) lo = mid + 1
+      else hi = mid
+    }
+    return this.revisions.slice(Math.max(0, lo - limit), lo).reverse()
   }
 
   list(entity) {
@@ -431,6 +465,124 @@ export function buildDemo(now = new Date()) {
   }
 
   for (const t of Object.values(tenants)) t.resequence()
+  return tenants
+}
+
+// ================= Lasttest: --seed large =================
+/**
+ * Grosser Datenbestand für Performance-Tests: Mandant «privat» mit 3 Fahrzeugen × `tripsPerVehicle` Fahrten über
+ * viele Jahre, `fuelTotal` Tankvorgänge, monatliche km-Stände, Wartungen, 200 Kunden, abgeschlossene Monate.
+ * Das Journal (Aktivität) enthält jede Erfassung (> 100k Einträge). Chronologisch erzeugt (kein Umsortieren nötig).
+ * Der Mandant «muster-ag» bleibt der kleine Demo-Bestand.
+ */
+export function buildLarge(now = new Date(), { tripsPerVehicle = 30_000, fuelTotal = 5_000 } = {}) {
+  const tenants = buildDemo(now)
+  idCounter = 1_000_000
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate())
+  const t = new Tenant('privat')
+  const jakob = USERS.jakob
+  const anna = USERS.anna
+  const actor = jakob.name
+  const perDay = 6
+  const days = Math.ceil(tripsPerVehicle / perDay)
+  const start = addDays(today, -days - 2)
+  const rand = rng(2026)
+  const events = []
+  const ev = (when, entity, row, who = actor) => events.push({ when, entity, row, who })
+
+  const customers = []
+  for (let i = 0; i < 200; i++) customers.push({ id: did(5), name: `Kunde ${String(i + 1).padStart(3, '0')} AG`, ref: `K-${3000 + i}`, note: i % 7 === 0 ? 'Rahmenvertrag' : null })
+  for (const c of customers) ev(start, 'customer', c)
+  const placeRow = (p) => ({ id: did(1), lat: null, lon: null, radius_m: 150, customer_id: null, default_category: null, private: false, ...p })
+  const home = placeRow({ name: 'Wohnort', kind: 'home' })
+  const work = placeRow({ name: 'Büro b-re.ch', kind: 'work', lat: 47.389, lon: 8.517, default_category: 'commute' })
+  const custPlaces = customers.slice(0, 40).map((c, i) => placeRow({ name: c.name, kind: 'customer', lat: 47.3 + i * 0.004, lon: 8.4 + i * 0.003, customer_id: c.id, default_category: 'business' }))
+  const others = ['Einkaufszentrum', 'Luzern', 'Bern', 'Basel', 'Winterthur'].map((name) => placeRow({ name, kind: 'other' }))
+  for (const p of [home, work, ...custPlaces, ...others]) ev(start, 'place', p)
+  ev(start, 'material_article', { id: did(8), name: 'Motoröl 5W-30', part_number: 'VW 504 00', unit: 'l', unit_price: 18, category: 'Öl', vehicle_id: null, note: null })
+
+  const specs = [
+    { name: 'Skoda Octavia', make: 'Skoda', model: 'Octavia Combi', plate: 'ZH 123 456', fuel_type: 'benzin', cons: 6.4, driver: jakob },
+    { name: 'Toyota Corolla', make: 'Toyota', model: 'Corolla Hybrid', plate: 'ZH 987 654', fuel_type: 'hybrid', cons: 4.6, driver: anna },
+    { name: 'VW Touran', make: 'VW', model: 'Touran', plate: 'ZH 555 777', fuel_type: 'diesel', cons: 5.8, driver: jakob },
+  ]
+  const cur = monthOf(isoTs(today))
+  const prevMonth = (() => {
+    const d = new Date(today.getFullYear(), today.getMonth() - 1, 1)
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}`
+  })()
+  const fuelEvery = Math.max(1, Math.floor((days * specs.length) / fuelTotal))
+  const SLOTS = [[7, 30], [9, 10], [11, 45], [14, 5], [16, 40], [18, 50]]
+  const closedMonths = new Map()
+
+  specs.forEach((spec, vi) => {
+    const vehicle = vehicleBase({ id: did(9), name: spec.name, make: spec.make, model: spec.model, plate: spec.plate, fuel_type: spec.fuel_type, initial_km: 1000 * (vi + 1), purchase_price: 30000 + vi * 5000, ownership: 'private', annual_fixed_costs: 2000 })
+    ev(start, 'vehicle', vehicle, spec.driver.name)
+    let km = vehicle.initial_km
+    let tank = 0
+    let made = 0
+    let fuelCount = 0
+    const monthTrips = new Map()
+    for (let d = 0; d <= days && made < tripsPerVehicle; d++) {
+      const day = addDays(start, d + 1)
+      for (const [h, m] of SLOTS) {
+        if (made >= tripsPerVehicle) break
+        const begin = at(day, h, m)
+        const dist = 3 + Math.floor(rand() * 40)
+        const end = new Date(begin.getTime() + (dist * 1.3 + 5) * 60_000)
+        const r = rand()
+        const cat = r < 0.45 ? 'business' : r < 0.7 ? 'commute' : r < 0.95 ? 'private' : 'field'
+        const c = customers[Math.floor(rand() * customers.length)]
+        const mo = monthOf(isoTs(begin))
+        const row = tripRow(vehicle.id, spec.driver, begin, end, km, km + dist, {
+          category: cat,
+          purpose: cat === 'business' ? `Kundentermin ${c.name}` : cat === 'field' ? 'Service-Einsatz' : null,
+          customer_id: cat === 'business' ? c.id : null,
+          start_place_id: cat === 'commute' ? home.id : work.id,
+          end_place_id: cat === 'commute' ? work.id : cat === 'business' && custPlaces.length ? custPlaces[Math.floor(rand() * custPlaces.length)].id : null,
+          end_label: cat === 'private' || cat === 'field' ? others[Math.floor(rand() * others.length)].name : null,
+          status: mo < prevMonth ? 'locked' : 'confirmed',
+          source: rand() > 0.1 ? 'auto' : 'manual',
+        })
+        km += dist
+        tank += (dist * spec.cons) / 100
+        made++
+        ev(end, 'trip', row, spec.driver.name)
+        if (!monthTrips.has(mo)) monthTrips.set(mo, [])
+        monthTrips.get(mo).push(row)
+      }
+      if (d % fuelEvery === 0 && fuelCount * specs.length < fuelTotal) {
+        const liters = Math.round(Math.max(tank, 20) * 100) / 100
+        ev(at(day, 19, 30), 'fuel', { id: did(3), vehicle_id: vehicle.id, date: isoDate(day), km, liters, price_total: Math.round(liters * (1.7 + rand() * 0.2) * 20) / 20, full_tank: rand() > 0.1, station: ['Migrol', 'Shell', 'AVIA', 'Coop Pronto'][Math.floor(rand() * 4)], note: null }, spec.driver.name)
+        tank = 0
+        fuelCount++
+      }
+      if (addDays(day, 1).getDate() === 1) ev(at(day, 21, 0), 'odometer', { id: did(4), vehicle_id: vehicle.id, date: isoDate(day), km, note: 'Monatsende abgelesen' }, spec.driver.name)
+      if (d % 365 === 180) {
+        const mid = did(11)
+        ev(at(day, 12, 0), 'maintenance', { id: mid, vehicle_id: vehicle.id, date: isoDate(day), km, title: 'Jahresservice', cost: 300 + Math.round(rand() * 200), note: null, next_due_km: km + 15000, next_due_date: isoDate(addDays(day, 365)) })
+        ev(at(day, 12, 0), 'maintenance_item', { id: did(12), maintenance_id: mid, label: 'Motoröl gewechselt', done: true, position: 0 })
+      }
+    }
+    // laufender Monat: die letzten 4 Fahrten offen
+    const open = monthTrips.get(cur) ?? []
+    for (const row of open.slice(-4)) {
+      row.status = 'suggested'
+    }
+    // abgeschlossene Monate: alle vor dem Vormonat
+    for (const [mo, trips] of monthTrips) {
+      if (mo >= prevMonth) continue
+      const [y, mm] = mo.split('-').map(Number)
+      const closedAt = new Date(y, mm, 3, 9, 12)
+      const sum = (cat) => trips.filter((x) => x.category === cat).reduce((a, x) => a + (x.km_end - x.km_start), 0)
+      ev(closedAt, 'trip_period', { id: did(14), vehicle_id: vehicle.id, month: mo, status: 'closed', closed_by: actor, closed_at: closedAt.toISOString(), anchor_seq: null, km_start: trips[0].km_start, km_end: trips.at(-1).km_end, trips_count: trips.length, business_km: sum('business'), private_km: sum('private'), commute_km: sum('commute'), field_km: sum('field'), note: null, corrections: 0 })
+      closedMonths.set(`${vehicle.id}:${mo}`, true)
+    }
+  })
+  events.sort((a, b) => a.when - b.when)
+  for (const e of events) t.record(e.entity, e.row, 'create', e.who, e.when)
+  t.members = tenants.privat.members
+  tenants.privat = t
   return tenants
 }
 

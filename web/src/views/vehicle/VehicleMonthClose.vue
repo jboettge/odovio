@@ -9,13 +9,16 @@ import { useVehicle } from '../../composables'
 import { endpoints } from '../../api/endpoints'
 import { ApiError } from '../../api/client'
 import type { CloseConflictDetail, TripCheck, TripMismatch } from '../../api/types'
-import { byId, dataState, refresh } from '../../store/data'
+import { byId, dataState, refresh, tick } from '../../store/data'
 import { notify, errorText } from '../../store/toasts'
-import { currentMonth, date, km, month as monthLabel, monthOf, num, previousMonth, time, weekdayDate } from '../../lib/format'
+import { currentMonth, date, km, month as monthLabel, num, previousMonth, time, weekdayDate, byCode } from '../../lib/format'
 import { routeText } from '../../lib/privacy'
-import { MIN_REASON, needsReview } from '../../lib/trips'
+import { MIN_REASON } from '../../lib/trips'
+import { analytics } from '../../lib/analyticsClient'
+import { useAsync } from '../../use/async'
+import type { Trip } from '../../api/types'
 
-const { vid, trips, periods, tenant } = useVehicle()
+const { vid, periods, tenant } = useVehicle()
 const cur = currentMonth()
 const months = computed(() => {
   const out: string[] = []
@@ -50,8 +53,16 @@ function tripLabel(id: string): string {
   const t = byId('trip', id)
   return t ? `${weekdayDate(t.start_at)} ${time(t.start_at)} · ${routeText(t, lookup).text}` : 'Fahrt'
 }
-const monthTrips = computed(() => trips.value.filter((t) => !t.deleted && monthOf(t.start_at) === month.value))
-const openTrips = computed(() => monthTrips.value.filter(needsReview))
+// Monatsübersicht (Anzahl, offene Fahrten) im Web Worker über alle Fahrten des Fahrzeugs
+const summary = useAsync(
+  () => ({ vid: vid.value, month: month.value, data: tick('trip') }),
+  (a) => analytics().monthSummary(a.vid, a.month),
+  { trips: 0, open: [] as string[] },
+)
+const monthTripCount = computed(() => summary.data.value.trips)
+const openTrips = computed(() => summary.data.value.open.map((id) => byId('trip', id)).filter((t): t is Trip => Boolean(t)))
+const closedMonths = computed(() => new Set(periods.value.map((p) => p.month)))
+const periodsSorted = computed(() => [...periods.value].sort((a, b) => byCode(b.month, a.month)))
 
 function mm(pred: (m: TripMismatch) => boolean) {
   return (check.value?.mismatches ?? []).filter(pred)
@@ -119,7 +130,7 @@ async function doClose() {
         <div class="actions">
           <label for="mc-month" class="sr-only">Monat</label>
           <select id="mc-month" v-model="month" class="select">
-            <option v-for="m in months" :key="m" :value="m">{{ monthLabel(m) }}{{ m >= cur ? ' (läuft)' : '' }}{{ periods.some((p) => p.month === m) ? ' – abgeschlossen' : '' }}</option>
+            <option v-for="m in months" :key="m" :value="m">{{ monthLabel(m) }}{{ m >= cur ? ' (läuft)' : '' }}{{ closedMonths.has(m) ? ' – abgeschlossen' : '' }}</option>
           </select>
         </div>
       </div>
@@ -199,7 +210,7 @@ async function doClose() {
         <table class="table">
           <thead><tr><th scope="col">Monat</th><th scope="col" class="num">Fahrten</th><th scope="col" class="num">Geschäftl.</th><th scope="col" class="num">Privat</th><th scope="col">Abgeschlossen</th><th scope="col" class="num"><abbr title="Korrekturen nach dem Abschluss">Korr.</abbr></th></tr></thead>
           <tbody>
-            <tr v-for="p in [...periods].sort((a, b) => b.month.localeCompare(a.month))" :key="p.id">
+            <tr v-for="p in periodsSorted" :key="p.id">
               <td class="nowrap"><button type="button" class="linkish" @click="month = p.month">{{ monthLabel(p.month) }}</button></td>
               <td class="num">{{ p.trips_count }}</td>
               <td class="num">{{ km(p.business_km + p.field_km, 0) }}</td>
@@ -217,7 +228,7 @@ async function doClose() {
 
   <Modal :open="dlg" :title="`${monthLabel(month)} abschliessen`" @close="dlg = false">
     <form id="close-form" class="stack" @submit.prevent="doClose">
-      <p>{{ monthTrips.length }} Fahrten werden <strong>unveränderlich gesperrt</strong>. Danach sind Korrekturen nur noch per Storno mit Begründung möglich.</p>
+      <p>{{ monthTripCount }} Fahrten werden <strong>unveränderlich gesperrt</strong>. Danach sind Korrekturen nur noch per Storno mit Begründung möglich.</p>
       <template v-if="needsForce">
         <AlertBox kind="warn" title="Abweichungen vorhanden">
           <p>{{ check?.gaps.length ?? 0 }} Lücke(n), {{ blocking.length }} unvollständige Angabe(n).</p>

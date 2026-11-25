@@ -1,5 +1,6 @@
 // Änderungen zwischen aufeinanderfolgenden Revisionen (Verlauf je Eintrag).
 import type { Revision } from '../api/types'
+import { num } from './format'
 
 export interface FieldChange {
   field: string
@@ -56,6 +57,7 @@ export function fieldLabel(f: string): string {
 export function valueText(v: unknown): string {
   if (v === null || v === undefined || v === '') return '–'
   if (typeof v === 'boolean') return v ? 'ja' : 'nein'
-  if (typeof v === 'number') return v.toLocaleString('de-CH', { maximumFractionDigits: 3 })
+  // gecachter Intl.NumberFormat (lib/format) statt toLocaleString je Aufruf
+  if (typeof v === 'number') return num(v, 0, 3)
   return String(v)
 }

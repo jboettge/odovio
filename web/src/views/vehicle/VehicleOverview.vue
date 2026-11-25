@@ -8,11 +8,13 @@ import AlertBox from '../../components/AlertBox.vue'
 import LineChart from '../../components/LineChart.vue'
 import BarChart from '../../components/BarChart.vue'
 import { useVehicle } from '../../composables'
-import { all, dataState, stats } from '../../store/data'
+import { childrenOf, dataState, stats, tick } from '../../store/data'
 import type { Stats } from '../../api/types'
 import { chf, consumption, currentMonth, date, km, liters, monthShort, num, previousMonth } from '../../lib/format'
 import { FUEL_TYPE_LABELS, METHOD_LABELS, OWNERSHIP_LABELS } from '../../lib/labels'
-import { tripHealth } from '../../lib/vehicle'
+import { analytics } from '../../lib/analyticsClient'
+import type { HealthResult } from '../../lib/slim'
+import { useAsync } from '../../use/async'
 
 const { vid, vehicle, fuel, maintenance, tenant } = useVehicle()
 const s = ref<Stats | null>(null)
@@ -31,7 +33,15 @@ watch(
   { immediate: true },
 )
 
-const health = computed(() => tripHealth(all('trip'), all('trip_period'), vid.value))
+const NO_HEALTH: HealthResult = { open: 0, gaps: 0, gapKm: 0, estimated: 0 }
+// Kilometerkette/offene Fahrten über alle Fahrten des Fahrzeugs im Web Worker
+const healthRes = useAsync(
+  () => ({ vid: vid.value, data: tick('trip', 'trip_period') }),
+  async (a) => (await analytics().health([a.vid]))[a.vid] ?? NO_HEALTH,
+  NO_HEALTH,
+)
+const health = computed(() => healthRes.data.value)
+const healthPending = healthRes.pending
 
 const points = computed(() =>
   (s.value?.points ?? []).map((p) => ({
@@ -49,17 +59,19 @@ const monthly = computed(() => {
     months.unshift(m)
     m = previousMonth(m)
   }
+  const first = months[0]!
   const fuelBy: Record<string, number> = {}
   const maintBy: Record<string, number> = {}
-  for (const f of fuel.value) if (!f.deleted) fuelBy[f.date.slice(0, 7)] = (fuelBy[f.date.slice(0, 7)] ?? 0) + f.price_total
-  const mats = all('maintenance_material').filter((x) => !x.deleted)
+  for (const f of fuel.value) if (!f.deleted && f.date.slice(0, 7) >= first) fuelBy[f.date.slice(0, 7)] = (fuelBy[f.date.slice(0, 7)] ?? 0) + f.price_total
   for (const w of maintenance.value) {
-    if (w.deleted) continue
-    const cost = w.cost ?? mats.filter((x) => x.maintenance_id === w.id).reduce((a, x) => a + x.quantity * (x.unit_price ?? 0), 0)
+    if (w.deleted || w.date.slice(0, 7) < first) continue
+    // Materialsumme aus dem Index je Wartung (statt Filter über alle Materialposten)
+    const cost = w.cost ?? childrenOf('maintenance_material', 'maintenance_id', w.id).reduce((a, x) => a + (x.deleted ? 0 : x.quantity * (x.unit_price ?? 0)), 0)
     maintBy[w.date.slice(0, 7)] = (maintBy[w.date.slice(0, 7)] ?? 0) + cost
   }
   return months.map((mm) => ({ label: monthShort(mm), values: [fuelBy[mm] ?? 0, maintBy[mm] ?? 0] }))
 })
+const activeMaintenance = computed(() => maintenance.value.filter((m) => !m.deleted).length)
 const monthlyTotal = computed(() => monthly.value.reduce((a, d) => a + d.values[0]! + d.values[1]!, 0))
 </script>
 
@@ -72,7 +84,7 @@ const monthlyTotal = computed(() => monthly.value.reduce((a, d) => a + d.values[
       <Kpi label="Ø Verbrauch" :value="consumption(s.avg_consumption)" :sub="s.avg_liters_per_km !== null ? `${num(s.avg_liters_per_km, 3)} l pro km` : 'mind. zwei Volltankungen nötig'" />
       <Kpi label="Kosten pro km" :value="s.avg_cost_per_km !== null ? chf(s.avg_cost_per_km, 3) : '–'" sub="Treibstoff" />
       <Kpi label="Treibstoff total" :value="chf(s.total_fuel_cost)" :sub="liters(s.total_liters, 1)" />
-      <Kpi label="Wartung total" :value="chf(s.total_maintenance_cost)" :sub="`${maintenance.filter((m) => !m.deleted).length} Wartungen`" />
+      <Kpi label="Wartung total" :value="chf(s.total_maintenance_cost)" :sub="`${activeMaintenance} Wartungen`" />
     </div>
 
     <div class="grid grid-2">
@@ -82,11 +94,11 @@ const monthlyTotal = computed(() => monthly.value.reduce((a, d) => a + d.values[
           <li v-if="health.open">
             <Icon name="check" class="warn" /><RouterLink :to="{ path: `/fahrzeuge/${vid}/fahrten`, query: { status: 'offen' } }" class="warn">{{ health.open }} Fahrt{{ health.open === 1 ? '' : 'en' }} bestätigen</RouterLink>
           </li>
-          <li v-if="health.gaps.length">
-            <Icon name="alert" class="danger" /><span class="danger">Lücke{{ health.gaps.length > 1 ? 'n' : '' }} von {{ km(health.gapKm) }} in der Kilometerkette</span>
+          <li v-if="health.gaps">
+            <Icon name="alert" class="danger" /><span class="danger">Lücke{{ health.gaps > 1 ? 'n' : '' }} von {{ km(health.gapKm) }} in der Kilometerkette</span>
           </li>
           <li v-if="health.estimated"><Icon name="gauge" class="warn" /><span class="warn">{{ health.estimated }} {{ health.estimated === 1 ? 'Kilometerstand' : 'Kilometerstände' }} geschätzt (ca.)</span></li>
-          <li v-if="!health.open && !health.gaps.length && !health.estimated"><Icon name="checkCircle" /><span class="muted">Alle Fahrten bestätigt, Kilometerkette lückenlos</span></li>
+          <li v-if="!healthPending && !health.open && !health.gaps && !health.estimated"><Icon name="checkCircle" /><span class="muted">Alle Fahrten bestätigt, Kilometerkette lückenlos</span></li>
         </ul>
         <h2 class="section-title mt-3">Fälligkeiten</h2>
         <p v-if="!s.due.length" class="muted">Keine Wartung fällig.</p>

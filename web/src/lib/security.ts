@@ -1,5 +1,5 @@
 // Sicherheits-Hilfen: Links aus Daten, verständliche Fehlertexte ohne technische Details.
-import { ApiError } from '../api/client'
+import { ApiError, isAbort } from '../api/client'
 
 /** Nur https:-Links oder relative Pfade derselben App zulassen; sonst null (als Text anzeigen). */
 export function safeHref(v: unknown): string | null {
@@ -17,6 +17,7 @@ export function safeHref(v: unknown): string | null {
 /** Nutzerfreundliche Meldung: API-Fehler mit Server-Detail, alles andere generisch (kein Stacktrace). */
 export function userMessage(e: unknown): string {
   if (e instanceof ApiError) return e.message
+  if (isAbort(e)) return 'Anfrage abgebrochen.'
   if (e instanceof Error && e.name === 'SyncRejected') return e.message
   return 'Unerwarteter Fehler – bitte Seite neu laden und erneut versuchen.'
 }

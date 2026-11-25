@@ -1628,3 +1628,35 @@ dl.stack dd {
 .stack > .card + .card {
   margin-top: 0;
 }
+
+/* ---------- Grosse Listen: virtuelles Scrollen, Seitenwahl ---------- */
+.vtable {
+  /* Scroll-Anker nicht auf ausgetauschte Zeilen setzen (sonst springt die Seite beim Nachrendern) */
+  overflow-anchor: none;
+}
+.table tr.vpad td {
+  padding: 0;
+  border: 0;
+}
+.table tbody tr.vpad:hover td {
+  background: transparent;
+}
+.vpad-svg {
+  display: block;
+}
+.pager {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  padding: 10px 14px;
+}
+.select.select-sm {
+  padding-top: 4px;
+  padding-bottom: 4px;
+  min-height: 0;
+}
+.data-table-note {
+  margin: 6px 0 0;
+}
