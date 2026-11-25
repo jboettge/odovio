@@ -17,7 +17,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
-from . import intel, logfilter, members, models, privacy, schemas
+from . import intel, logfilter, members, models, privacy, schemas, web
 from .activity import ACTIVITY_LIMIT, ACTIVITY_MAX, activity
 from .attachments import (
     EXTENSIONS,
@@ -138,6 +138,7 @@ app = FastAPI(title="Fahrzeugbuch", version="2.2.0", lifespan=lifespan,
 app.add_middleware(RequestGuard, max_body=int(os.environ.get("MAX_BODY_BYTES", str(1024 * 1024))),
                    max_upload=max_upload())
 app.include_router(intel.router)
+app.add_middleware(web.WebSecurityHeaders)
 
 
 @app.exception_handler(RequestValidationError)
@@ -668,3 +669,7 @@ def delete_member(member_id: str, access: TenantAccess, db: DB):
     kc, tenant = _member_admin(access, db)
     _member_change(db, tenant, lambda t: members.remove_member(db, t, access.user, kc, member_id))
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+# Web-Frontend (SPA) – als letzte Route, damit alle API-Routen Vorrang haben
+app.include_router(web.router)
