@@ -119,3 +119,18 @@ class Revision(Base):
     conflict: Mapped[bool] = mapped_column(Boolean, default=False)
     prev_hash: Mapped[str] = mapped_column(String(64))
     hash: Mapped[str] = mapped_column(String(64))
+
+
+class Anchor(Base):
+    """Signierter Kettenkopf (Ed25519). Macht ein komplettes Neuberechnen der Kette erkennbar,
+    solange der Signaturschlüssel nicht in der DB liegt. Append-only wie `revisions`."""
+
+    __tablename__ = "anchors"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    tenant_id: Mapped[int] = mapped_column(ForeignKey("tenants.id"), index=True)
+    seq: Mapped[int] = mapped_column(Integer)
+    head_hash: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[str] = mapped_column(String(32))
+    key_id: Mapped[str] = mapped_column(String(16))
+    signature: Mapped[str] = mapped_column(String(128))

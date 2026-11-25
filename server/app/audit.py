@@ -14,6 +14,8 @@ from sqlalchemy.orm import Session
 from .auth import User
 from .models import GENESIS, Revision, Tenant
 
+IMMUTABLE_TABLES = ("revisions", "anchors")
+
 HASHED_FIELDS = (
     "tenant_id", "seq", "entity", "entity_id", "version", "action", "data",
     "actor_sub", "actor_name", "recorded_at", "client_ts", "op_id", "conflict",
@@ -93,14 +95,16 @@ def install_triggers(engine: Engine) -> None:
                 CREATE OR REPLACE FUNCTION fzb_revisions_immutable() RETURNS trigger AS $$
                 BEGIN RAISE EXCEPTION 'revisions sind unveränderlich (revisionssicher)'; END;
                 $$ LANGUAGE plpgsql"""))
-            conn.execute(text("DROP TRIGGER IF EXISTS fzb_revisions_no_change ON revisions"))
-            conn.execute(text("""CREATE TRIGGER fzb_revisions_no_change BEFORE UPDATE OR DELETE ON revisions
-                FOR EACH ROW EXECUTE FUNCTION fzb_revisions_immutable()"""))
-            conn.execute(text("DROP TRIGGER IF EXISTS fzb_revisions_no_truncate ON revisions"))
-            conn.execute(text("""CREATE TRIGGER fzb_revisions_no_truncate BEFORE TRUNCATE ON revisions
-                FOR EACH STATEMENT EXECUTE FUNCTION fzb_revisions_immutable()"""))
+            for table in IMMUTABLE_TABLES:
+                conn.execute(text(f"DROP TRIGGER IF EXISTS fzb_{table}_no_change ON {table}"))
+                conn.execute(text(f"""CREATE TRIGGER fzb_{table}_no_change BEFORE UPDATE OR DELETE ON {table}
+                    FOR EACH ROW EXECUTE FUNCTION fzb_revisions_immutable()"""))
+                conn.execute(text(f"DROP TRIGGER IF EXISTS fzb_{table}_no_truncate ON {table}"))
+                conn.execute(text(f"""CREATE TRIGGER fzb_{table}_no_truncate BEFORE TRUNCATE ON {table}
+                    FOR EACH STATEMENT EXECUTE FUNCTION fzb_revisions_immutable()"""))
         elif engine.dialect.name == "sqlite":
-            for op in ("UPDATE", "DELETE"):
-                conn.execute(text(f"""CREATE TRIGGER IF NOT EXISTS fzb_revisions_no_{op.lower()}
-                    BEFORE {op} ON revisions BEGIN
-                    SELECT RAISE(ABORT, 'revisions sind unveränderlich (revisionssicher)'); END"""))
+            for table in IMMUTABLE_TABLES:
+                for op in ("UPDATE", "DELETE"):
+                    conn.execute(text(f"""CREATE TRIGGER IF NOT EXISTS fzb_{table}_no_{op.lower()}
+                        BEFORE {op} ON {table} BEGIN
+                        SELECT RAISE(ABORT, '{table} sind unveränderlich (revisionssicher)'); END"""))

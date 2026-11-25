@@ -2,7 +2,7 @@ import datetime as dt
 import uuid
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class AuthConfig(BaseModel):
@@ -23,49 +23,59 @@ class Me(BaseModel):
 
 
 # ---------- Nutzdaten je Objekttyp (Sync) ----------
-class VehicleData(BaseModel):
+# Obergrenzen schützen Statistik/PDF/DB (int4) und die App vor unsinnigen Werten;
+# inf/NaN würden JSON-Ausgaben (null) und damit den Sync aller Geräte brechen.
+MAX_KM = 5_000_000
+NOTE = 2000
+
+
+class Payload(BaseModel):
+    model_config = ConfigDict(allow_inf_nan=False)
+
+
+class VehicleData(Payload):
     name: str = Field(min_length=1, max_length=100)
     make: str | None = Field(default=None, max_length=100)
     model: str | None = Field(default=None, max_length=100)
     plate: str | None = Field(default=None, max_length=30)
     fuel_type: str = Field(default="benzin", max_length=20)
-    initial_km: int = Field(default=0, ge=0)
+    initial_km: int = Field(default=0, ge=0, le=MAX_KM)
 
 
-class OdometerData(BaseModel):
-    vehicle_id: str
+class OdometerData(Payload):
+    vehicle_id: str = Field(max_length=36)
     date: dt.date
-    km: int = Field(ge=0)
-    note: str | None = None
+    km: int = Field(ge=0, le=MAX_KM)
+    note: str | None = Field(default=None, max_length=NOTE)
 
 
-class FuelData(BaseModel):
-    vehicle_id: str
+class FuelData(Payload):
+    vehicle_id: str = Field(max_length=36)
     date: dt.date
-    km: int = Field(ge=0)
-    liters: float = Field(gt=0)
-    price_total: float = Field(ge=0)
+    km: int = Field(ge=0, le=MAX_KM)
+    liters: float = Field(gt=0, le=5000)
+    price_total: float = Field(ge=0, le=100_000)
     full_tank: bool = True
     station: str | None = Field(default=None, max_length=100)
-    note: str | None = None
+    note: str | None = Field(default=None, max_length=NOTE)
 
 
-class MaintenanceData(BaseModel):
-    vehicle_id: str
+class MaintenanceData(Payload):
+    vehicle_id: str = Field(max_length=36)
     date: dt.date
-    km: int | None = Field(default=None, ge=0)
+    km: int | None = Field(default=None, ge=0, le=MAX_KM)
     title: str = Field(min_length=1, max_length=150)
-    cost: float | None = Field(default=None, ge=0)
-    note: str | None = None
-    next_due_km: int | None = Field(default=None, ge=0)
+    cost: float | None = Field(default=None, ge=0, le=1_000_000)
+    note: str | None = Field(default=None, max_length=NOTE)
+    next_due_km: int | None = Field(default=None, ge=0, le=MAX_KM)
     next_due_date: dt.date | None = None
 
 
-class MaintenanceItemData(BaseModel):
-    maintenance_id: str
+class MaintenanceItemData(Payload):
+    maintenance_id: str = Field(max_length=36)
     label: str = Field(min_length=1, max_length=200)
     done: bool = False
-    position: int = 0
+    position: int = Field(default=0, ge=0, le=10_000)
 
 
 # ---------- Sync-Protokoll ----------
@@ -74,7 +84,7 @@ class SyncOp(BaseModel):
     entity: Literal["vehicle", "odometer", "fuel", "maintenance", "maintenance_item"]
     id: str
     action: Literal["upsert", "delete"]
-    base_version: int | None = None  # Version, auf der die Änderung beruht (None = neu)
+    base_version: int | None = Field(default=None, ge=0, le=2_000_000_000)  # None = neu
     data: dict = {}
     client_ts: str | None = Field(default=None, max_length=40)  # Erfassungszeitpunkt auf dem Gerät
 
@@ -131,11 +141,32 @@ class RevisionOut(BaseModel):
 
 
 class AuditResult(BaseModel):
-    ok: bool
+    ok: bool                # Kette + Datenstand + Anker
+    chain_ok: bool
+    state_ok: bool
     count: int
     head_hash: str
     broken_at: int | None
     reason: str | None
+    problems: list[str]
+    signed: bool            # Anker-Signaturschlüssel konfiguriert
+    anchors: int
+
+
+class AnchorOut(BaseModel):
+    seq: int
+    head_hash: str
+    created_at: str
+    key_id: str
+    signature: str
+
+
+class AnchorList(BaseModel):
+    tenant: str
+    public_key: str | None   # Ed25519, Base64 (raw)
+    key_id: str | None
+    message_format: str
+    anchors: list[AnchorOut]
 
 
 # ---------- Statistik ----------

@@ -8,8 +8,11 @@
 """
 import datetime as dt
 
+import logging
+
 from pydantic import BaseModel, ValidationError
 from sqlalchemy import select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from . import models, schemas
@@ -24,6 +27,8 @@ ENTITIES: dict[str, tuple[type, type[BaseModel], tuple[str, type] | None]] = {
     "maintenance": (models.Maintenance, schemas.MaintenanceData, ("vehicle_id", models.Vehicle)),
     "maintenance_item": (models.MaintenanceItem, schemas.MaintenanceItemData, ("maintenance_id", models.Maintenance)),
 }
+log = logging.getLogger("fahrzeugbuch.sync")
+
 CHANGE_KEYS = {
     "vehicle": "vehicles", "odometer": "odometer", "fuel": "fuel",
     "maintenance": "maintenance", "maintenance_item": "maintenance_items",
@@ -57,11 +62,12 @@ def _apply(db: Session, tenant: models.Tenant, user: User, op: schemas.SyncOp) -
     )
     if dup is not None:
         obj = db.get(model, op.id)
-        return {**base, "status": "duplicate", "version": obj.version if obj else dup.version}
+        same = obj is not None and obj.tenant_id == tenant.id
+        return {**base, "status": "duplicate", "version": obj.version if same else dup.version}
 
     obj = db.get(model, op.id)
     if obj is not None and obj.tenant_id != tenant.id:
-        raise Rejected("ID gehört zu einem anderen Mandanten")
+        raise Rejected("ID bereits vergeben")
     conflict = obj is not None and op.base_version is not None and op.base_version != obj.version
 
     if op.action == "delete":
@@ -113,6 +119,12 @@ def apply_ops(db: Session, tenant: models.Tenant, user: User, ops: list[schemas.
             sp.rollback()
             results.append({"op_id": op.op_id, "entity": op.entity, "id": op.id, "status": "rejected",
                             "error": str(e)})
+        except SQLAlchemyError:
+            # z. B. Wertebereich/Constraint: nur diese Op verwerfen, nicht den ganzen Batch
+            sp.rollback()
+            log.exception("Sync-Op %s verworfen", op.op_id)
+            results.append({"op_id": op.op_id, "entity": op.entity, "id": op.id, "status": "rejected",
+                            "error": "Datenbankfehler"})
     return results
 
 

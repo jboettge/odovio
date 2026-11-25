@@ -1,6 +1,14 @@
 # Portainer: Stacks → Add stack → Repository
 #   Compose path: fahrzeugbuch/docker-compose.yml
-#   Env: DB_PASSWORD, OIDC_ISSUER, OIDC_CLIENT_ID (siehe .env.example)
+#   Env: siehe .env.example (DB_PASSWORD, APP_DB_PASSWORD, OIDC_ISSUER, ANCHOR_SIGNING_KEY, API_BIND …)
+x-api: &api
+  build: ./server
+  image: fahrzeugbuch-api:latest
+  read_only: true
+  tmpfs: [/tmp]
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+
 services:
   db:
     image: postgres:17-alpine
@@ -8,7 +16,7 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_DB: fahrzeugbuch
-      POSTGRES_USER: fahrzeugbuch
+      POSTGRES_USER: fahrzeugbuch          # Owner/Superuser – nur für Migration und Backup
       POSTGRES_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD fehlt}
     volumes:
       - fahrzeugbuch-db:/var/lib/postgresql/data
@@ -17,29 +25,54 @@ services:
       interval: 10s
       timeout: 5s
       retries: 10
+    security_opt: [no-new-privileges:true]
+    mem_limit: 1g
+    networks: [internal]
+
+  # Einmalig je Deploy: Schema/Trigger als Owner, App-Rolle ohne Owner-/Superuser-Rechte
+  migrate:
+    <<: *api
+    container_name: fahrzeugbuch-migrate
+    command: ["python", "-m", "app.migrate"]
+    restart: "no"
+    environment:
+      MIGRATION_DATABASE_URL: postgresql+psycopg://fahrzeugbuch:${DB_PASSWORD}@db:5432/fahrzeugbuch
+      DATABASE_URL: postgresql+psycopg://fahrzeugbuch_app:${APP_DB_PASSWORD:?APP_DB_PASSWORD fehlt}@db:5432/fahrzeugbuch
+      APP_DB_PASSWORD: ${APP_DB_PASSWORD}
+    depends_on:
+      db:
+        condition: service_healthy
     networks: [internal]
 
   api:
-    build: ./server
-    image: fahrzeugbuch-api:latest
+    <<: *api
     container_name: fahrzeugbuch-api
     restart: unless-stopped
     environment:
-      DATABASE_URL: postgresql+psycopg://fahrzeugbuch:${DB_PASSWORD}@db:5432/fahrzeugbuch
+      DATABASE_URL: postgresql+psycopg://fahrzeugbuch_app:${APP_DB_PASSWORD}@db:5432/fahrzeugbuch
+      AUTO_MIGRATE: "0"
       OIDC_ISSUER: ${OIDC_ISSUER:?OIDC_ISSUER fehlt}
       OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:-fahrzeugbuch-ios}
       OIDC_AUDIENCE: ${OIDC_AUDIENCE:-}
       OIDC_REQUIRED_ROLE: ${OIDC_REQUIRED_ROLE:-}
       TENANT_GROUP_PREFIX: ${TENANT_GROUP_PREFIX:-/fahrzeugbuch/}
       DEFAULT_TENANT: ${DEFAULT_TENANT:-}
+      ANCHOR_SIGNING_KEY: ${ANCHOR_SIGNING_KEY:-}
+      ANCHOR_INTERVAL_MIN: ${ANCHOR_INTERVAL_MIN:-60}
+      MAX_BODY_BYTES: ${MAX_BODY_BYTES:-1048576}
+      FORWARDED_ALLOW_IPS: ${FORWARDED_ALLOW_IPS:-127.0.0.1}
+      DOCS_ENABLED: ${DOCS_ENABLED:-0}
       # CHECKLIST_FILE: /config/checklists.json
     # volumes:
     #   - ./checklists.json:/config/checklists.json:ro
     ports:
-      - "${API_PORT:-8085}:8000"
+      # Nur für den Reverse Proxy freigeben: API_BIND = IP der Docker-VM (+ Firewall nur OPNsense)
+      - "${API_BIND:-127.0.0.1}:${API_PORT:-8085}:8000"
+    mem_limit: 512m
+    pids_limit: 200
     depends_on:
-      db:
-        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     networks: [internal, default]
 
 volumes:

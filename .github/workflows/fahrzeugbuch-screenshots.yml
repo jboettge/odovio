@@ -2,6 +2,7 @@ name: fahrzeugbuch-screenshots
 on:
   workflow_dispatch:
   push:
+    branches-ignore: [main]   # schreibt Screenshots zurück → nie auf main
     paths: ["fahrzeugbuch/ios/**", ".github/workflows/fahrzeugbuch-screenshots.yml"]
 
 permissions:

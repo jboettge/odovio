@@ -8,11 +8,12 @@ from .conftest import T, new_vehicle, op, sync, uid
 
 
 def _disable_triggers(conn):
-    if engine.dialect.name == "postgresql":
-        conn.execute(text("ALTER TABLE revisions DISABLE TRIGGER USER"))
-    else:
-        conn.execute(text("DROP TRIGGER fzb_revisions_no_update"))
-        conn.execute(text("DROP TRIGGER fzb_revisions_no_delete"))
+    for table in ("revisions", "anchors"):
+        if engine.dialect.name == "postgresql":
+            conn.execute(text(f"ALTER TABLE {table} DISABLE TRIGGER USER"))
+        else:
+            conn.execute(text(f"DROP TRIGGER fzb_{table}_no_update"))
+            conn.execute(text(f"DROP TRIGGER fzb_{table}_no_delete"))
 
 
 def _seed(client):

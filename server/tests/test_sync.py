@@ -65,9 +65,8 @@ def test_rejections_do_not_block_batch(client):
                good)
     assert [r["status"] for r in res["results"]] == ["rejected", "rejected", "rejected", "applied"]
     assert "liters" in res["results"][0]["error"]
-    assert client.get(f"{T}/audit/verify").json() == {
-        "ok": True, "count": 2, "head_hash": client.get(f"{T}/audit/verify").json()["head_hash"],
-        "broken_at": None, "reason": None}
+    v = client.get(f"{T}/audit/verify").json()
+    assert v["ok"] and v["count"] == 2 and v["problems"] == []
 
 
 def test_maintenance_with_items_and_due(client):

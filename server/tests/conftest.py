@@ -27,25 +27,28 @@ KEY = rsa.generate_private_key(public_exponent=65537, key_size=2048)
 
 
 class FakeJWKS:
-    def get_signing_key_from_jwt(self, token):
-        return type("K", (), {"key": KEY.public_key()})()
+    def key_for(self, kid):
+        from app.auth import UnknownKey
+        if kid != "test-kid":
+            raise UnknownKey
+        return KEY.public_key()
 
 
 def make_token(key=KEY, **overrides) -> str:
     now = int(time.time())
     claims = {
         "iss": ISSUER, "sub": "user-1", "azp": CLIENT_ID, "aud": "account",
-        "iat": now, "exp": now + 300, "preferred_username": "jakob",
+        "iat": now, "exp": now + 300, "preferred_username": "jakob", "typ": "Bearer",
         "realm_access": {"roles": ["fahrzeugbuch-user"]},
         "groups": ["/fahrzeugbuch/privat", "/fahrzeugbuch/firma/lesen", "/andere-app/x"],
     }
     claims.update(overrides)
-    return jwt.encode(claims, key, algorithm="RS256")
+    return jwt.encode(claims, key, algorithm="RS256", headers={"kid": "test-kid"})
 
 
 @pytest.fixture(autouse=True)
 def fake_jwks(monkeypatch):
-    monkeypatch.setattr(auth, "jwks_client", lambda issuer: FakeJWKS())
+    monkeypatch.setattr(auth, "jwks", lambda issuer: FakeJWKS())
 
 
 @pytest.fixture

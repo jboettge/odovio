@@ -1,5 +1,9 @@
 import datetime as dt
 import json
+import logging
+import os
+import unicodedata
+from urllib.parse import quote
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Annotated
@@ -10,23 +14,79 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from . import models, schemas
-from .audit import install_triggers, verify_chain
+from .integrity import key_id, maybe_anchor, public_key_b64, signing_key, verify_all
 from .auth import TENANT_SLUG, User, get_config, require_user
-from .db import Base, engine, get_session
+from .db import engine, get_session
+from .migrate import create_schema
 from .report import build_report
 from .stats import load_vehicle, vehicle_stats
 from .sync import ENTITIES, apply_ops, changes_since
 from .templates import load_templates
 
+log = logging.getLogger("fahrzeugbuch")
+
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    Base.metadata.create_all(engine)
-    install_triggers(engine)
+    # Mit getrennter App-Rolle (Compose) migriert der Dienst "migrate"; die API darf das nicht.
+    if os.environ.get("AUTO_MIGRATE", "1") == "1":
+        create_schema(engine)
+    if os.environ.get("DEFAULT_TENANT") and not os.environ.get("OIDC_REQUIRED_ROLE"):
+        log.warning("DEFAULT_TENANT ohne OIDC_REQUIRED_ROLE: jeder Realm-Benutzer erhält Schreibzugriff")
+    if signing_key() is None:
+        log.warning("ANCHOR_SIGNING_KEY fehlt: Hash-Kette wird nicht signiert verankert")
     yield
 
 
-app = FastAPI(title="Fahrzeugbuch", version="2.0.0", lifespan=lifespan)
+class RequestGuard:
+    """ASGI: (1) /api/* ohne Bearer-Header → 401 bevor der Body gelesen wird,
+    (2) Body-Grösse begrenzen (Content-Length und tatsächlich gestreamte Bytes)."""
+
+    def __init__(self, app, max_body: int):
+        self.app, self.max_body = app, max_body
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+        headers = dict(scope.get("headers") or [])
+        if scope["path"].startswith("/api/") and \
+                not headers.get(b"authorization", b"").lower().startswith(b"bearer "):
+            return await self._reply(send, 401, b'{"detail":"Token fehlt"}', [(b"www-authenticate", b"Bearer")])
+        length = headers.get(b"content-length")
+        if length is not None and (not length.isdigit() or int(length) > self.max_body):
+            return await self._reply(send, 413, b'{"detail":"Anfrage zu gross"}')
+        received = 0
+
+        async def limited():
+            nonlocal received
+            msg = await receive()
+            if msg["type"] == "http.request":
+                received += len(msg.get("body", b""))
+                if received > self.max_body:
+                    raise _TooLarge
+            return msg
+
+        try:
+            await self.app(scope, limited, send)
+        except _TooLarge:
+            await self._reply(send, 413, b'{"detail":"Anfrage zu gross"}')
+
+    @staticmethod
+    async def _reply(send, code: int, body: bytes, extra: list | None = None):
+        await send({"type": "http.response.start", "status": code,
+                    "headers": [(b"content-type", b"application/json"), *(extra or [])]})
+        await send({"type": "http.response.body", "body": body})
+
+
+class _TooLarge(Exception):
+    pass
+
+
+_docs = os.environ.get("DOCS_ENABLED") == "1"
+app = FastAPI(title="Fahrzeugbuch", version="2.1.0", lifespan=lifespan,
+              docs_url="/docs" if _docs else None, redoc_url=None,
+              openapi_url="/openapi.json" if _docs else None)
+app.add_middleware(RequestGuard, max_body=int(os.environ.get("MAX_BODY_BYTES", str(1024 * 1024))))
 DB = Annotated[Session, Depends(get_session)]
 CurrentUser = Annotated[User, Depends(require_user)]
 
@@ -68,6 +128,13 @@ def _vehicle_or_404(db: Session, access: Access, vid: str):
     if data is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Fahrzeug nicht gefunden")
     return data
+
+
+def content_disposition(filename: str) -> str:
+    """RFC 6266: ASCII-Fallback + UTF-8 (filename*), keine Steuer-/Anführungszeichen."""
+    clean = "".join(c if c.isprintable() and c not in '"\\/;' else "_" for c in filename).replace(" ", "_")
+    ascii_name = unicodedata.normalize("NFKD", clean).encode("ascii", "ignore").decode() or "Fahrzeugbuch.pdf"
+    return f'attachment; filename="{ascii_name}"; filename*=UTF-8\'\'{quote(clean)}'
 
 
 # ---------- öffentlich ----------
@@ -116,6 +183,7 @@ def post_sync(req: schemas.SyncRequest, access: TenantAccess, db: DB):
         .with_for_update().execution_options(populate_existing=True)
     )
     results = apply_ops(db, tenant, access.user, req.ops)
+    maybe_anchor(db, tenant)
     db.commit()
     return {"results": results, "cursor": tenant.seq}
 
@@ -149,10 +217,14 @@ def get_report(
     date_from = date_from or date_to.replace(month=1, day=1)
     if date_from > date_to:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Zeitraum ungültig")
-    pdf = build_report(db, access.tenant, data, date_from, date_to, access.user.name)
-    filename = f"fahrzeugbuch_{data.vehicle.name}_{date_from}_{date_to}.pdf".replace(" ", "_")
+    tenant = db.scalar(select(models.Tenant).where(models.Tenant.id == access.tenant.id)
+                       .with_for_update().execution_options(populate_existing=True))
+    if maybe_anchor(db, tenant, force=True):   # Bericht referenziert einen signierten Anker
+        db.commit()
+    pdf = build_report(db, tenant, data, date_from, date_to, access.user.name)
     return Response(pdf, media_type="application/pdf",
-                    headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+                    headers={"Content-Disposition": content_disposition(
+                        f"Fahrzeugbuch_{data.vehicle.name}_{date_from}_{date_to}.pdf")})
 
 
 # ---------- Revisionssicherheit ----------
@@ -172,4 +244,18 @@ def get_history(entity: str, eid: str, access: TenantAccess, db: DB):
 @app.get("/api/t/{tenant}/audit/verify", response_model=schemas.AuditResult)
 def audit_verify(access: TenantAccess, db: DB):
     db.refresh(access.tenant)
-    return verify_chain(db, access.tenant)
+    return verify_all(db, access.tenant)
+
+
+@app.get("/api/t/{tenant}/audit/anchors", response_model=schemas.AnchorList)
+def audit_anchors(access: TenantAccess, db: DB):
+    """Signierte Anker zur externen Archivierung (z. B. täglich per n8n → Paperless)."""
+    key = signing_key()
+    q = select(models.Anchor).where(models.Anchor.tenant_id == access.tenant.id).order_by(models.Anchor.seq)
+    return {
+        "tenant": access.tenant.slug,
+        "public_key": public_key_b64(key) if key else None,
+        "key_id": key_id(key) if key else None,
+        "message_format": "fahrzeugbuch-anchor|<tenant>|<seq>|<head_hash>|<created_at>",
+        "anchors": [{c: getattr(a, c) for c in schemas.AnchorOut.model_fields} for a in db.scalars(q)],
+    }

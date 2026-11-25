@@ -13,7 +13,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from . import models
-from .audit import verify_chain
+from .integrity import verify_all
 from .stats import VehicleData, consumption_points, summarize
 
 STYLES = getSampleStyleSheet()
@@ -44,14 +44,15 @@ def _day(d: dt.date | str | None) -> str:
     return d.strftime("%d.%m.%Y")
 
 
-def _p(text: str, style=SMALL) -> Paragraph:
-    return Paragraph(escape(text), style)
+def _p(text: str, style=SMALL, limit: int = 3000) -> Paragraph:
+    text = text if len(text) <= limit else text[:limit] + " …"
+    return Paragraph(escape(text).replace("\n", "<br/>"), style)
 
 
 def _table(header: list[str], rows: list[list], widths: list[float]) -> Table:
     data = [[_p(h, ParagraphStyle("th", parent=SMALL, fontName="Helvetica-Bold")) for h in header]]
     data += [[c if isinstance(c, Paragraph) else _p(str(c)) for c in r] for r in rows]
-    t = Table(data, colWidths=[w * mm for w in widths], repeatRows=1)
+    t = Table(data, colWidths=[w * mm for w in widths], repeatRows=1, splitInRow=1)
     t.setStyle(TableStyle([
         ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#e8edf3")),
         ("LINEBELOW", (0, 0), (-1, 0), 0.5, colors.grey),
@@ -104,7 +105,9 @@ def build_report(
     fuel_cost = sum(f.price_total for f in fuel)
     maint_cost = sum(m.cost or 0 for m in maint)
 
-    audit = verify_chain(db, tenant)
+    audit = verify_all(db, tenant)
+    anchor = db.scalar(select(models.Anchor).where(models.Anchor.tenant_id == tenant.id)
+                       .order_by(models.Anchor.seq.desc()).limit(1))
     created = dt.datetime.now().strftime("%d.%m.%Y %H:%M")
 
     story = [
@@ -181,11 +184,20 @@ def build_report(
     else:
         story.append(_p("Keine nachträglichen Änderungen oder Stornierungen."))
 
-    status = "OK" if audit["ok"] else f"FEHLER ab Seq {audit['broken_at']}: {audit['reason']}"
+    if audit["ok"]:
+        status = "OK"
+    elif not audit["chain_ok"]:
+        status = f"FEHLER ab Seq {audit['broken_at']}: {audit['reason']}"
+    else:
+        status = "FEHLER: " + "; ".join(audit["problems"][:3])
     story += [
         Paragraph("Integrität", H2),
-        _p(f"Revisionskette des Mandanten geprüft: {status}. Revisionen: {audit['count']}."),
+        _p(f"Geprüft: Hash-Kette, Abgleich der Einträge mit dem Journal, signierte Anker – {status}. "
+           f"Revisionen: {audit['count']}."),
         _p(f"Kettenkopf (SHA-256): {audit['head_hash']}"),
+        _p(f"Signierter Anker: Seq {anchor.seq}, {anchor.created_at}, Schlüssel {anchor.key_id}, "
+           f"Signatur {anchor.signature[:32]}…" if anchor else
+           "Kein signierter Anker (ANCHOR_SIGNING_KEY nicht konfiguriert)."),
         _p("Jede Erfassung, Änderung und Stornierung wird unveränderlich protokolliert und über eine "
            "Hash-Kette gesichert. Der Kettenkopf-Hash dieses Berichts erlaubt den späteren Nachweis, "
            "dass keine Einträge nachträglich verändert wurden."),
