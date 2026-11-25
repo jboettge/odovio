@@ -122,7 +122,8 @@ def test_references_foreign_tenant_rejected(client):
                op("trip", ftid, trip(vid)))                                   # ID-Übernahme
     assert statuses(res) == ["rejected"] * 9 + ["applied", "rejected"], res
     for err, field in zip(errors(res), ("vehicle_id", "customer_id", "start_place_id", "end_place_id", "split_of",
-                                        "customer_id", "result_customer_id", "from_place_id", "vehicle_id")):
+                                        "customer_id", "result_customer_id", "from_place_id", "vehicle_id"),
+                          strict=False):
         assert field in err, (err, field)
     assert errors(res)[-1] == "ID bereits vergeben"
     assert client.get("/api/t/firma/changes", headers=FIRMA).json()["trips"][0]["vehicle_id"] == fvid
@@ -165,7 +166,7 @@ def test_trip_timestamp_normalization_and_validation(client):
     st = statuses(res)
     # 07:30Z ist exakt 08:30+01:00 = nicht vor dem Start → zulässig
     assert st[5] == "applied"
-    assert st[:5] + st[6:] == ["rejected"] * (len(bad) - 1), list(zip(st, errors(res)))
+    assert st[:5] + st[6:] == ["rejected"] * (len(bad) - 1), list(zip(st, errors(res), strict=True))
     assert "km_end kleiner als km_start" in errors(res)[6]
     assert "end_at liegt vor start_at" in errors(res)[4]
     assert "Offset" in errors(res)[0]
@@ -216,7 +217,7 @@ def test_customer_rule_taxparam_validation(client):
                op("tax_param", uid(), {"year": 2026, "scope": "tenant", "key": "km_rate", "value": -1}),
                op("tax_param", uid(), {"year": 2026, "scope": "canton:ZH", "key": "cap_canton", "value": 6000}))
     assert statuses(res) == (["rejected"] * 3 + ["applied"] + ["rejected"] * 7 + ["applied"]
-                             + ["rejected"] * 5 + ["applied"]), list(zip(statuses(res), errors(res)))
+                             + ["rejected"] * 5 + ["applied"]), list(zip(statuses(res), errors(res), strict=True))
     rule = client.get(f"{T}/changes").json()["purpose_rules"][0]
     assert rule["weekdays"] == "6,7" and rule["auto_confirm"] is True
 

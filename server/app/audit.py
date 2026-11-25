@@ -69,9 +69,18 @@ def append_revision(
     return rev
 
 
-def verify_chain(db: Session, tenant: Tenant) -> dict:
+CHAIN_COLUMNS = tuple(getattr(Revision, f) for f in (*HASHED_FIELDS, "prev_hash", "hash"))
+
+
+def verify_chain(db: Session, tenant: Tenant, start: tuple[int, str] | None = None) -> dict:
+    """Hash-Kette prüfen – vollständig oder ab einem bereits bestätigten Stand `start` = (seq, hash).
+    Liest nur die gehashten Spalten, in Blöcken (kein vollständiges Laden als ORM-Objekte)."""
     prev, expected_seq, count = GENESIS, 1, 0
-    for rev in db.scalars(select(Revision).where(Revision.tenant_id == tenant.id).order_by(Revision.seq)):
+    if start is not None:
+        count, prev = start
+        expected_seq = count + 1
+    q = select(*CHAIN_COLUMNS).where(Revision.tenant_id == tenant.id, Revision.seq > count).order_by(Revision.seq)
+    for rev in db.execute(q.execution_options(yield_per=2000)):
         reason, at = None, rev.seq
         if rev.seq != expected_seq:
             reason, at = f"Lücke: Seq {expected_seq} fehlt", expected_seq

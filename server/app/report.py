@@ -82,9 +82,16 @@ def _table(header: list[str], rows: list[list], widths: list[float]) -> Table:
 
 
 def _describe(entity: str, data: dict) -> str:
+    text = _describe_data(entity, data)
+    reason = data.get("storno_reason") or data.get("correction_reason")
+    return f"{text}, Begründung: {reason}" if reason else text
+
+
+def _describe_data(entity: str, data: dict) -> str:
     match entity:
         case "fuel":
-            return f"{_day(data.get('date'))}, {_km(data.get('km'))} km, {_num(data.get('liters'))} l, CHF {_num(data.get('price_total'))}"
+            return (f"{_day(data.get('date'))}, {_km(data.get('km'))} km, {_num(data.get('liters'))} l, "
+                    f"CHF {_num(data.get('price_total'))}")
         case "odometer":
             return f"{_day(data.get('date'))}, {_km(data.get('km'))} km"
         case "maintenance":
@@ -114,12 +121,14 @@ def _describe(entity: str, data: dict) -> str:
                 parts.append(f"Notiz: {data['note']}")
             return ", ".join(x for x in parts if x)
         case "trip_period":
-            return f"{data.get('month')}: {data.get('status')} ({data.get('closed_by') or '–'})"
+            corr = f", {data['corrections']} Korrektur(en)" if data.get("corrections") else ""
+            return f"{data.get('month')}: {data.get('status')} ({data.get('closed_by') or '–'}){corr}"
     return ""
 
 
 def integrity_section(db: Session, tenant: models.Tenant) -> tuple[list, dict, models.Anchor | None]:
-    """Integritätsvermerk (Kette, Datenstand, Anker) für alle Berichte."""
+    """Integritätsvermerk (Kette, Datenstand, Anker) für alle Berichte. `db` ist der Snapshot des
+    Berichts (main: snapshot_session) → Prüfung und Berichtsinhalt zeigen denselben Stand."""
     audit = verify_all(db, tenant)
     anchor = db.scalar(select(models.Anchor).where(models.Anchor.tenant_id == tenant.id)
                        .order_by(models.Anchor.seq.desc()).limit(1))
@@ -197,7 +206,8 @@ def build_report(
         _table(["Kennzahl", "Wert"], [
             ["km-Stand Beginn / Ende", f"{_km(km_start)} / {_km(km_end)} km"],
             ["Gefahren im Zeitraum", f"{_km(km_end - km_start)} km"],
-            ["Ø Verbrauch", f"{_num(summary['avg_consumption'])} l/100 km  ({_num(summary['avg_liters_per_km'], 3)} l/km)"],
+            ["Ø Verbrauch", f"{_num(summary['avg_consumption'])} l/100 km  "
+                            f"({_num(summary['avg_liters_per_km'], 3)} l/km)"],
             ["Ø Treibstoffkosten", f"CHF {_num(summary['avg_cost_per_km'], 3)} / km"],
             ["Treibstoff", f"CHF {_num(fuel_cost)}  ({_num(sum(f.liters for f in fuel))} l)"],
             ["Wartung", f"CHF {_num(maint_cost)}"],

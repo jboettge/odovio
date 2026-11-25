@@ -1,7 +1,7 @@
 import datetime as dt
 import uuid
 
-from sqlalchemy import Boolean, Date, Float, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, Date, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint, false
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .db import Base
@@ -197,6 +197,8 @@ class Trip(Synced, Base):
     category: Mapped[str] = mapped_column(String(20), default="unknown")
     purpose: Mapped[str | None] = mapped_column(String(300))
     customer_id: Mapped[str | None] = mapped_column(ForeignKey("customers.id"))
+    # Beim Monatsabschluss eingefroren (Server): Kundenname zum Zeitpunkt des Abschlusses
+    customer_name: Mapped[str | None] = mapped_column(String(150))
     status: Mapped[str] = mapped_column(String(20), default="draft")
     source: Mapped[str] = mapped_column(String(20), default="manual")
     suggestion_category: Mapped[str | None] = mapped_column(String(20))
@@ -209,6 +211,8 @@ class Trip(Synced, Base):
     split_of: Mapped[str | None] = mapped_column(ForeignKey("trips.id"))
     private_mode: Mapped[bool] = mapped_column(Boolean, default=False)
     note: Mapped[str | None] = mapped_column(Text)
+    # km-Stände geschätzt (GPS) statt abgelesen → Monatscheck meldet die Fahrt
+    km_estimated: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
 
 
 class PurposeRule(Synced, Base):
@@ -260,6 +264,8 @@ class TripPeriod(Synced, Base):
     commute_km: Mapped[float] = mapped_column(Float, default=0)
     field_km: Mapped[float] = mapped_column(Float, default=0)
     note: Mapped[str | None] = mapped_column(String(500))   # Begründung bei erzwungenem Abschluss
+    # Korrekturen/Stornos nach dem Abschluss (Summen bleiben der Stand des Abschlusses)
+    corrections: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
 
 
 class Revision(Base):
@@ -302,3 +308,27 @@ class Anchor(Base):
     created_at: Mapped[str] = mapped_column(String(32))
     key_id: Mapped[str] = mapped_column(String(16))
     signature: Mapped[str] = mapped_column(String(128))
+
+
+class BlobCheck(Base):
+    """Persistenter Prüfsummen-Cache der Belegdateien: SHA-256 je Datei-Fingerabdruck
+    (Gerät, Inode, Grösse, mtime, ctime). Nach einem Neustart muss nicht jede Datei neu gelesen werden;
+    jede Änderung der Datei ändert den Fingerabdruck (ctime lässt sich ohne Root nicht zurücksetzen)."""
+
+    __tablename__ = "blob_checks"
+
+    attachment_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    tenant_id: Mapped[int] = mapped_column(ForeignKey("tenants.id"), index=True)
+    fingerprint: Mapped[str] = mapped_column(String(200))
+    sha256: Mapped[str] = mapped_column(String(64))
+    checked_at: Mapped[str] = mapped_column(String(32))
+
+
+# ---------- zusammengesetzte Indizes ----------
+# Pull (`/changes`): je Tabelle WHERE tenant_id = ? AND last_seq > ? ORDER BY last_seq
+SYNCED_MODELS = (Vehicle, OdometerReading, FuelEntry, Maintenance, MaintenanceItem, MaintenanceMaterial,
+                 MaterialArticle, Attachment, Customer, Place, Trip, PurposeRule, TaxParam, TripPeriod)
+for _m in SYNCED_MODELS:
+    Index(f"ix_{_m.__tablename__}_tenant_last_seq", _m.tenant_id, _m.last_seq)
+Index("ix_revisions_tenant_entity", Revision.tenant_id, Revision.entity, Revision.entity_id)
+Index("ix_trips_vehicle_start", Trip.vehicle_id, Trip.start_at)

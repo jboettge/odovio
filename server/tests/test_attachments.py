@@ -3,12 +3,11 @@ import io
 import json
 import os
 import stat
-import urllib.request
 
 import pytest
 from sqlalchemy import text
 
-from app import attachments
+from app import attachments, trips
 from app.db import engine
 
 from .conftest import T, bearer_token, new_vehicle, op, sync, uid
@@ -246,7 +245,7 @@ def test_upload_webhook(client, monkeypatch):
         calls.append((req.full_url, req.get_method(), json.loads(req.data), timeout))
         return _Resp(b"ok")
 
-    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(trips, "_open", fake_urlopen)
     vid = new_vehicle(client)
     fid = fuel(client, vid)
     aid = new_attachment(client, meta(fuel_id=fid, kind="pump"))
@@ -262,7 +261,7 @@ def test_upload_webhook(client, monkeypatch):
     def broken(req, timeout=None):
         raise OSError("n8n down")
 
-    monkeypatch.setattr(urllib.request, "urlopen", broken)
+    monkeypatch.setattr(trips, "_open", broken)
     other = new_attachment(client, meta(fuel_id=fid))
     assert put(client, other).status_code == 201                     # Fehler nur geloggt
 

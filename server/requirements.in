@@ -1,0 +1,14 @@
+# Direkte Abhängigkeiten der API. Lock-Datei (gepinnt, mit Hashes) erzeugen:
+#   pip-compile --generate-hashes --allow-unsafe --strip-extras -o requirements.txt requirements.in
+# (mit Python 3.12 = Version des Docker-Images)
+fastapi==0.165.0
+starlette==1.10.0           # FileResponse-Range-DoS (CVE-2025-62727) ab 0.49.1 behoben
+uvicorn[standard]==0.54.0
+sqlalchemy==2.1.9
+alembic==1.20.1
+psycopg[binary]==3.3.9
+pydantic==2.14.4
+pyjwt[crypto]==2.15.1
+cryptography==50.0.2
+reportlab==5.1.1
+tzdata==2026.6              # zoneinfo (Europe/Zurich) unabhängig vom Basis-Image

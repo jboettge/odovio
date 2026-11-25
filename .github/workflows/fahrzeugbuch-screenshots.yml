@@ -15,7 +15,7 @@ jobs:
       run:
         working-directory: fahrzeugbuch/ios
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
       - run: brew install xcodegen
       - run: xcodegen generate
       - name: Build (Debug, Simulator)
@@ -45,7 +45,7 @@ jobs:
             sleep 4
             xcrun simctl io "$UDID" screenshot --type=png "shots/$2.png" >/dev/null
           }
-          for s in list overview trips trips-recording trip-review trip-form gaps month-close trip-reports places rules tax-params fuel fuel-scan fuel-attachments maintenance maintenance-detail maintenance-edit catalog material-picker odometer fuel-form maintenance-form report settings login; do
+          for s in list overview trips trips-recording trip-review trip-form gaps month-close trip-reports places rules tax-params fuel fuel-scan fuel-attachments maintenance maintenance-detail maintenance-edit catalog material-picker odometer onboarding home-place rejected month-close-confirm glossary fuel-form maintenance-form report settings login; do
             shoot "$s" "$s"
           done
           xcrun simctl ui "$UDID" appearance dark
@@ -58,7 +58,7 @@ jobs:
             sips -s format jpeg -s formatOptions 80 -Z 1000 "$f" --out "../docs/screenshots/$(basename "${f%.png}").jpg" >/dev/null
           done
           ls -la ../docs/screenshots
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         with:
           name: fahrzeugbuch-screenshots
           path: fahrzeugbuch/ios/shots/

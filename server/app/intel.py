@@ -7,8 +7,13 @@ Token-Gruppen gelesen (gleiche Logik wie main.tenant_access, aber ohne DB-Zugrif
 
 Rate-Limits je Benutzer (In-Memory, je Prozess):
   INTEL_RATE_SUGGEST  Anfragen/Minute für /trips/suggest, Default 60
-  INTEL_RATE_GEO      Anfragen/Minute für /api/geo/*, Default 300
-  INTEL_RATE_SCAN     Anfragen/Minute für /scan (Bildauswertung), Default 20
+  INTEL_RATE_GEO      Anfragen/Minute für /api/geo/*, Default 30
+  INTEL_RATE_SCAN     Anfragen/Minute für /scan (Bildauswertung), Default 20 – geprüft bevor der Body
+                      gelesen wird
+Je Upstream begrenzt geo.Upstream die Gleichzeitigkeit (sofort 503) und sperrt nach Fehlern kurz.
+
+Reverse-Geocoding: POST /api/geo/reverse {lat, lon} – Koordinaten nicht in der URL (Access-Logs).
+GET mit Query-Parametern bleibt eine Version lang erhalten (deprecated).
 """
 import datetime as dt
 import logging
@@ -19,15 +24,16 @@ from collections import deque
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
+from fastapi.concurrency import run_in_threadpool
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.routing import APIRoute
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from . import classify, geo, vision
 from .auth import TENANT_SLUG, User, require_user
 from .classify import PrivateTrip, SuggestRequest
-from .geo import GeoNoResult, GeoUnavailable, InvalidTrack, UpstreamError
+from .geo import GeoNoResult, GeoUnavailable, InvalidTrack, UpstreamBusy, UpstreamError
 
 log = logging.getLogger("fahrzeugbuch.intel")
 SCAN_MAX_IMAGE = vision.MAX_IMAGE_BYTES
@@ -83,7 +89,7 @@ class RateLimiter:
 limiter = RateLimiter()
 
 
-def _limit(name: str, default: int) -> int:
+def env_limit(name: str, default: int) -> int:
     try:
         v = int(os.environ.get(name) or default)
     except ValueError:
@@ -91,12 +97,15 @@ def _limit(name: str, default: int) -> int:
     return v if v > 0 else default
 
 
+_limit = env_limit
+
+
 # ---------- Zugriff ----------
 def geo_user(user: CurrentUser) -> User:
     """Geo: irgendein Mandantenrecht (lesen genügt)."""
     if not user.tenants:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Kein Mandant zugeordnet")
-    limiter.check(f"geo:{user.sub}", _limit("INTEL_RATE_GEO", 300))
+    limiter.check(f"geo:{user.sub}", _limit("INTEL_RATE_GEO", 30))
     return user
 
 
@@ -116,6 +125,9 @@ def write_access(tenant: str, user: CurrentUser) -> User:
 def _upstream(e: Exception, what: str) -> HTTPException:
     if isinstance(e, GeoUnavailable):
         return HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, f"{what} nicht konfiguriert")
+    if isinstance(e, UpstreamBusy):
+        return HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, f"{what} ausgelastet – bitte später erneut",
+                             headers={"Retry-After": str(e.retry_after)})
     log.warning("%s fehlgeschlagen: %s", what, e)
     return HTTPException(status.HTTP_502_BAD_GATEWAY, f"{what} nicht erreichbar")
 
@@ -141,7 +153,7 @@ class TrackPoint(LatLon):
     @classmethod
     def _epoch(cls, v):
         if isinstance(v, dt.datetime):
-            v = (v if v.tzinfo else v.replace(tzinfo=dt.timezone.utc)).timestamp()
+            v = (v if v.tzinfo else v.replace(tzinfo=dt.UTC)).timestamp()
         elif v > 1e11:
             v = v / 1000
         if not TS_MIN <= v <= TS_MAX:
@@ -223,9 +235,9 @@ def geo_match(req: MatchRequest, _: GeoUser):
     try:
         return geo.match(pts)
     except InvalidTrack as e:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(e)) from e
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(e)) from e
     except GeoNoResult as e:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(e)) from e
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(e)) from e
     except (GeoUnavailable, UpstreamError) as e:
         raise _upstream(e, "Geo-Dienst") from e
 
@@ -235,33 +247,45 @@ def geo_route(req: RouteRequest, _: GeoUser):
     try:
         return geo.route(req.from_.lat, req.from_.lon, req.to.lat, req.to.lon)
     except GeoNoResult as e:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(e)) from e
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(e)) from e
     except (GeoUnavailable, UpstreamError) as e:
         raise _upstream(e, "Geo-Dienst") from e
 
 
-@router.get("/api/geo/reverse", response_model=ReverseResult)
-def geo_reverse(_: GeoUser,
-                lat: Annotated[float, Query(ge=-90, le=90, allow_inf_nan=False)],
-                lon: Annotated[float, Query(ge=-180, le=180, allow_inf_nan=False)]):
+def _reverse(lat: float, lon: float) -> dict:
     try:
         return geo.reverse(lat, lon)
     except (GeoUnavailable, UpstreamError) as e:
         raise _upstream(e, "Geo-Dienst") from e
 
 
+@router.post("/api/geo/reverse", response_model=ReverseResult)
+def geo_reverse_post(req: LatLon, _: GeoUser):
+    """Reverse-Geocoding; Koordinaten im Body (nicht in URL/Access-Log)."""
+    return _reverse(req.lat, req.lon)
+
+
+@router.get("/api/geo/reverse", response_model=ReverseResult, deprecated=True)
+def geo_reverse(_: GeoUser, response: Response,
+                lat: Annotated[float, Query(ge=-90, le=90, allow_inf_nan=False)],
+                lon: Annotated[float, Query(ge=-180, le=180, allow_inf_nan=False)]):
+    """Veraltet: POST verwenden. Das Zugriffslog enthält keine Query-Strings (logfilter)."""
+    response.headers["Deprecation"] = "true"
+    return _reverse(lat, lon)
+
+
 @router.post("/api/t/{tenant}/trips/suggest", response_model=Suggestion,
              responses={204: {"description": "kein Vorschlag"}})
 def trips_suggest(req: SuggestRequest, user: Annotated[User, Depends(write_access)]):
     if req.trip.private_mode:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Privatfahrten werden nicht an das LLM gesendet")
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "Privatfahrten werden nicht an das LLM gesendet")
     if not classify.configured():
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "LLM nicht konfiguriert")
     limiter.check(f"suggest:{user.sub}", _limit("INTEL_RATE_SUGGEST", 60))
     try:
         result = classify.suggest(req)
     except PrivateTrip as e:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(e)) from e
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(e)) from e
     except (GeoUnavailable, UpstreamError) as e:
         raise _upstream(e, "LLM") from e
     if result is None:
@@ -269,17 +293,40 @@ def trips_suggest(req: SuggestRequest, user: Annotated[User, Depends(write_acces
     return result
 
 
-@router.post("/api/t/{tenant}/scan", response_model=ScanResult,
-             responses={204: {"description": "nichts erkannt"}})
-def scan(req: ScanRequest, user: Annotated[User, Depends(write_access)]):
-    """Werte aus einem Belegfoto lesen (Vorschlag). Das Bild wird weder gespeichert noch protokolliert."""
+def scan_access(tenant: str, user: CurrentUser) -> User:
+    """Vor dem Body: Schreibrecht, Konfiguration und Rate-Limit – ein abgelehnter Aufruf liest und
+    parst die bis zu 2.8 MB nicht erst."""
+    write_access(tenant, user)
     if not vision.configured():
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Bildauswertung nicht konfiguriert")
     limiter.check(f"scan:{user.sub}", _limit("INTEL_RATE_SCAN", 20))
+    return user
+
+
+async def _scan_request(request: Request) -> ScanRequest:
+    body = await request.body()
+    try:
+        return ScanRequest.model_validate_json(body)
+    except ValidationError as e:
+        raise RequestValidationError([{"loc": ("body", *err.get("loc", ())), "msg": err.get("msg", ""),
+                                       "type": err.get("type", "")} for err in e.errors()]) from None
+
+
+@router.post("/api/t/{tenant}/scan", response_model=ScanResult,
+             responses={204: {"description": "nichts erkannt"}},
+             openapi_extra={"requestBody": {"required": True, "content": {"application/json": {
+                 "schema": ScanRequest.model_json_schema()}}}})
+async def scan(user: Annotated[User, Depends(scan_access)], request: Request):
+    """Werte aus einem Belegfoto lesen (Vorschlag). Das Bild wird weder gespeichert noch protokolliert."""
+    req = await _scan_request(request)
+    return await run_in_threadpool(_scan, req)
+
+
+def _scan(req: ScanRequest):
     try:
         raw, mime = vision.decode_image(req.image_b64)
     except vision.InvalidImage as e:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(e)) from None
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(e)) from None
     try:
         result = vision.scan(raw, mime, req.kind)
     except (GeoUnavailable, UpstreamError) as e:

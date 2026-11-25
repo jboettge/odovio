@@ -1,0 +1,14 @@
+# Lint (CI: ruff check app tests alembic)
+line-length = 120
+target-version = "py312"
+extend-exclude = ["alembic/versions"]   # autogeneriert
+
+[lint]
+select = ["E", "F", "W", "I", "B", "UP", "BLE"]
+ignore = [
+    "B008",   # FastAPI: Depends()/Query() als Default-Argumente
+    "UP031",  # %-Formatierung für JSON-Rohtexte in Tests
+]
+
+[lint.isort]
+known-first-party = ["app"]

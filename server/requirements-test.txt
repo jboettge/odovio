@@ -1,3 +1,5 @@
--r requirements.txt
-pytest==8.3.4
+# Test-/Lint-Werkzeuge (ohne Hashes). Zuerst die API-Abhängigkeiten aus der Lock-Datei:
+#   pip install --require-hashes --no-deps -r requirements.txt && pip install -r requirements-test.txt
+pytest==9.2.0
 httpx==0.28.1
+ruff==0.17.6

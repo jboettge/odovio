@@ -11,7 +11,8 @@ x-api: &api
 
 services:
   db:
-    image: postgres:17-alpine
+    # per Digest gepinnt (Update: docker pull postgres:17-alpine → RepoDigests)
+    image: postgres:17-alpine@sha256:f9cf3e1f0066f0eb0c48707d864f0ac5941e9ff454a072077d97a4d278d07d73
     container_name: fahrzeugbuch-db
     restart: unless-stopped
     environment:
@@ -29,7 +30,7 @@ services:
     mem_limit: 1g
     networks: [internal]
 
-  # Einmalig je Deploy: Schema/Trigger als Owner, App-Rolle ohne Owner-/Superuser-Rechte
+  # Einmalig je Deploy: Schema (Alembic upgrade head)/Trigger als Owner, App-Rolle ohne Owner-/Superuser-Rechte
   migrate:
     <<: *api
     container_name: fahrzeugbuch-migrate
@@ -58,11 +59,16 @@ services:
       TENANT_GROUP_PREFIX: ${TENANT_GROUP_PREFIX:-/fahrzeugbuch/}
       DEFAULT_TENANT: ${DEFAULT_TENANT:-}
       ANCHOR_SIGNING_KEY: ${ANCHOR_SIGNING_KEY:-}
+      # alte Public Keys nach Schlüsselwechsel (Base64, kommagetrennt) – alte Anker bleiben prüfbar
+      ANCHOR_PUBLIC_KEYS: ${ANCHOR_PUBLIC_KEYS:-}
       ANCHOR_INTERVAL_MIN: ${ANCHOR_INTERVAL_MIN:-60}
+      VERIFY_FULL_INTERVAL_S: ${VERIFY_FULL_INTERVAL_S:-86400}
+      APP_TIMEZONE: ${APP_TIMEZONE:-Europe/Zurich}
       MAX_BODY_BYTES: ${MAX_BODY_BYTES:-1048576}
       # Belege (Fotos/PDF): Ablage im Volume fahrzeugbuch-files, Upload-Limit nur für …/blob
       ATTACHMENT_DIR: /data/attachments
       MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES:-8388608}
+      ATTACHMENT_QUOTA_MB: ${ATTACHMENT_QUOTA_MB:-2048}
       FORWARDED_ALLOW_IPS: ${FORWARDED_ALLOW_IPS:-127.0.0.1}
       DOCS_ENABLED: ${DOCS_ENABLED:-0}
       # Intelligente Dienste (optional, leer = aus). OSRM/vLLM laufen beim Nutzer als eigene Container:
@@ -80,9 +86,16 @@ services:
       GEO_TIMEOUT_S: ${GEO_TIMEOUT_S:-5}
       LLM_TIMEOUT_S: ${LLM_TIMEOUT_S:-10}
       INTEL_RATE_SUGGEST: ${INTEL_RATE_SUGGEST:-60}
-      INTEL_RATE_GEO: ${INTEL_RATE_GEO:-300}
+      INTEL_RATE_GEO: ${INTEL_RATE_GEO:-30}
       INTEL_RATE_SCAN: ${INTEL_RATE_SCAN:-20}
+      UPSTREAM_CONCURRENCY: ${UPSTREAM_CONCURRENCY:-4}
+      UPSTREAM_BREAKER_FAILURES: ${UPSTREAM_BREAKER_FAILURES:-3}
+      UPSTREAM_BREAKER_OPEN_S: ${UPSTREAM_BREAKER_OPEN_S:-30}
+      RATE_REPORTS: ${RATE_REPORTS:-20}
+      RATE_VERIFY: ${RATE_VERIFY:-10}
+      RATE_FULL_SYNC: ${RATE_FULL_SYNC:-10}
       N8N_WEBHOOK_URL: ${N8N_WEBHOOK_URL:-}
+      N8N_WEBHOOK_SECRET: ${N8N_WEBHOOK_SECRET:-}
       TAX_CANTON: ${TAX_CANTON:-}
       # CHECKLIST_FILE: /config/checklists.json
     volumes:
@@ -104,12 +117,12 @@ services:
 
   # OPTIONAL – Reverse-Geocoding (Photon, CH-Extrakt). Start nur mit Profil:
   #   docker compose --profile geo up -d photon      →  PHOTON_URL=http://photon:2322
-  # Kein offizielles Image von komoot; Beispiel: rtuszik/photon-docker (lädt den Länderextrakt selbst).
-  # Variablennamen/Tag gemäss README des Images prüfen und Version pinnen.
+  # Kein offizielles Image von komoot; rtuszik/photon-docker (lädt den Länderextrakt selbst).
+  # Version + Digest gepinnt; vor einem Update Variablennamen gemäss README des Images prüfen.
   # Nur internes Netz, keine Ports: für den Erst-Download/Updates braucht der Container Internet –
   # dafür vorübergehend `default` bei networks ergänzen oder die Daten ins Volume kopieren.
   photon:
-    image: rtuszik/photon-docker:latest
+    image: rtuszik/photon-docker:2.5.0@sha256:c5babeb0ac396b485822036cf3c69e54fb6c79d699328a4e042e11bbd6f73f1a
     container_name: fahrzeugbuch-photon
     profiles: ["geo"]
     restart: unless-stopped

@@ -11,7 +11,8 @@ def test_inf_nan_rejected_and_tenant_stays_healthy(client):
     vid = new_vehicle(client)
     for bad in ("Infinity", "NaN", "1e309"):
         body = '{"ops":[{"op_id":"%s","entity":"fuel","id":"%s","action":"upsert","data":' \
-               '{"vehicle_id":"%s","date":"2026-01-01","km":1,"liters":%s,"price_total":1}}]}' % (uid(), uid(), vid, bad)
+               '{"vehicle_id":"%s","date":"2026-01-01","km":1,"liters":%s,"price_total":1}}]}' \
+               % (uid(), uid(), vid, bad)
         res = _raw_sync(client, body).json()
         assert res["results"][0]["status"] == "rejected", (bad, res)
     assert client.get(f"{T}/vehicles/{vid}/stats").status_code == 200
@@ -55,7 +56,8 @@ def test_duplicate_op_from_other_tenant_leaks_nothing(client):
 
 
 def test_validation_error_with_nan_is_422_without_echo(client):
-    body = '{"ops":[{"op_id":"%s","entity":"fuel","id":"%s","action":"upsert","base_version":Infinity}]}' % (uid(), uid())
+    body = '{"ops":[{"op_id":"%s","entity":"fuel","id":"%s","action":"upsert","base_version":Infinity}]}' \
+        % (uid(), uid())
     r = client.post(f"{T}/sync", content=body, headers={"Content-Type": "application/json"})
     assert r.status_code == 422
     assert "input" not in r.text and "Infinity" not in r.text

@@ -22,6 +22,7 @@ from sqlalchemy.orm import Session
 from . import models
 from .schemas import TRIP_CATEGORIES
 from .stats import VehicleData
+from .timeutil import local_month
 from .trips import trip_km, trips_between
 
 NOTE_A = "[A] Default gemäss Konzept Fahrtenbuch, mit Treuhand bestätigen"
@@ -131,7 +132,7 @@ def year_report(db: Session, tenant: models.Tenant, data: VehicleData, year: int
     shares = {c: _r(km[c] / total * 100, 1) if total else None for c in TRIP_CATEGORIES}
     unconfirmed = sum(1 for t in trips if t.status not in ("confirmed", "locked") or t.category == "unknown")
 
-    months = {t.start_at[:7] for t in trips}
+    months = {local_month(t.start_at) for t in trips}
     months |= {f"{e.date:%Y-%m}" for e in [*data.fuel, *data.odometer] if e.date.year == year}
     months_used = len(months)
 

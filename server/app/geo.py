@@ -6,16 +6,23 @@ Env:
   OSRM_MAX_MATCHING_SIZE  max. Punkte je /match-Anfrage (osrm-routed --max-matching-size), Default 100
   PHOTON_URL     z. B. http://photon:2322 (leer → nicht konfiguriert)
   GEO_TIMEOUT_S  Timeout je HTTP-Anfrage in Sekunden, Default 5
+  UPSTREAM_CONCURRENCY       gleichzeitige Anfragen je Dienst (OSRM, Photon, LLM, Vision), Default 4;
+                             ist ein Dienst ausgelastet → sofort 503 (keine wartenden Threads)
+  UPSTREAM_BREAKER_FAILURES  Fehler in Folge, nach denen ein Dienst gesperrt wird, Default 3
+  UPSTREAM_BREAKER_OPEN_S    Sperrdauer in Sekunden (sofort 503), Default 30
 
 Nur stdlib (urllib); kein Proxy (Dienste liegen im LAN), keine Weiterleitungen, Antwortgrösse begrenzt.
 """
 import json
 import logging
 import os
+import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 
 log = logging.getLogger("fahrzeugbuch.geo")
@@ -40,6 +47,66 @@ class GeoNoResult(Exception):
 
 class InvalidTrack(ValueError):
     pass
+
+
+class UpstreamBusy(UpstreamError):
+    """Dienst ausgelastet oder nach wiederholten Fehlern kurz gesperrt (→ 503 mit Retry-After)."""
+
+    def __init__(self, msg: str, retry_after: int):
+        super().__init__(msg)
+        self.retry_after = retry_after
+
+
+# ---------- Begrenzung je Dienst ----------
+class Upstream:
+    """Gleichzeitigkeit (nicht blockierend) und einfacher Circuit-Breaker je Upstream-Dienst."""
+
+    def __init__(self, name: str):
+        self.name = name
+        self.lock = threading.Lock()
+        self.active = 0
+        self.failures = 0
+        self.open_until = 0.0
+
+    @contextmanager
+    def guard(self) -> Iterator[None]:
+        limit = int(env_float("UPSTREAM_CONCURRENCY", 4))
+        now = time.monotonic()
+        with self.lock:
+            if self.open_until > now:
+                raise UpstreamBusy(f"{self.name} vorübergehend gesperrt", int(self.open_until - now) + 1)
+            if self.active >= limit:
+                raise UpstreamBusy(f"{self.name} ausgelastet", 1)
+            self.active += 1
+        try:
+            yield
+        except UpstreamError:
+            with self.lock:
+                self.failures += 1
+                if self.failures >= int(env_float("UPSTREAM_BREAKER_FAILURES", 3)):
+                    self.open_until = time.monotonic() + env_float("UPSTREAM_BREAKER_OPEN_S", 30)
+                    self.failures = 0
+                    log.warning("%s: nach wiederholten Fehlern vorübergehend gesperrt", self.name)
+            raise
+        else:
+            with self.lock:
+                self.failures = 0
+        finally:
+            with self.lock:
+                self.active -= 1
+
+    def reset(self) -> None:
+        with self.lock:
+            self.active = self.failures = 0
+            self.open_until = 0.0
+
+
+UPSTREAMS = {name: Upstream(name) for name in ("osrm", "photon", "llm", "vision")}
+
+
+def reset_upstreams() -> None:
+    for u in UPSTREAMS.values():
+        u.reset()
 
 
 # ---------- HTTP ----------
@@ -176,6 +243,11 @@ def _osrm():
 
 def match(points: list[Point]) -> dict:
     base, profile, timeout = _osrm()
+    with UPSTREAMS["osrm"].guard():
+        return _match(points, base, profile, timeout)
+
+
+def _match(points: list[Point], base: str, profile: str, timeout: float) -> dict:
     size = int(env_float("OSRM_MAX_MATCHING_SIZE", 100))
     size = max(size, 2)
     segments = prepare_segments(points)
@@ -224,7 +296,8 @@ def route(from_lat: float, from_lon: float, to_lat: float, to_lon: float) -> dic
     base, profile, timeout = _osrm()
     coords = f"{from_lon:.6f},{from_lat:.6f};{to_lon:.6f},{to_lat:.6f}"
     query = urllib.parse.urlencode({"overview": "false", "alternatives": "false", "steps": "false"})
-    res = http_json(f"{base}/route/v1/{urllib.parse.quote(profile)}/{coords}?{query}", timeout=timeout)
+    with UPSTREAMS["osrm"].guard():
+        res = http_json(f"{base}/route/v1/{urllib.parse.quote(profile)}/{coords}?{query}", timeout=timeout)
     code = res.get("code")
     if code in ("NoRoute", "NoSegment"):
         raise GeoNoResult("Keine Route gefunden")
@@ -269,10 +342,11 @@ def reverse(lat: float, lon: float) -> dict:
     base = base_url("PHOTON_URL")
     lat, lon = round(lat, 4), round(lon, 4)
     query = urllib.parse.urlencode({"lat": f"{lat:.4f}", "lon": f"{lon:.4f}", "lang": "de", "limit": 1})
-    res = http_json(f"{base}/reverse?{query}", timeout=env_float("GEO_TIMEOUT_S", 5))
-    features = res.get("features")
-    if not isinstance(features, list):
-        raise UpstreamError("Photon: keine features")
+    with UPSTREAMS["photon"].guard():
+        res = http_json(f"{base}/reverse?{query}", timeout=env_float("GEO_TIMEOUT_S", 5))
+        features = res.get("features")
+        if not isinstance(features, list):
+            raise UpstreamError("Photon: keine features")
     if not features:
         return {"label": None, "municipality": None, "country": None}
     props = features[0].get("properties") or {}

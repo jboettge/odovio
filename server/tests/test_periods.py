@@ -4,7 +4,8 @@ import csv
 import io
 import json
 import os
-import urllib.request
+
+from app import trips
 
 from .conftest import T, bearer_token, new_vehicle, op, sync, uid
 from .test_trips import FIRMA, errors, firma_sync, pdf_text, statuses, trip
@@ -138,9 +139,13 @@ def test_close_workflow_locks_and_rules(client):
                                       km_end=10080, note="   ")))
     assert statuses(res) == ["rejected"] * 4
     assert errors(res)[:2] == ["Monat abgeschlossen"] * 2 and "Begründung" in errors(res)[2]
+    # Storno gesperrter Fahrten nur mit Begründung (S3a)
+    res = sync(client, op("trip", ids[1], action="delete", base=2),
+               op("trip", ids[1], action="delete", base=2, reason="zu kurz"))
+    assert statuses(res) == ["rejected"] * 2 and all(e.startswith("Begründung erforderlich") for e in errors(res))
     corr, moved = uid(), uid()
     res = sync(client,
-               op("trip", ids[1], action="delete", base=2),                       # Storno erlaubt
+               op("trip", ids[1], action="delete", base=2, reason="Doppelt erfasst (Fahrt 5.3.)"),
                op("trip", corr, trip(vid, start="2026-03-25T08:00:00+01:00", end=None, km_start=10070,
                                      km_end=10080, status="confirmed", note="Nachtrag: Beleg Garage")),
                op("trip", moved, trip(vid, start="2026-04-01T08:00:00+02:00", end=None, km_start=10080,
@@ -148,12 +153,20 @@ def test_close_workflow_locks_and_rules(client):
     assert statuses(res) == ["applied"] * 3, res
     res = sync(client, op("trip", ids[1], trip(vid, category="private", purpose=None), base=3),   # Wiederbeleben
                op("trip", corr, trip(vid, note="neu"), base=1),                                  # Korrektur locked
-               op("trip", moved, trip(vid, start="2026-03-31T23:00:00+01:00", end=None, km_start=10080,
+               op("trip", moved, trip(vid, start="2026-03-31T21:00:00+01:00", end=None, km_start=10080,
                                       km_end=10090), base=1))                    # in geschlossenen Monat schieben
     assert statuses(res) == ["rejected"] * 3
     got = {t["id"]: t for t in client.get(f"{T}/changes").json()["trips"]}
     assert got[corr]["status"] == "locked" and got[moved]["status"] == "confirmed"
     assert got[ids[1]]["deleted"] is True and got[ids[1]]["status"] == "locked"
+    # Summen des Abschlusses bleiben, Korrekturen werden gezählt; Begründung in der Revision
+    period = client.get(f"{T}/changes").json()["trip_periods"][0]
+    assert (period["business_km"], period["private_km"], period["trips_count"]) == (30.0, 15.0, 4)
+    assert period["corrections"] == 2 and period["version"] == 3       # Storno + Nachtrag
+    hist = client.get(f"{T}/history/trip/{ids[1]}").json()
+    assert hist[-1]["action"] == "delete" and hist[-1]["data"]["storno_reason"] == "Doppelt erfasst (Fahrt 5.3.)"
+    txt = pdf_text(client.get(f"{T}/vehicles/{vid}/logbook.pdf?month={MARCH}").content)
+    assert "Korrekturen nach Abschluss: 2" in txt and "Doppelt erfasst" not in txt     # Privatfahrt
     v = client.get(f"{T}/audit/verify").json()
     assert v["ok"] and v["problems"] == [], v
 
@@ -172,7 +185,8 @@ def test_close_clean_month_forces_signed_anchor(client, monkeypatch):
     assert hist[0]["seq"] == seq and hist[0]["data"]["anchor_seq"] == seq
     anchors = client.get(f"{T}/audit/anchors").json()["anchors"]
     assert len(anchors) == len(before) + 1 and anchors[-1]["seq"] == seq
-    assert client.get(f"{T}/audit/verify").json()["ok"]
+    v = client.get(f"{T}/audit/verify").json()
+    assert v["ok"], v["problems"]
     pdf = client.get(f"{T}/vehicles/{vid}/logbook.pdf?month={MARCH}")
     assert pdf.status_code == 200 and f"Seq {seq}" in pdf_text(pdf.content)
 
@@ -200,7 +214,7 @@ def test_close_webhook(client, monkeypatch):
         return _Resp(b"ok")
 
     monkeypatch.setenv("N8N_WEBHOOK_URL", "https://n8n.example.test/webhook/fahrtenbuch")
-    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(trips, "_open", fake_urlopen)
     vid = new_vehicle(client)
     res = close(client, vid, month="2026-01")
     assert len(calls) == 1
@@ -213,11 +227,11 @@ def test_close_webhook(client, monkeypatch):
     def broken(req, timeout=None):
         raise OSError("n8n down")
 
-    monkeypatch.setattr(urllib.request, "urlopen", broken)
+    monkeypatch.setattr(trips, "_open", broken)
     res = close(client, vid, month="2026-02")                 # Fehler nur geloggt
     assert res["period"]["month"] == "2026-02"
     monkeypatch.delenv("N8N_WEBHOOK_URL")
-    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(trips, "_open", fake_urlopen)
     close(client, vid, month="2026-03")
     assert len(calls) == 1                                     # ohne URL kein Aufruf
 

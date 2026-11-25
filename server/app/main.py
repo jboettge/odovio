@@ -5,34 +5,45 @@ import logging
 import os
 import unicodedata
 import uuid
-from urllib.parse import quote
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Annotated
+from urllib.parse import quote
 
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, Request, Response, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from sqlalchemy import select
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
-from . import intel, models, schemas
-from .attachments import EXTENSIONS, blob_path, file_sha256, max_upload, store_blob
-from .integrity import key_id, maybe_anchor, public_key_b64, signing_key, verify_all
+from . import intel, logfilter, models, privacy, schemas
+from .attachments import (
+    EXTENSIONS,
+    blob_path,
+    content_matches,
+    file_sha256,
+    max_upload,
+    quota_bytes,
+    store_blob,
+    tenant_usage,
+)
 from .auth import TENANT_SLUG, User, get_config, require_user
-from .db import engine, get_session
+from .db import engine, get_session, snapshot_session
+from .integrity import key_id, maybe_anchor, public_key_b64, signing_key, verify_tenant
 from .logbook import build_logbook, build_year_report, trips_csv
 from .migrate import create_schema
 from .report import build_report
 from .schemas import is_month
-from .stats import load_vehicle, vehicle_stats
-from .sync import ENTITIES, apply_ops, changes_since
+from .stats import VehicleData, current_km_by_vehicle, load_vehicle, vehicle_stats
+from .sync import CHANGES_LIMIT, CHANGES_MAX, ENTITIES, apply_ops, changes_since, snapshot
 from .tax import year_report
 from .templates import load_templates
+from .timeutil import current_month, today
 from .trips import PeriodError, check_month, close_period, month_bounds, send_webhook, webhook_url
 
 log = logging.getLogger("fahrzeugbuch")
+logfilter.install()    # Zugriffslog ohne Query-Strings
 
 
 @asynccontextmanager
@@ -53,7 +64,8 @@ SCAN_MAX_BODY = 4 * ((intel.SCAN_MAX_IMAGE + 2) // 3) + 64 * 1024
 
 class RequestGuard:
     """ASGI: (1) /api/* ohne Bearer-Header → 401 bevor der Body gelesen wird,
-    (2) Body-Grösse begrenzen (Content-Length und tatsächlich gestreamte Bytes).
+    (2) Body-Grösse begrenzen (Content-Length und tatsächlich gestreamte Bytes),
+    (3) alle /api/*-Antworten mit `Cache-Control: no-store` (keine Mandantendaten in Geräte-/Proxy-Caches).
     Belegdateien (…/blob) dürfen bis `max_upload`, die Bildauswertung (…/scan) bis SCAN_MAX_BODY,
     alle übrigen Pfade bis `max_body`."""
 
@@ -72,9 +84,11 @@ class RequestGuard:
         if scope["type"] != "http":
             return await self.app(scope, receive, send)
         headers = dict(scope.get("headers") or [])
-        if scope["path"].startswith("/api/") and \
-                not headers.get(b"authorization", b"").lower().startswith(b"bearer "):
-            return await self._reply(send, 401, b'{"detail":"Token fehlt"}', [(b"www-authenticate", b"Bearer")])
+        if scope["path"].startswith("/api/"):
+            send = _no_store(send)
+            if not headers.get(b"authorization", b"").lower().startswith(b"bearer "):
+                return await self._reply(send, 401, b'{"detail":"Token fehlt"}',
+                                         [(b"www-authenticate", b"Bearer")])
         max_body = self.limit_for(scope["path"])
         length = headers.get(b"content-length")
         if length is not None and (not length.isdigit() or int(length) > max_body):
@@ -104,6 +118,15 @@ class RequestGuard:
 
 class _TooLarge(Exception):
     pass
+
+
+def _no_store(send):
+    async def wrapped(msg):
+        if msg["type"] == "http.response.start":
+            hdrs = [(k, v) for k, v in msg.get("headers", []) if k.lower() not in (b"cache-control", b"pragma")]
+            msg = {**msg, "headers": [*hdrs, (b"cache-control", b"no-store"), (b"pragma", b"no-cache")]}
+        await send(msg)
+    return wrapped
 
 
 _docs = os.environ.get("DOCS_ENABLED") == "1"
@@ -158,11 +181,22 @@ def tenant_access(tenant: str, user: CurrentUser, db: DB) -> Access:
 TenantAccess = Annotated[Access, Depends(tenant_access)]
 
 
-def _vehicle_or_404(db: Session, access: Access, vid: str):
-    data = load_vehicle(db, access.tenant.id, vid)
+def _vehicle_or_404(db: Session, access: Access, vid: str, **kw) -> VehicleData:
+    """404 nur, wenn das Fahrzeug nie existiert hat bzw. einem anderen Mandanten gehört (Berichte:
+    allow_deleted=True → auch stornierte Fahrzeuge)."""
+    data = load_vehicle(db, access.tenant.id, vid, **kw)
     if data is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Fahrzeug nicht gefunden")
     return data
+
+
+def _rate(access: "Access", name: str, env: str, default: int) -> None:
+    """Rate-Limit je Benutzer (RateLimiter aus intel, 429 mit Retry-After)."""
+    intel.limiter.check(f"{name}:{access.user.sub}", intel.env_limit(env, default))
+
+
+def _report_rate(access: "Access") -> None:
+    _rate(access, "report", "RATE_REPORTS", 20)
 
 
 def _require_write(access: Access) -> None:
@@ -177,26 +211,38 @@ def _locked_tenant(db: Session, access: Access) -> models.Tenant:
                      .with_for_update().execution_options(populate_existing=True))
 
 
-def _anchored_tenant(db: Session, access: Access) -> models.Tenant:
+def _anchor_and_release(db: Session, access: Access) -> None:
+    """Anker setzen (Bericht referenziert einen signierten Anker) und die Mandantensperre sofort wieder
+    freigeben – das Rendern läuft danach ohne Sperre in einem Snapshot."""
     tenant = _locked_tenant(db, access)
-    if maybe_anchor(db, tenant, force=True):   # Bericht referenziert einen signierten Anker
-        db.commit()
-    return tenant
+    maybe_anchor(db, tenant, force=True)
+    db.commit()
+
+
+def _release(db: Session) -> None:
+    """Laufende Transaktion der Anfrage beenden (SQLite: Schreibsperre), bevor lange gelesen wird."""
+    db.commit()
 
 
 def _month(month: str) -> str:
     if not is_month(month):
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Monat im Format YYYY-MM erwartet")
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "Monat im Format YYYY-MM erwartet")
     return month
 
 
-def _period(date_from: dt.date | None, date_to: dt.date | None, month: str | None = None) -> tuple[dt.date, dt.date]:
+LOGBOOK_MAX_DAYS = 366
+
+
+def _period(date_from: dt.date | None, date_to: dt.date | None, month: str | None = None,
+            max_days: int = 3700) -> tuple[dt.date, dt.date]:
     if month is not None:
         return month_bounds(_month(month))
-    date_to = date_to or dt.date.today()
+    date_to = date_to or today()
     date_from = date_from or date_to.replace(month=1, day=1)
-    if date_from > date_to or (date_to - date_from).days > 3700:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Zeitraum ungültig")
+    if date_from > date_to:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "Zeitraum ungültig")
+    if (date_to - date_from).days >= max_days:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, f"Zeitraum zu lang (max. {max_days} Tage)")
     return date_from, date_to
 
 
@@ -237,18 +283,31 @@ def checklist_templates(_: CurrentUser):
 
 # ---------- Sync ----------
 @app.get("/api/t/{tenant}/changes", response_model=schemas.Changes)
-def get_changes(access: TenantAccess, db: DB, since: Annotated[int, Query(ge=0)] = 0):
+def get_changes(access: TenantAccess, db: DB, since: Annotated[int, Query(ge=0)] = 0,
+                limit: Annotated[int, Query(ge=1, le=CHANGES_MAX)] = CHANGES_LIMIT):
+    """Änderungen seit `since`, seitenweise: solange `has_more`, mit since=cursor erneut abrufen.
+    Leserolle: Privatfahrten und private Orte maskiert."""
+    if since == 0:
+        _rate(access, "changes0", "RATE_FULL_SYNC", 10)
     db.refresh(access.tenant)
-    return changes_since(db, access.tenant, since)
+    return changes_since(db, access.tenant, since, limit, mask_private=access.role != "write")
 
 
-@app.post("/api/t/{tenant}/sync", response_model=schemas.SyncResponse)
+@app.post("/api/t/{tenant}/sync", response_model=schemas.SyncResponse,
+          responses={503: {"description": "Datenbank vorübergehend nicht verfügbar – später erneut senden"}})
 def post_sync(req: schemas.SyncRequest, access: TenantAccess, db: DB):
     _require_write(access)
-    tenant = _locked_tenant(db, access)
-    results = apply_ops(db, tenant, access.user, req.ops)
-    maybe_anchor(db, tenant)
-    db.commit()
+    try:
+        tenant = _locked_tenant(db, access)
+        results = apply_ops(db, tenant, access.user, req.ops)
+        maybe_anchor(db, tenant)
+        db.commit()
+    except SQLAlchemyError as e:
+        # vorübergehend (Verbindung, Serialisierung, Sperre): nichts verwerfen, der Client wiederholt
+        db.rollback()
+        log.warning("Sync abgebrochen (%s)", type(e).__name__)
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Datenbank vorübergehend nicht verfügbar",
+                            headers={"Retry-After": "30"}) from e
     return {"results": results, "cursor": tenant.seq}
 
 
@@ -256,16 +315,14 @@ def post_sync(req: schemas.SyncRequest, access: TenantAccess, db: DB):
 @app.get("/api/t/{tenant}/vehicles")
 def list_vehicles(access: TenantAccess, db: DB):
     q = select(models.Vehicle).where(models.Vehicle.tenant_id == access.tenant.id, models.Vehicle.deleted.is_(False))
-    out = []
-    for v in db.scalars(q.order_by(models.Vehicle.name)):
-        data = load_vehicle(db, access.tenant.id, v.id)
-        out.append({"id": v.id, "name": v.name, "plate": v.plate, "current_km": data.current_km})
-    return out
+    kms = current_km_by_vehicle(db, access.tenant.id)
+    return [{"id": v.id, "name": v.name, "plate": v.plate, "current_km": max(v.initial_km, kms.get(v.id, 0))}
+            for v in db.scalars(q.order_by(models.Vehicle.name))]
 
 
 @app.get("/api/t/{tenant}/vehicles/{vid}/stats", response_model=schemas.Stats)
 def get_stats(vid: str, access: TenantAccess, db: DB):
-    return vehicle_stats(_vehicle_or_404(db, access, vid))
+    return vehicle_stats(_vehicle_or_404(db, access, vid, allow_deleted=True))
 
 
 @app.get("/api/t/{tenant}/vehicles/{vid}/report.pdf", response_class=Response)
@@ -276,10 +333,14 @@ def get_report(
     date_from: Annotated[dt.date | None, Query(alias="from")] = None,
     date_to: Annotated[dt.date | None, Query(alias="to")] = None,
 ):
-    data = _vehicle_or_404(db, access, vid)
+    _report_rate(access)
     date_from, date_to = _period(date_from, date_to)
-    tenant = _anchored_tenant(db, access)
-    pdf = build_report(db, tenant, data, date_from, date_to, access.user.name)
+    _vehicle_or_404(db, access, vid, allow_deleted=True, children=False)
+    _anchor_and_release(db, access)
+    with snapshot_session() as s:
+        tenant = s.get(models.Tenant, access.tenant.id)
+        data = _vehicle_or_404(s, access, vid, allow_deleted=True)
+        pdf = build_report(s, tenant, data, date_from, date_to, access.user.name)
     return Response(pdf, media_type="application/pdf",
                     headers={"Content-Disposition": content_disposition(
                         f"Fahrzeugbuch_{data.vehicle.name}_{date_from}_{date_to}.pdf")})
@@ -293,21 +354,24 @@ MonthQ = Annotated[str | None, Query(max_length=7)]
 
 @app.get("/api/t/{tenant}/vehicles/{vid}/trips/check")
 def trips_check(vid: str, access: TenantAccess, db: DB, month: Annotated[str, Query(max_length=7)]):
-    """km-Kette, Plausibilität und Odometer-Abgleich eines Monats."""
-    data = _vehicle_or_404(db, access, vid)
-    return check_month(db, access.tenant, data, _month(month))
+    """km-Kette, Plausibilität und Odometer-Abgleich eines Monats (nur Einträge des Monats laden)."""
+    first, last = month_bounds(_month(month))
+    data = _vehicle_or_404(db, access, vid, allow_deleted=True, date_from=first, date_to=last, children=False)
+    return check_month(db, access.tenant, data, month)
 
 
 @app.post("/api/t/{tenant}/vehicles/{vid}/periods/{month}/close")
 def period_close(vid: str, month: str, req: schemas.CloseRequest, access: TenantAccess, db: DB,
                  background: BackgroundTasks):
-    """Monatsabschluss: Fahrten sperren, Abschluss ins Journal, signierten Anker erzwingen."""
+    """Monatsabschluss (nur abgelaufene Monate, lokale Zeit): Fahrten sperren, Namen einfrieren,
+    Abschluss ins Journal, signierten Anker erzwingen."""
     _require_write(access)
-    _month(month)
-    if month > f"{dt.date.today():%Y-%m}":
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Zukünftiger Monat kann nicht abgeschlossen werden")
+    first, last = month_bounds(_month(month))
+    if month >= current_month():
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT,
+                            "Nur abgelaufene Monate können abgeschlossen werden")
     tenant = _locked_tenant(db, access)
-    data = _vehicle_or_404(db, access, vid)
+    data = _vehicle_or_404(db, access, vid, date_from=first, date_to=last, children=False)
     try:
         result = close_period(db, tenant, access.user, data, month, req.force, req.reason)
     except PeriodError as e:
@@ -325,22 +389,31 @@ def period_close(vid: str, month: str, req: schemas.CloseRequest, access: Tenant
 @app.get("/api/t/{tenant}/vehicles/{vid}/logbook.pdf", response_class=Response)
 def get_logbook(vid: str, access: TenantAccess, db: DB, month: MonthQ = None,
                 date_from: DateFrom = None, date_to: DateTo = None):
-    data = _vehicle_or_404(db, access, vid)
+    _report_rate(access)
     if month is None and date_from is None and date_to is None:
-        month = f"{dt.date.today():%Y-%m}"
-    date_from, date_to = _period(date_from, date_to, month)
-    tenant = _anchored_tenant(db, access)
-    pdf = build_logbook(db, tenant, data, date_from, date_to, access.user.name,
-                        mask_private=access.role != "write")
+        month = current_month()
+    date_from, date_to = _period(date_from, date_to, month, max_days=LOGBOOK_MAX_DAYS)
+    _vehicle_or_404(db, access, vid, allow_deleted=True, children=False)
+    _anchor_and_release(db, access)
+    with snapshot_session() as s:
+        tenant = s.get(models.Tenant, access.tenant.id)
+        data = _vehicle_or_404(s, access, vid, allow_deleted=True, children=False)
+        pdf = build_logbook(s, tenant, data, date_from, date_to, access.user.name,
+                            mask_private=access.role != "write")
     return Response(pdf, media_type="application/pdf", headers={"Content-Disposition": content_disposition(
         f"Fahrtenbuch_{data.vehicle.name}_{month or f'{date_from}_{date_to}'}.pdf")})
 
 
 @app.get("/api/t/{tenant}/vehicles/{vid}/trips.csv", response_class=Response)
 def get_trips_csv(vid: str, access: TenantAccess, db: DB, date_from: DateFrom = None, date_to: DateTo = None):
-    data = _vehicle_or_404(db, access, vid)
-    date_from, date_to = _period(date_from, date_to)
-    body = trips_csv(db, access.tenant, data, date_from, date_to, mask_private=access.role != "write")
+    _report_rate(access)
+    date_from, date_to = _period(date_from, date_to, max_days=LOGBOOK_MAX_DAYS)
+    _vehicle_or_404(db, access, vid, allow_deleted=True, children=False)
+    _release(db)
+    with snapshot_session() as s:
+        tenant = s.get(models.Tenant, access.tenant.id)
+        data = _vehicle_or_404(s, access, vid, allow_deleted=True, children=False)
+        body = trips_csv(s, tenant, data, date_from, date_to, mask_private=access.role != "write")
     return Response(body, media_type="text/csv; charset=utf-8", headers={"Content-Disposition": content_disposition(
         f"Fahrten_{data.vehicle.name}_{date_from}_{date_to}.csv")})
 
@@ -350,16 +423,21 @@ YearQ = Annotated[int | None, Query(ge=2000, le=2100)]
 
 @app.get("/api/t/{tenant}/vehicles/{vid}/year-report")
 def get_year_report(vid: str, access: TenantAccess, db: DB, year: YearQ = None):
-    data = _vehicle_or_404(db, access, vid)
-    return year_report(db, access.tenant, data, year or dt.date.today().year)
+    _report_rate(access)
+    data = _vehicle_or_404(db, access, vid, allow_deleted=True)
+    return year_report(db, access.tenant, data, year or today().year)
 
 
 @app.get("/api/t/{tenant}/vehicles/{vid}/year-report.pdf", response_class=Response)
 def get_year_report_pdf(vid: str, access: TenantAccess, db: DB, year: YearQ = None):
-    data = _vehicle_or_404(db, access, vid)
-    year = year or dt.date.today().year
-    tenant = _anchored_tenant(db, access)
-    pdf = build_year_report(db, tenant, year_report(db, tenant, data, year), access.user.name)
+    _report_rate(access)
+    year = year or today().year
+    _vehicle_or_404(db, access, vid, allow_deleted=True, children=False)
+    _anchor_and_release(db, access)
+    with snapshot_session() as s:
+        tenant = s.get(models.Tenant, access.tenant.id)
+        data = _vehicle_or_404(s, access, vid, allow_deleted=True)
+        pdf = build_year_report(s, tenant, year_report(s, tenant, data, year), access.user.name)
     return Response(pdf, media_type="application/pdf", headers={"Content-Disposition": content_disposition(
         f"Jahresbericht_{data.vehicle.name}_{year}.pdf")})
 
@@ -399,13 +477,16 @@ def put_attachment_blob(aid: str, request: Request, background: BackgroundTasks,
     Idempotent; eine gespeicherte Datei wird nie überschrieben."""
     att = _attachment_or_404(db, access, aid)
     if len(body) > schemas.MAX_ATTACHMENT_BYTES:
-        raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, "Anfrage zu gross")
+        raise HTTPException(status.HTTP_413_CONTENT_TOO_LARGE, "Anfrage zu gross")
     if _media_type(request.headers.get("content-type")) != att.mime:
         raise HTTPException(status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, "Content-Type entspricht nicht dem Beleg (mime)")
+    if not content_matches(att.mime, body):
+        raise HTTPException(status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+                            f"Dateiinhalt ist kein {EXTENSIONS.get(att.mime, att.mime).upper()} (Magic Bytes)")
     if len(body) != att.size:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Grösse stimmt nicht")
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "Grösse stimmt nicht")
     if hashlib.sha256(body).hexdigest() != att.sha256:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Prüfsumme stimmt nicht")
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "Prüfsumme stimmt nicht")
     path = blob_path(access.tenant.id, att.id)
     if path.is_file():
         if file_sha256(path) == att.sha256:
@@ -414,6 +495,10 @@ def put_attachment_blob(aid: str, request: Request, background: BackgroundTasks,
         raise HTTPException(status.HTTP_409_CONFLICT, "Datei existiert bereits mit anderem Inhalt")
     if att.deleted:
         raise HTTPException(status.HTTP_409_CONFLICT, "Beleg storniert")
+    quota = quota_bytes()
+    if tenant_usage(access.tenant.id) + len(body) > quota:
+        raise HTTPException(status.HTTP_507_INSUFFICIENT_STORAGE,
+                            f"Speicherkontingent für Belege erschöpft (max. {quota // (1024 * 1024)} MB je Mandant)")
     try:
         store_blob(path, body)
     except OSError as e:
@@ -441,7 +526,7 @@ def get_attachment_blob(aid: str, access: TenantAccess, db: DB):
         "Content-Disposition": content_disposition(name, "inline"),
         "X-Content-Type-Options": "nosniff",
         "Content-Security-Policy": "default-src 'none'; sandbox",
-        "Cache-Control": "private, max-age=0",
+        "Cache-Control": "no-store",
         "ETag": f'"{att.sha256}"',
     })
 
@@ -456,14 +541,26 @@ def get_history(entity: str, eid: str, access: TenantAccess, db: DB):
         models.Revision.entity == entity,
         models.Revision.entity_id == eid,
     ).order_by(models.Revision.seq)
-    return [{**{f: getattr(r, f) for f in schemas.RevisionOut.model_fields if f != "data"},
-             "data": json.loads(r.data)} for r in db.scalars(q)]
+    out = [{**{f: getattr(r, f) for f in schemas.RevisionOut.model_fields if f != "data"},
+            "data": json.loads(r.data)} for r in db.scalars(q)]
+    if access.role != "write" and out:
+        # Leserolle: ist das Objekt heute privat, werden auch ältere Stände maskiert
+        model, schema, _ = ENTITIES[entity]
+        obj = db.get(model, out[0]["entity_id"])
+        force = obj is not None and obj.tenant_id == access.tenant.id and \
+            privacy.is_private(entity, snapshot(obj, schema))
+        for r in out:
+            r["data"] = privacy.mask(entity, r["data"], force)
+    return out
 
 
 @app.get("/api/t/{tenant}/audit/verify", response_model=schemas.AuditResult)
-def audit_verify(access: TenantAccess, db: DB):
-    db.refresh(access.tenant)
-    return verify_all(db, access.tenant)
+def audit_verify(access: TenantAccess, db: DB, full: Annotated[bool, Query()] = False):
+    """Integritätsprüfung in einem konsistenten Snapshot; inkrementell ab dem zuletzt bestätigten Stand,
+    `full=1` erzwingt die Vollprüfung (Kette + alle Belegdateien)."""
+    _rate(access, "verify", "RATE_VERIFY", 10)
+    _release(db)
+    return verify_tenant(access.tenant.id, full)
 
 
 @app.get("/api/t/{tenant}/audit/anchors", response_model=schemas.AnchorList)

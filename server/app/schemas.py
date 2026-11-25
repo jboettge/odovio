@@ -174,6 +174,7 @@ class TripData(Payload):
     category: TripCategory = "unknown"
     purpose: str | None = Field(default=None, max_length=300)
     customer_id: str | None = Field(default=None, max_length=36)
+    customer_name: str | None = Field(default=None, max_length=150)   # setzt nur der Server (Abschluss)
     status: Literal["draft", "suggested", "confirmed", "locked"] = "draft"   # "locked" setzt nur der Server
     source: Literal["auto", "manual", "gap", "import"] = "manual"
     suggestion_category: TripCategory | None = None
@@ -186,6 +187,7 @@ class TripData(Payload):
     split_of: str | None = Field(default=None, max_length=36)
     private_mode: bool = False
     note: str | None = Field(default=None, max_length=NOTE)
+    km_estimated: bool = False      # km-Stände aus GPS geschätzt (nicht abgelesen)
 
     @field_validator("start_at", "end_at", mode="before")
     @classmethod
@@ -308,6 +310,7 @@ class TripPeriodData(Payload):
     commute_km: float = 0
     field_km: float = 0
     note: str | None = None
+    corrections: int = 0      # Stornos/Korrekturen nach dem Abschluss (Summen bleiben unverändert)
 
 
 class CloseRequest(BaseModel):
@@ -326,6 +329,8 @@ class SyncOp(BaseModel):
     base_version: int | None = Field(default=None, ge=0, le=2_000_000_000)  # None = neu
     data: dict = {}
     client_ts: str | None = Field(default=None, max_length=40)  # Erfassungszeitpunkt auf dem Gerät
+    # Begründung für Storno/Korrektur in einem abgeschlossenen Monat (mind. 10 Zeichen)
+    reason: str | None = Field(default=None, max_length=300)
 
     @field_validator("id")
     @classmethod
@@ -352,7 +357,8 @@ class SyncResponse(BaseModel):
 
 
 class Changes(BaseModel):
-    cursor: int
+    cursor: int           # alle Änderungen bis einschliesslich cursor sind geliefert
+    has_more: bool = False   # True → erneut mit since=cursor abrufen
     vehicles: list[dict]
     odometer: list[dict]
     fuel: list[dict]
@@ -401,6 +407,7 @@ class AuditResult(BaseModel):
     anchors: int
     blobs_checked: int = 0  # Belegdateien mit geprüfter SHA-256
     blobs_missing: int = 0  # Belege ohne (hochgeladene) Datei – kein Fehler
+    incremental_from: int | None = None   # Kette ab dieser Seq geprüft (davor bereits bestätigt); None = voll
 
 
 class AnchorOut(BaseModel):

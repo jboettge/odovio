@@ -224,9 +224,11 @@ def suggest(req: SuggestRequest) -> dict | None:
         raise PrivateTrip("Privatfahrten werden nicht an das LLM gesendet")
     base, model, key, timeout = _config()
     headers = {"Authorization": f"Bearer {key}"} if key else None
-    res = geo.http_json(f"{base}/chat/completions", build_request(req, model), headers=headers, timeout=timeout)
-    try:
-        content = res["choices"][0]["message"]["content"]
-    except (KeyError, IndexError, TypeError) as e:
-        raise UpstreamError("LLM: unerwartete Antwort") from e
+    with geo.UPSTREAMS["llm"].guard():
+        res = geo.http_json(f"{base}/chat/completions", build_request(req, model), headers=headers,
+                            timeout=timeout)
+        try:
+            content = res["choices"][0]["message"]["content"]
+        except (KeyError, IndexError, TypeError) as e:
+            raise UpstreamError("LLM: unerwartete Antwort") from e
     return parse(content, {c.id for c in req.customers})

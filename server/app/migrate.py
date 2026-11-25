@@ -8,15 +8,25 @@ PostgreSQL:
 Die App-Rolle ist weder Owner noch Superuser → kann Trigger nicht deaktivieren,
 Revisionen nicht ändern/löschen und keine Datensätze physisch löschen.
 
+Schema-Versionen: Alembic (server/alembic, Baseline-Revision 0001 = Schema inkl. Indizes).
+  neue DB                      → alembic upgrade head
+  Bestand ohne alembic_version → fehlende Spalten/Tabellen/Indizes nachrüsten, auf Baseline stempeln,
+                                 dann upgrade head
+  Bestand mit alembic_version  → upgrade head
+
 Aufruf: python -m app.migrate
 """
 import logging
 import os
 import re
 import sys
+from pathlib import Path
 
-from sqlalchemy import Engine, create_engine, inspect, text
+from alembic.config import Config
+from sqlalchemy import Connection, Engine, create_engine, inspect, text
 from sqlalchemy.engine import make_url
+
+from alembic import command
 
 from . import models  # noqa: F401  (Tabellen registrieren)
 from .audit import IMMUTABLE_TABLES, install_triggers
@@ -29,33 +39,76 @@ DML_TABLES = tuple(t.name for t in Base.metadata.sorted_tables if t.name not in 
 ROLE = re.compile(r"^[a-z_][a-z0-9_]{0,62}$")
 
 
-def add_missing_columns(engine: Engine) -> None:
+ROOT = Path(__file__).resolve().parents[1]
+BASELINE = "0001"
+
+
+def alembic_config(conn: Connection | None = None) -> Config:
+    cfg = Config(str(ROOT / "alembic.ini"))
+    cfg.set_main_option("script_location", str(ROOT / "alembic"))
+    if conn is not None:
+        cfg.attributes["connection"] = conn
+    return cfg
+
+
+def add_missing_columns(conn: Connection) -> None:
     """Idempotente Nachrüstung fehlender Spalten für ALLE Modelle (SQLite und PostgreSQL).
 
     `create_all` legt nur fehlende Tabellen an, ergänzt aber keine Spalten bestehender Tabellen.
-    Nachgerüstet werden nullable Spalten (ohne Fremdschlüssel-Constraint, Verweise prüft der Sync);
-    nicht-nullable Spalten ohne Server-Default lassen sich nicht nachrüsten → Warnung."""
-    with engine.begin() as conn:
-        insp = inspect(conn)
-        tables = set(insp.get_table_names())
-        for table in Base.metadata.sorted_tables:
-            if table.name not in tables:
+    Nachgerüstet werden nullable Spalten und nicht-nullable mit Server-Default (ohne Fremdschlüssel-
+    Constraint, Verweise prüft der Sync); andere nicht-nullable Spalten → Warnung."""
+    insp = inspect(conn)
+    tables = set(insp.get_table_names())
+    ddl_compiler = conn.dialect.ddl_compiler(conn.dialect, None)
+    for table in Base.metadata.sorted_tables:
+        if table.name not in tables:
+            continue
+        present = {c["name"] for c in insp.get_columns(table.name)}
+        for col in table.columns:
+            if col.name in present:
                 continue
-            present = {c["name"] for c in insp.get_columns(table.name)}
-            for col in table.columns:
-                if col.name in present:
-                    continue
-                if not col.nullable or col.primary_key:
-                    log.warning("Spalte %s.%s fehlt und ist nicht nullable – manuelle Migration nötig",
-                                table.name, col.name)
-                    continue
-                ddl = col.type.compile(dialect=conn.dialect)
-                conn.exec_driver_sql(f'ALTER TABLE {table.name} ADD COLUMN "{col.name}" {ddl}')
+            ddl = col.type.compile(dialect=conn.dialect)
+            if col.primary_key or (not col.nullable and col.server_default is None):
+                log.warning("Spalte %s.%s fehlt und ist nicht nullable – manuelle Migration nötig",
+                            table.name, col.name)
+                continue
+            if not col.nullable:
+                ddl += f" DEFAULT {ddl_compiler.get_column_default_string(col)} NOT NULL"
+            conn.exec_driver_sql(f'ALTER TABLE {table.name} ADD COLUMN "{col.name}" {ddl}')
+
+
+def add_missing_indexes(conn: Connection) -> None:
+    insp = inspect(conn)
+    for table in Base.metadata.sorted_tables:
+        present = {i["name"] for i in insp.get_indexes(table.name)}
+        for idx in table.indexes:
+            if idx.name not in present:
+                idx.create(conn)
+
+
+def _version(conn: Connection, tables: set[str]) -> str | None:
+    if "alembic_version" not in tables:
+        return None
+    return conn.execute(text("SELECT version_num FROM alembic_version")).scalar()
 
 
 def create_schema(engine: Engine) -> None:
-    add_missing_columns(engine)
-    Base.metadata.create_all(engine)
+    with engine.begin() as conn:
+        tables = set(inspect(conn).get_table_names())
+        model_tables = set(Base.metadata.tables)
+        version = _version(conn, tables)
+        cfg = alembic_config(conn)
+        if not tables & model_tables:
+            if version is not None:                        # Tabellen entfernt, Versionsstand übrig
+                conn.execute(text("DELETE FROM alembic_version"))
+        elif version is None or model_tables - tables:
+            # Bestand ohne Alembic (bzw. unvollständig): nachrüsten, dann auf die Baseline stempeln
+            add_missing_columns(conn)
+            Base.metadata.create_all(conn)
+            add_missing_indexes(conn)
+            if version is None:
+                command.stamp(cfg, BASELINE)
+        command.upgrade(cfg, "head")
     install_triggers(engine)
 
 

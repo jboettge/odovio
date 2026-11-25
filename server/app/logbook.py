@@ -2,6 +2,10 @@
 
 Privatsphäre: Fahrten im Privatmodus zeigen Start/Ziel/Zweck nur als „privat“. Mit `mask_private`
 (Leserolle, z. B. Treuhand) gilt das für alle Privatfahrten (Konzept US6).
+
+Abgeschlossene Monate: Start-/Zielbezeichnung und Kundenname wurden beim Abschluss in die Fahrt
+geschrieben (eingefroren) – spätere Umbenennungen von Orten/Kunden ändern den Bericht nicht.
+Zeiten in lokaler Zeit (APP_TIMEZONE).
 """
 import csv
 import datetime as dt
@@ -16,12 +20,28 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from . import models
-from .report import (ACTIONS, BOLD, CATEGORY_NAMES, H2, SMALL, SOURCE_NAMES, STATUS_NAMES, STYLES, _day,
-                     _describe, _km, _num, _p, _table, footer, integrity_section)
+from .report import (
+    ACTIONS,
+    BOLD,
+    CATEGORY_NAMES,
+    H2,
+    SMALL,
+    SOURCE_NAMES,
+    STATUS_NAMES,
+    STYLES,
+    _day,
+    _describe,
+    _km,
+    _num,
+    _p,
+    _table,
+    footer,
+    integrity_section,
+)
 from .stats import VehicleData
 from .tax import DISCLAIMER
-from .trips import (km_by_category, km_gaps, month_bounds, odometer_check, previous_trip, trip_km,
-                    trips_between)
+from .timeutil import local, local_month
+from .trips import km_by_category, km_gaps, month_bounds, odometer_check, previous_trip, trip_km, trips_between
 
 OWNERSHIP_NAMES = {"private": "Privatfahrzeug", "business": "Geschäftsfahrzeug"}
 METHOD_NAMES = {"flat": "Privatanteil pauschal (0.9 %/Monat)", "effective": "Privatanteil effektiv (Fahrtenbuch)"}
@@ -42,7 +62,9 @@ class Lookup:
         p = self.places.get(pid) if pid else None
         return p.name if p else "–"
 
-    def customer(self, cid: str | None) -> str:
+    def customer(self, cid: str | None, frozen: str | None = None) -> str:
+        if frozen:
+            return frozen
         c = self.customers.get(cid) if cid else None
         if c is None:
             return ""
@@ -54,7 +76,7 @@ def masked(t: models.Trip, mask_private: bool) -> bool:
 
 
 def _local(ts: str | None) -> dt.datetime | None:
-    return dt.datetime.fromisoformat(ts) if ts else None
+    return local(ts) if ts else None
 
 
 def _time_range(t: models.Trip) -> str:
@@ -73,7 +95,7 @@ def _route(t: models.Trip, lk: Lookup, mask: bool) -> tuple[str, str]:
 def _purpose(t: models.Trip, lk: Lookup, mask: bool) -> str:
     if masked(t, mask):
         return PRIVATE if t.category == "private" or t.private_mode else ""
-    parts = [x for x in (t.purpose, lk.customer(t.customer_id)) if x]
+    parts = [x for x in (t.purpose, lk.customer(t.customer_id, t.customer_name)) if x]
     return " · ".join(parts)
 
 
@@ -118,7 +140,7 @@ def build_logbook(db: Session, tenant: models.Tenant, data: VehicleData, date_fr
                 purpose = f"{purpose}\nNotiz: {t.note}" if purpose else f"Notiz: {t.note}"
             dist = trip_km(t)
             rows.append([
-                _day(t.start_at), _time_range(t), _km(t.km_start), _km(t.km_end), _num(dist, 1),
+                _day(_local(t.start_at).date()), _time_range(t), _km(t.km_start), _km(t.km_end), _num(dist, 1),
                 _p(f"{start} » {end}", limit=420), CATEGORY_NAMES.get(t.category, t.category),
                 _p(purpose, limit=600), _p(t.driver_name or (t.driver_sub or "–")[:20], limit=100),
                 STATUS_NAMES.get(t.status, t.status), SOURCE_NAMES.get(t.source, t.source),
@@ -150,7 +172,8 @@ def build_logbook(db: Session, tenant: models.Tenant, data: VehicleData, date_fr
     if gaps:
         story.append(_table(
             ["nach Fahrt", "vor Fahrt", "km von", "km bis", "Differenz km"],
-            [[_day(by_id[g["after_trip_id"]].start_at), _day(by_id[g["before_trip_id"]].start_at),
+            [[_day(_local(by_id[g["after_trip_id"]].start_at).date()),
+              _day(_local(by_id[g["before_trip_id"]].start_at).date()),
               _km(g["km_from"]), _km(g["km_to"]), _km(g["km"])] for g in gaps],
             [35, 35, 30, 30, 30]))
     else:
@@ -158,7 +181,7 @@ def build_logbook(db: Session, tenant: models.Tenant, data: VehicleData, date_fr
     odo_rows = []
     for month in _months(date_from, date_to):
         m_first, m_last = month_bounds(month)
-        m_trips = [t for t in trips if t.start_at[:7] == month]
+        m_trips = [t for t in trips if local_month(t.start_at) == month]
         chk = odometer_check(data, m_trips, max(m_first, date_from), min(m_last, date_to))
         odo_rows.append([month, _num(chk["trip_km"], 1), _km(chk["odometer_km"]),
                          _num(chk["diff_km"], 1) if chk["diff_km"] is not None else "–",
@@ -181,16 +204,14 @@ def build_logbook(db: Session, tenant: models.Tenant, data: VehicleData, date_fr
         a = anchors.get(p.anchor_seq) if p.anchor_seq is not None else None
         anchor = (f"Seq {a.seq}, Schlüssel {a.key_id}, Signatur {a.signature[:24]}…" if a else
                   "kein signierter Anker")
+        corr = f"\nKorrekturen nach Abschluss: {p.corrections}" if p.corrections else ""
         rows.append([month, "abgeschlossen", p.closed_by or "–", (p.closed_at or "")[:19].replace("T", " "),
-                     anchor + (f"\n{p.note}" if p.note else "")])
+                     anchor + (f"\n{p.note}" if p.note else "") + corr])
     story += [Paragraph("Monatsabschluss", H2),
               _table(["Monat", "Status", "durch", "am (UTC)", "Anker / Bemerkung"], rows, [20, 25, 35, 32, 150])]
 
     # Änderungsprotokoll der Fahrten (Client-Änderungen, Stornos, Konflikte; Sperren beim Abschluss s. oben)
-    ids = list(db.scalars(select(models.Trip.id).where(        # inkl. stornierte Fahrten
-        models.Trip.tenant_id == tenant.id, models.Trip.vehicle_id == v.id,
-        models.Trip.start_at >= date_from.isoformat(),
-        models.Trip.start_at < (date_to + dt.timedelta(days=1)).isoformat())))
+    ids = [t.id for t in trips_between(db, tenant.id, v.id, date_from, date_to, include_deleted=True)]
     revs = list(db.scalars(
         select(models.Revision).where(
             models.Revision.tenant_id == tenant.id, models.Revision.entity == "trip",
@@ -257,7 +278,7 @@ def trips_csv(db: Session, tenant: models.Tenant, data: VehicleData, date_from: 
             (f"{e:%H:%M}" if e else ""),
             "" if t.km_start is None else t.km_start, "" if t.km_end is None else t.km_end, f"{trip_km(t):.1f}",
             _cell(start), _cell(end), CATEGORY_NAMES.get(t.category, t.category),
-            PRIVATE if hide else _cell(t.purpose), "" if hide else _cell(lk.customer(t.customer_id)),
+            PRIVATE if hide else _cell(t.purpose), "" if hide else _cell(lk.customer(t.customer_id, t.customer_name)),
             _cell(t.driver_name or t.driver_sub), STATUS_NAMES.get(t.status, t.status),
             SOURCE_NAMES.get(t.source, t.source), "" if hide else _cell(t.note), _cell(v.name), _cell(v.plate),
             t.id,

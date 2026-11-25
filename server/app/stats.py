@@ -9,7 +9,7 @@ Verbrauch einer Etappe = alle seit der letzten Volltankung getankten Liter
 import datetime as dt
 from dataclasses import dataclass, field
 
-from sqlalchemy import select
+from sqlalchemy import func, select, union_all
 from sqlalchemy.orm import Session
 
 from . import models
@@ -39,19 +39,31 @@ class VehicleData:
         return max(kms)
 
 
-def load_vehicle(db: Session, tenant_id: int, vehicle_id: str) -> VehicleData | None:
+def load_vehicle(db: Session, tenant_id: int, vehicle_id: str, *, allow_deleted: bool = False,
+                 date_from: dt.date | None = None, date_to: dt.date | None = None,
+                 children: bool = True) -> VehicleData | None:
+    """Fahrzeug mit nicht stornierten km-Ständen, Tankvorgängen, Wartungen (+ Checkpunkte/Material).
+
+    allow_deleted: auch ein storniertes Fahrzeug (Berichte über abgeschlossene Zeiträume).
+    date_from/date_to: nur Einträge im Zeitraum (Monatscheck/Abschluss), children=False: ohne
+    Checkpunkte/Material."""
     v = db.get(models.Vehicle, vehicle_id)
-    if v is None or v.tenant_id != tenant_id or v.deleted:
+    if v is None or v.tenant_id != tenant_id or (v.deleted and not allow_deleted):
         return None
 
     def rows(model):
-        return list(db.scalars(select(model).where(model.vehicle_id == vehicle_id, model.deleted.is_(False))))
+        q = select(model).where(model.vehicle_id == vehicle_id, model.deleted.is_(False))
+        if date_from is not None:
+            q = q.where(model.date >= date_from)
+        if date_to is not None:
+            q = q.where(model.date <= date_to)
+        return list(db.scalars(q))
 
     maint = rows(models.Maintenance)
 
-    def children(model) -> dict[str, list]:
+    def load_children(model) -> dict[str, list]:
         out: dict[str, list] = {m.id: [] for m in maint}
-        if maint:
+        if maint and children:
             q = select(model).where(
                 model.maintenance_id.in_(list(out.keys())), model.deleted.is_(False)
             ).order_by(model.position, model.id)
@@ -60,7 +72,16 @@ def load_vehicle(db: Session, tenant_id: int, vehicle_id: str) -> VehicleData | 
         return out
 
     return VehicleData(v, rows(models.OdometerReading), rows(models.FuelEntry), maint,
-                       children(models.MaintenanceItem), children(models.MaintenanceMaterial))
+                       load_children(models.MaintenanceItem), load_children(models.MaintenanceMaterial))
+
+
+def current_km_by_vehicle(db: Session, tenant_id: int) -> dict[str, int]:
+    """Höchster km-Stand je Fahrzeug (km-Stände, Tankvorgänge, Wartungen) in einer Abfrage."""
+    parts = [select(m.vehicle_id.label("vid"), m.km.label("km")).where(
+        m.tenant_id == tenant_id, m.deleted.is_(False), m.km.is_not(None))
+        for m in (models.OdometerReading, models.FuelEntry, models.Maintenance)]
+    u = union_all(*parts).subquery()
+    return {vid: km for vid, km in db.execute(select(u.c.vid, func.max(u.c.km)).group_by(u.c.vid))}
 
 
 def material_sum(materials: list[models.MaintenanceMaterial]) -> float:
