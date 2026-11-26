@@ -8,6 +8,11 @@ on:
 permissions:
   contents: write   # Screenshots werden auf denselben (Feature-)Branch committet
 
+# Nur der neueste Lauf je Branch zählt (spart macOS-Minuten, verhindert Push-Konflikte paralleler Läufe)
+concurrency:
+  group: screenshots-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   screenshots:
     runs-on: macos-15
@@ -72,5 +77,6 @@ jobs:
           git add docs/screenshots
           git diff --cached --quiet && exit 0
           git commit -m "Fahrzeugbuch: Screenshots aktualisiert [skip ci]"
-          git pull --rebase origin "$GITHUB_REF_NAME"
+          # Binärkonflikte (paralleler Lauf hat Screenshots committet): eigene, neuere Screenshots gewinnen
+          git pull --rebase -X theirs origin "$GITHUB_REF_NAME"
           git push origin "HEAD:$GITHUB_REF_NAME"
