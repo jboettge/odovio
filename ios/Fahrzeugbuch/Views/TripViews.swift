@@ -533,9 +533,13 @@ struct TripRecordingSection: View {
         Button {
             stop()
         } label: {
-            Label("Stopp", systemImage: "stop.fill").font(.headline)
+            Label("Stopp", systemImage: "stop.fill")
+                .font(.headline)
+                .lineLimit(1)
         }
         .buttonStyle(.borderedProminent)
+        .fixedSize()
+        .dynamicTypeSize(...DynamicTypeSize.xxxLarge)
         .tint(.white)
         .foregroundStyle(Color(red: 0.70, green: 0.11, blue: 0.10))
         .accessibilityLabel("Fahrt beenden")
@@ -545,9 +549,15 @@ struct TripRecordingSection: View {
         Button {
             onStart()
         } label: {
-            Label("Fahrt starten", systemImage: "play.fill").font(.headline)
+            Label("Fahrt starten", systemImage: "play.fill")
+                .font(.headline)
+                .lineLimit(1)
         }
         .buttonStyle(.borderedProminent)
+        // Ideale Breite erzwingen: kein Umbruch «Fahrt/starten»; passt es nicht neben den Privatmodus,
+        // wählt ViewThatFits die gestapelte Variante. Sehr grosse Schrift begrenzen (bleibt bedienbar).
+        .fixedSize()
+        .dynamicTypeSize(...DynamicTypeSize.xxxLarge)
         .disabled(AppMode.isDemo)
     }
 
@@ -556,6 +566,7 @@ struct TripRecordingSection: View {
             Label("Privatmodus", systemImage: "eye.slash")
         }
         .fixedSize()
+        .dynamicTypeSize(...DynamicTypeSize.xxxLarge)
         .accessibilityLabel("Privatmodus für die nächste Fahrt")
         .accessibilityHint("Speichert nur Zeit und Kilometer, keine Orte")
     }
