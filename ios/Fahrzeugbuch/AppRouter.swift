@@ -61,6 +61,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
         MainActor.assumeIsolated {
             TripNotifications.shared.register()
         }
+        CrashReporter.shared.start()
         return true
     }
 

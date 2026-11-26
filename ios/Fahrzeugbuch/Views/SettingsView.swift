@@ -103,6 +103,11 @@ struct SettingsView: View {
                 } label: {
                     Label("Begriffe", systemImage: "character.book.closed")
                 }
+                NavigationLink {
+                    CrashReportsView()
+                } label: {
+                    Label("Absturzberichte", systemImage: "ladybug")
+                }
             } header: {
                 Text("Hilfe")
             }
@@ -710,5 +715,45 @@ private struct SettingsDialogs: ViewModifier {
             } message: {
                 Text(resetModeText)
             }
+    }
+}
+
+
+/// Von MetricKit gelieferte Absturz-/Hänger-Berichte ansehen, teilen, löschen.
+struct CrashReportsView: View {
+    @State private var reports: [URL] = []
+    @State private var confirmDelete = false
+
+    var body: some View {
+        List {
+            Section {
+                if reports.isEmpty {
+                    Text("Keine Absturzberichte vorhanden.").foregroundStyle(.secondary)
+                }
+                ForEach(reports, id: \.self) { url in
+                    ShareLink(item: url) {
+                        Label(url.deletingPathExtension().lastPathComponent, systemImage: "doc.text")
+                    }
+                }
+            } footer: {
+                Text("iOS liefert einen Bericht beim nächsten Start der App nach einem Absturz, manchmal mit "
+                     + "einigen Minuten Verzögerung. Er enthält nur technische Angaben (Stacktrace, Gerät, iOS-Version), "
+                     + "keine Fahrten oder Standorte, und bleibt auf diesem iPhone, bis du ihn teilst.")
+            }
+            if !reports.isEmpty {
+                Section {
+                    Button("Alle löschen", role: .destructive) { confirmDelete = true }
+                }
+            }
+        }
+        .navigationTitle("Absturzberichte")
+        .onAppear { reports = CrashReporter.reports() }
+        .refreshable { reports = CrashReporter.reports() }
+        .confirmationDialog("Alle Absturzberichte löschen?", isPresented: $confirmDelete, titleVisibility: .visible) {
+            Button("Löschen", role: .destructive) {
+                CrashReporter.deleteAll()
+                reports = CrashReporter.reports()
+            }
+        }
     }
 }
