@@ -24,6 +24,9 @@ targets:
       path: Fahrzeugbuch/Info.plist
       properties:
         CFBundleDisplayName: odovio
+        # XcodeGen schreibt sonst fest 1.0/1 → Versions-/Build-Nummer aus den Build-Settings (CI überschreibt sie)
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         CFBundleDevelopmentRegion: de
         # Nur Standard-Krypto (HTTPS, CryptoKit-Hashes/Signaturprüfung) → keine Exportdeklaration nötig
         ITSAppUsesNonExemptEncryption: false

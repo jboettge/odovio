@@ -172,6 +172,11 @@ jobs:
       - name: Signatur prüfen
         run: |
           APP=$(ls -d "$RUNNER_TEMP"/ipa/Payload/*.app | head -1)
+          V=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP/Info.plist")
+          B=$(/usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$APP/Info.plist")
+          echo "Info.plist: Version $V, Build $B"
+          [ "$V" = "$APP_VERSION" ] && [ "$B" = "$BUILD_NUMBER" ] || {
+            echo "::error::Info.plist hat $V ($B), erwartet $APP_VERSION ($BUILD_NUMBER)"; exit 1; }
           {
             echo "== codesign -dvvv (App)"; codesign -dvvv "$APP" 2>&1
             echo "== Designated Requirement"; codesign -d -r- "$APP" 2>&1
