@@ -40,7 +40,7 @@ Kernprinzipien: local-first App mit Outbox/Sync (`/sync`, `/changes`), revisions
 - `fahrzeugbuch.yml`: Job `server` (Lock-Hashes, ruff, bandit, pip-audit, Tests SQLite + PG/Valkey/S3, Docker-Build), Job `ios` (xcodegen + xcodebuild test, ohne Signierung).
 - `fahrzeugbuch-web.yml`: lint, typecheck, unit, build, size-Budget, audit, E2E, Perf.
 - `fahrzeugbuch-helm.yml`: Chart-Tests (helm aus Go-Modul gebaut, da get.helm.sh im Sandbox-Proxy gesperrt; `HELM_SHA256` setzen → offizielles Tarball).
-- `fahrzeugbuch-screenshots.yml`: Demo-Screenshots, committet nach `docs/screenshots`; **`branches-ignore: [main]`** → läuft hier auf `main` nicht (bewusst: schreibt zurück). Anpassen, falls gewünscht.
+- `fahrzeugbuch-screenshots.yml`: Demo-Screenshots, committet nach `docs/screenshots`; **nur manuell** (*Run workflow* auf einem Feature-Branch, nie `main`), um macOS-Minuten zu sparen.
 - Alle Actions per SHA gepinnt, Basis-Images per Digest.
 
 ## iOS / TestFlight
@@ -67,7 +67,7 @@ Kernprinzipien: local-first App mit Outbox/Sync (`/sync`, `/changes`), revisions
 5. **Helm** in echtem Cluster installieren (k3s/Proxmox), Valkey-/S3-Pfad in CI verifizieren.
 6. Lasttest auf Ziel-Hardware (EPYC) wiederholen (`server/loadtest/README.md`).
 7. Caddy/CrowdSec/fail2ban live testen.
-8. ~~Screenshot-Workflow für `main`~~ – bleibt auf Branches (Entscheid).
+8. ~~Screenshot-Workflow für `main`~~ – nur manuell auf Branches (Entscheid).
 
 ## Bekannte Probleme / Grenzen
 
@@ -80,5 +80,5 @@ Kernprinzipien: local-first App mit Outbox/Sync (`/sync`, `/changes`), revisions
 
 ## Offene Nutzerentscheide
 
-Entschieden 25.11.2026: PDF-Integritätsprüfung inkrementell (umgesetzt, siehe Punkt 3); Screenshot-Workflow bleibt auf Branches (nicht `main`); Valkey standardmässig aktiv (Compose, `STATE_BACKEND=redis`); Belege im Dateisystem (`STORAGE_BACKEND=fs`); Betrieb unter https://www.odovio.ch als Neustart (keine Datenübernahme); IdP bleibt Keycloak (ein Realm, Clients `fahrzeugbuch-ios`/`fahrzeugbuch-web`), Mitgliederverwaltung nur im Web; iOS-Anzeigename `odovio`, Version aus Tag `ios-vX.Y.Z`.
+Entschieden 25.11.2026: PDF-Integritätsprüfung inkrementell (umgesetzt, siehe Punkt 3); Screenshot-Workflow nur manuell auf Branches (nicht `main`); Valkey standardmässig aktiv (Compose, `STATE_BACKEND=redis`); Belege im Dateisystem (`STORAGE_BACKEND=fs`); Betrieb unter https://www.odovio.ch als Neustart (keine Datenübernahme); IdP bleibt Keycloak (ein Realm, Clients `fahrzeugbuch-ios`/`fahrzeugbuch-web`), Mitgliederverwaltung nur im Web; iOS-Anzeigename `odovio`, Version aus Tag `ios-vX.Y.Z`.
 - Apple-Developer-Team `Q66V4Q95B4`, Bundle-ID `ch.odovio` (entschieden). Weitere iOS-Entscheide: `docs/TESTFLIGHT.md`.
