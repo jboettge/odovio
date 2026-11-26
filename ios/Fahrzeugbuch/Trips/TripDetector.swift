@@ -51,7 +51,9 @@ final class TripDetector: NSObject, CLLocationManagerDelegate {
     static let stopWithoutMovement: TimeInterval = 600
     static let cooldown: TimeInterval = 120
     static let maxRegions = 20
-    static let monitorName = "fahrzeugbuch.orte"
+    /// Nur Buchstaben/Ziffern: CoreLocation bricht bei anderen Zeichen (Punkt, Bindestrich) mit
+    /// «Monitor name is not valid» ab (NSInternalInconsistencyException in `CLMonitor.init`).
+    static let monitorName = "fahrzeugbuchOrte"
 
     var onStartDetected: (() -> Void)?
     var onStopDetected: (() -> Void)?
