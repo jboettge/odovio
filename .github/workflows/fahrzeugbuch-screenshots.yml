@@ -1,12 +1,16 @@
 name: fahrzeugbuch-screenshots
+# Nur manuell (Actions → fahrzeugbuch-screenshots → Run workflow, Feature-Branch wählen):
+# macOS-Lauf ≈ 15 min (privates Repo: 10-fach gezählt). Schreibt zurück → nie auf main.
 on:
   workflow_dispatch:
-  push:
-    branches-ignore: [main]   # schreibt Screenshots zurück → nie auf main
-    paths: ["ios/**", ".github/workflows/fahrzeugbuch-screenshots.yml"]
 
 permissions:
   contents: write   # Screenshots werden auf denselben (Feature-)Branch committet
+
+# Nur der neueste Lauf je Branch zählt (spart macOS-Minuten, verhindert Push-Konflikte paralleler Läufe)
+concurrency:
+  group: screenshots-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   screenshots:
@@ -72,5 +76,6 @@ jobs:
           git add docs/screenshots
           git diff --cached --quiet && exit 0
           git commit -m "Fahrzeugbuch: Screenshots aktualisiert [skip ci]"
-          git pull --rebase origin "$GITHUB_REF_NAME"
+          # Binärkonflikte (paralleler Lauf hat Screenshots committet): eigene, neuere Screenshots gewinnen
+          git pull --rebase -X theirs origin "$GITHUB_REF_NAME"
           git push origin "HEAD:$GITHUB_REF_NAME"
