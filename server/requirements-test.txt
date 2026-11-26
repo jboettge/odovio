@@ -1,6 +1,6 @@
 # Test-/Lint-Werkzeuge (ohne Hashes). Zuerst die API-Abhängigkeiten aus der Lock-Datei:
 #   pip install --require-hashes --no-deps -r requirements.txt && pip install -r requirements-test.txt
 pytest==9.2.0
-httpx==0.28.1
+httpx2==2.16.2              # Nachfolger von httpx (pydantic); starlette.testclient bevorzugt es, httpx ist dort deprecated
 ruff==0.17.6
 bandit==1.9.4               # CI: bandit -r app -q -ll (pip-audit läuft im CI in einer eigenen venv)

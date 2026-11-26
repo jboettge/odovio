@@ -1,4 +1,4 @@
-"""Lasttest (httpx async, geschlossenes Modell: N gleichzeitige virtuelle Benutzer ohne Denkzeit).
+"""Lasttest (httpx2 async, geschlossenes Modell: N gleichzeitige virtuelle Benutzer ohne Denkzeit).
 
   python -m loadtest.run --base http://127.0.0.1:8085 --issuer-port 8899 --key-file /tmp/fzb-issuer.pem \\
       --duration 60 --concurrency 64 [--scenarios changes,sync,stats,check,pdf] [--json out.json]
@@ -17,7 +17,7 @@ import statistics
 import time
 import uuid
 
-import httpx
+import httpx2
 
 from .issuer import Issuer
 
@@ -45,7 +45,7 @@ class Load:
         self.vehicles: dict[str, list[str]] = {}
         self.cursor: dict[str, int] = {}
 
-    async def prepare(self, client: httpx.AsyncClient) -> None:
+    async def prepare(self, client: httpx2.AsyncClient) -> None:
         h = {"Authorization": f"Bearer {self.tokens[0]}"}
         for t in TENANTS:
             r = await client.get(f"{self.base}/api/t/{t}/vehicles", headers=h)
@@ -54,7 +54,7 @@ class Load:
             page = (await client.get(f"{self.base}/api/t/{t}/changes", params={"since": 10**9}, headers=h)).json()
             self.cursor[t] = page["cursor"]
 
-    async def one(self, client: httpx.AsyncClient, vu: int) -> None:
+    async def one(self, client: httpx2.AsyncClient, vu: int) -> None:
         name = random.choices(self.scenarios, self.weights)[0]
         t = random.choice(TENANTS)
         vid = random.choice(self.vehicles[t])
@@ -79,13 +79,13 @@ class Load:
                                      params={"month": f"2026-{random.randint(1, 9):02d}"}, headers=h)
             await r.aread()
             code = r.status_code
-        except httpx.HTTPError as e:
+        except httpx2.HTTPError as e:
             code = type(e).__name__
         self.lat[name].append(time.perf_counter() - start)
         if not (isinstance(code, int) and 200 <= code < 300):
             self.errors[name][str(code)] = self.errors[name].get(str(code), 0) + 1
 
-    async def vu(self, client: httpx.AsyncClient, i: int, until: float) -> None:
+    async def vu(self, client: httpx2.AsyncClient, i: int, until: float) -> None:
         while time.monotonic() < until:
             await self.one(client, i)
 
@@ -94,8 +94,8 @@ async def main_async(args) -> dict:
     issuer = Issuer(port=args.issuer_port, key_file=args.key_file).start()
     scenarios = [s for s in args.scenarios.split(",") if s]
     load = Load(args.base, issuer, scenarios, users=args.users)
-    limits = httpx.Limits(max_connections=args.concurrency, max_keepalive_connections=args.concurrency)
-    async with httpx.AsyncClient(timeout=args.timeout, limits=limits) as client:
+    limits = httpx2.Limits(max_connections=args.concurrency, max_keepalive_connections=args.concurrency)
+    async with httpx2.AsyncClient(timeout=args.timeout, limits=limits) as client:
         await load.prepare(client)
         if args.warmup:
             until = time.monotonic() + args.warmup
