@@ -23,7 +23,8 @@
 
 ## Checkliste Nutzer
 
-- [ ] **API-Key-Rolle**: Cloud-Signing (Xcode erzeugt Distribution-Zertifikat/Profil selbst) braucht einen Team-Key mit Rolle **Admin**. Schlägt der Archive-/Export-Schritt mit «No signing certificate» / «not allowed to create certificates» fehl → Key mit Rolle Admin neu erzeugen und Secrets ersetzen.
+- [ ] **Gerät registrieren** (einmalig): developer.apple.com → Devices → «+» → UDID des iPhones. Ohne Gerät kann Xcode beim Archivieren kein Development-Profil erzeugen.
+- [x] **API-Key-Rolle**: Cloud-Signing (Xcode erzeugt Distribution-Zertifikat/Profil selbst) braucht einen Team-Key mit Rolle **Admin**. Schlägt der Archive-/Export-Schritt mit «No signing certificate» / «not allowed to create certificates» fehl → Key mit Rolle Admin neu erzeugen und Secrets ersetzen.
 - [ ] Ersten Lauf starten und Ergebnis prüfen (erster Build mit Xcode 26 – bisher nur mit Xcode 16 getestet).
 - [ ] App Store Connect → App → **App-Datenschutz** ausfüllen, passend zum Manifest: Genauer Standort, Fotos oder Videos, Sonstige Nutzerinhalte, Benutzer-ID, Name, E-Mail-Adresse – jeweils «mit Identität verknüpft», «nicht für Tracking», Zweck «App-Funktionalität». Datenschutzerklärung-URL (z. B. https://www.odovio.ch/datenschutz) nötig.
 - [ ] TestFlight → **Testinformationen**: Beta-Beschreibung, Feedback-E-Mail, Kontakt.
