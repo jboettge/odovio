@@ -10,9 +10,9 @@ RUN npm ci --ignore-scripts --no-audit --no-fund
 COPY web/ ./
 RUN npm run build
 
-# Stufe 2: API. Basis-Image per Digest gepinnt (python:3.12-slim). Aktualisieren:
-#   docker pull python:3.12-slim && docker image inspect --format '{{index .RepoDigests 0}}' python:3.12-slim
-FROM python:3.12-slim@sha256:191083cdf6c7bda8c76158983163ead5d5cf7b77cf3033e805bb0f5296f51b4b
+# Stufe 2: API. Basis-Image per Digest gepinnt (python:3.14-slim). Aktualisieren:
+#   docker pull python:3.14-slim && docker image inspect --format '{{index .RepoDigests 0}}' python:3.14-slim
+FROM python:3.14-slim@sha256:22eafb370920ad8b429e0aec3fff433e0669968519f5d60469d83729c138b28b
 
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 FORWARDED_ALLOW_IPS=127.0.0.1
 WORKDIR /app

@@ -1,6 +1,6 @@
 # Direkte Abhängigkeiten der API. Lock-Datei (gepinnt, mit Hashes) erzeugen:
 #   pip-compile --generate-hashes --allow-unsafe --strip-extras -o requirements.txt requirements.in
-# (mit Python 3.12 = Version des Docker-Images)
+# (mit Python 3.14 = Version des Docker-Images)
 fastapi==0.165.0
 starlette==1.10.0           # FileResponse-Range-DoS (CVE-2025-62727) ab 0.49.1 behoben
 uvicorn[standard]==0.54.0

@@ -56,7 +56,7 @@ class S3Config:
     timeout: float = 30.0
 
     @classmethod
-    def from_env(cls) -> "S3Config":
+    def from_env(cls) -> S3Config:
         env = os.environ.get
         region = (env("S3_REGION") or "us-east-1").strip()
         endpoint = (env("S3_ENDPOINT") or f"https://s3.{region}.amazonaws.com").strip().rstrip("/")

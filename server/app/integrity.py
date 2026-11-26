@@ -349,7 +349,7 @@ def verify_state_since(db: Session, tenant: models.Tenant, since: int,
         ids |= set(db.scalars(select(model.id).where(model.tenant_id == tenant.id, model.last_seq > since)))
         defaults = {k: f.default for k, f in schema.model_fields.items()}
         created = 0
-        for chunk in batched(sorted(ids), STATE_BATCH):
+        for chunk in batched(sorted(ids), STATE_BATCH, strict=False):
             rows = db.execute(select(*_columns(model, schema)).where(model.tenant_id == tenant.id,
                                                                     model.id.in_(chunk))).all()
             latest = {r.entity_id: r for r in _latest_revisions(db, tenant.id, entity, list(chunk))}

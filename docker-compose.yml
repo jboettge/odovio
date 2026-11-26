@@ -20,8 +20,8 @@ x-api: &api
 
 services:
   db:
-    # per Digest gepinnt (Update: docker pull postgres:17-alpine → RepoDigests)
-    image: postgres:17-alpine@sha256:f9cf3e1f0066f0eb0c48707d864f0ac5941e9ff454a072077d97a4d278d07d73
+    # per Digest gepinnt (Update: docker pull postgres:18-alpine → RepoDigests)
+    image: postgres:18-alpine@sha256:0115267ab5a509022df9319c77be365cef335adb71556c75f60f5360ee247e71
     container_name: fahrzeugbuch-db
     restart: unless-stopped
     environment:
@@ -62,7 +62,8 @@ services:
     # shared_buffers liegen im gemeinsamen Speicher; /dev/shm für parallele Abfragen (≥ 256 MB)
     shm_size: ${PG_SHM_SIZE:-256mb}
     volumes:
-      - fahrzeugbuch-db:/var/lib/postgresql/data
+      # PostgreSQL 18: Daten unter /var/lib/postgresql/18/docker (PGDATA), Volume am Elternordner
+      - fahrzeugbuch-db:/var/lib/postgresql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U fahrzeugbuch -d fahrzeugbuch"]
       interval: 10s
@@ -243,9 +244,9 @@ services:
   # Gemeinsamer, flüchtiger Zustand (Rate-Limits, Brute-Force-Sperren, Circuit-Breaker, Metrik-Schnappschüsse)
   # für alle Worker – standardmässig aktiv: VALKEY_PASSWORD (openssl rand -hex 32) setzen.
   # Keine Persistenz (Neustart = Limits/Sperren zurückgesetzt, beabsichtigt), maxmemory + allkeys-lru,
-  # nur internes Netz, read-only, ohne Capabilities. Digest-Update: docker pull valkey/valkey:8-alpine
+  # nur internes Netz, read-only, ohne Capabilities. Digest-Update: docker pull valkey/valkey:9-alpine
   valkey:
-    image: valkey/valkey:8-alpine@sha256:9971099af41c36e887aabdfe22b80c0fe45df949163dfc9cb434febc57cfc3fc
+    image: valkey/valkey:9-alpine@sha256:c8e2d17498838af5d91e12eb7c11220b3434a7b7131a333e3af52ad5e0b80882
     container_name: fahrzeugbuch-valkey
     restart: unless-stopped
     user: "999:1000"               # valkey-Benutzer des Images (kein chown/setpriv nötig → cap_drop ALL)

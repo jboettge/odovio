@@ -16,8 +16,8 @@ Alle Befehle aus `server`.
 
 ```sh
 docker run -d --rm --name fzbpg --network host -e POSTGRES_USER=fzb -e POSTGRES_PASSWORD=fzb \
-  -e POSTGRES_DB=fzb -e PGPORT=55441 postgres:17-alpine
-docker run -d --rm --name fzbvalkey --network host valkey/valkey:8-alpine \
+  -e POSTGRES_DB=fzb -e PGPORT=55441 postgres:18-alpine
+docker run -d --rm --name fzbvalkey --network host valkey/valkey:9-alpine \
   valkey-server --port 56380 --requirepass vpw123 --save "" --appendonly no
 docker exec fzbpg psql -U fzb -p 55441 -c "CREATE DATABASE fzbload"
 python -m loadtest.seed --database-url postgresql+psycopg://fzb:fzb@127.0.0.1:55441/fzbload   # ≈ 2 min

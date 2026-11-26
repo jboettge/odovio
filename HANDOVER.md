@@ -81,4 +81,5 @@ Kernprinzipien: local-first App mit Outbox/Sync (`/sync`, `/changes`), revisions
 ## Offene Nutzerentscheide
 
 Entschieden 25.11.2026: PDF-Integritätsprüfung inkrementell (umgesetzt, siehe Punkt 3); Screenshot-Workflow nur manuell auf Branches (nicht `main`); Valkey standardmässig aktiv (Compose, `STATE_BACKEND=redis`); Belege im Dateisystem (`STORAGE_BACKEND=fs`); Betrieb unter https://www.odovio.ch als Neustart (keine Datenübernahme); IdP bleibt Keycloak (ein Realm, Clients `fahrzeugbuch-ios`/`fahrzeugbuch-web`), Mitgliederverwaltung nur im Web; iOS-Anzeigename `odovio`, Version aus Tag `ios-vX.Y.Z`.
+Entschieden 26.11.2026: Python 3.14 (Image `python:3.14-slim`, CI, ruff py314), PostgreSQL 18 (Volume jetzt `/var/lib/postgresql`, PGDATA `/var/lib/postgresql/18/docker`), Valkey 9.2; Node 24; Screenshots nur manuell.
 - Apple-Developer-Team `Q66V4Q95B4`, Bundle-ID `ch.odovio` (entschieden). Weitere iOS-Entscheide: `docs/TESTFLIGHT.md`.

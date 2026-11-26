@@ -252,8 +252,8 @@ valkey:
   enabled: false
   image:
     repository: valkey/valkey
-    tag: 8.1.12-alpine
-    digest: sha256:9971099af41c36e887aabdfe22b80c0fe45df949163dfc9cb434febc57cfc3fc
+    tag: 9.2.0-alpine
+    digest: sha256:c8e2d17498838af5d91e12eb7c11220b3434a7b7131a333e3af52ad5e0b80882
     pullPolicy: IfNotPresent
   auth:
     # nur ohne existingSecret; erzeugen: openssl rand -hex 32

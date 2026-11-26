@@ -346,12 +346,12 @@ def _vehicle_or_404(db: Session, access: Access, vid: str, **kw) -> VehicleData:
     return data
 
 
-def _rate(access: "Access", name: str, env: str, default: int) -> None:
+def _rate(access: Access, name: str, env: str, default: int) -> None:
     """Rate-Limit je Benutzer (RateLimiter aus intel, 429 mit Retry-After)."""
     intel.limiter.check(f"{name}:{access.user.sub}", intel.env_limit(env, default))
 
 
-def _report_rate(access: "Access") -> None:
+def _report_rate(access: Access) -> None:
     _rate(access, "report", "RATE_REPORTS", 20)
 
 
