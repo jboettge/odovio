@@ -135,6 +135,9 @@ jobs:
             echo "== Profil"; security cms -D -i "$APP/embedded.mobileprovision" | plutil -p - | grep -E "Name|TeamIdentifier|ProvisionedDevices|ProvisionsAllDevices|get-task-allow|application-identifier|ExpirationDate" || true
             echo "== Binär-Architekturen"; lipo -info "$APP/$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP/Info.plist")"
             echo "== Verschachtelte Binärdateien"; find "$APP" -type f -perm +111 -o -name "*.dylib" -o -name "*.framework" | head -50
+            echo "== Designated Requirement"; codesign -d -r- "$APP" 2>&1
+            echo "== DR-Bytes (Unicode-Normalisierung des Namens)"; codesign -d -r- "$APP" 2>&1 | grep -o 'subject.CN\] = "[^"]*"' | xxd | head -8
+            echo "== Zertifikat-CN-Bytes"; codesign -d --extract-certificates="$RUNNER_TEMP/cert" "$APP" 2>/dev/null; openssl x509 -inform DER -in "$RUNNER_TEMP/cert0" -noout -subject -nameopt utf8,sep_multiline 2>&1 | grep -i "CN" | xxd | head -8
             echo "== Verify (deep, strict)"; codesign --verify --deep --strict --verbose=4 "$APP" 2>&1
           } | tee "$RUNNER_TEMP/codesign.log"
           codesign --verify --deep --strict "$APP"
