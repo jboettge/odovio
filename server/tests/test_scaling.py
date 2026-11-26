@@ -214,7 +214,7 @@ def test_gzip_api_json_only(client):
                                             "note": "x" * 50}))
     r = client.get(f"{T}/changes", headers={"Accept-Encoding": "gzip"})
     assert r.headers.get("content-encoding") == "gzip" and "accept-encoding" in r.headers["vary"].lower()
-    assert r.json()["odometer"]                                       # httpx dekomprimiert
+    assert r.json()["odometer"]                                       # httpx2 dekomprimiert
     small = client.get("/api/me", headers={"Accept-Encoding": "gzip"})
     assert "content-encoding" not in small.headers                    # < 1 KiB
     pdf = client.get(f"{T}/vehicles/{vid}/report.pdf", headers={"Accept-Encoding": "gzip"})

@@ -12,7 +12,7 @@ import time
 import uuid
 from pathlib import Path
 
-import httpx
+import httpx2
 import pytest
 
 from loadtest.issuer import Issuer
@@ -30,10 +30,10 @@ def _free_port() -> int:
         return s.getsockname()[1]
 
 
-def _get(url: str, ip: str, **kw) -> httpx.Response:
+def _get(url: str, ip: str, **kw) -> httpx2.Response:
     """Neue Verbindung je Anfrage (verteilt sich auf die Worker); Client-IP über X-Forwarded-For."""
     headers = {"X-Forwarded-For": ip, **kw.pop("headers", {})}
-    with httpx.Client(timeout=30) as c:
+    with httpx2.Client(timeout=30) as c:
         return c.request(kw.pop("method", "GET"), url, headers=headers, **kw)
 
 
@@ -69,7 +69,7 @@ def server():
             if r.status_code == 200:
                 workers = {line.split('worker="')[1].split('"')[0] for line in r.text.splitlines()
                            if line.startswith("fzb_worker_start_time_seconds{")}
-        except httpx.TransportError:
+        except httpx2.TransportError:
             pass
         time.sleep(0.3)
     if len(workers) < 2:

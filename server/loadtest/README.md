@@ -1,6 +1,6 @@
 # Lasttest und Testdaten
 
-Werkzeuge (nur Test-/Entwicklungsabhängigkeiten: `httpx`, `psycopg`, `pyjwt` aus der Lock-Datei bzw.
+Werkzeuge (nur Test-/Entwicklungsabhängigkeiten: `httpx2`, `psycopg`, `pyjwt` aus der Lock-Datei bzw.
 `requirements-test.txt`; nichts davon kommt zusätzlich ins Image):
 
 | Skript | Zweck |
@@ -8,7 +8,7 @@ Werkzeuge (nur Test-/Entwicklungsabhängigkeiten: `httpx`, `psycopg`, `pyjwt` au
 | `python -m loadtest.seed` | Testdaten per COPY: 3 Mandanten `last1..3`, 20 Fahrzeuge, 200 000 Fahrten × 5 Revisionen (≈ 1 Mio. Revisionen, gültige Hash-Kette) |
 | `python -m loadtest.explain` | `EXPLAIN (ANALYZE, BUFFERS)` der Hot-Queries, Zeit + verwendete Indizes |
 | `python -m loadtest.issuer` | lokaler OIDC-Test-Issuer (Discovery + JWKS über http) und Token-Erzeugung |
-| `python -m loadtest.run` | Lasttest (httpx async, geschlossenes Modell) mit RPS und p50/p95/p99 je Szenario |
+| `python -m loadtest.run` | Lasttest (httpx2 async, geschlossenes Modell) mit RPS und p50/p95/p99 je Szenario |
 
 Alle Befehle aus `server`.
 
