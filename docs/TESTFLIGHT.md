@@ -34,6 +34,6 @@
 ## Entscheide (25.11.2026)
 
 1. Anzeigename `odovio` ✔
-2. Identity Provider: Authentik (statt Keycloak) – Redirect `ch.odovio:/oauth2redirect` beim Authentik-Provider `fahrzeugbuch-ios` (public, PKCE). Code-Anpassung: siehe HANDOVER.md.
+2. Identity Provider: Keycloak bleibt. Redirect `ch.odovio:/oauth2redirect` im Client `fahrzeugbuch-ios` eintragen (`keycloak/setup-client.sh` erneut ausführen oder manuell). Mitgliederverwaltung nur im Web.
 3. Entwickler-Server unter https://www.odovio.ch → Daten gelten als erhoben (Manifest + App-Datenschutz) ✔
 4. Version aus Tag `ios-vX.Y.Z` ✔

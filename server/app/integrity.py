@@ -4,10 +4,27 @@ Konsistenz: Die Prüfung läuft in einem Snapshot (`db.snapshot_session`, Postgr
 ONLY); der Mandantenstand (seq/head_hash) wird im selben Snapshot gelesen. Ein parallel committeter Sync
 erzeugt so keinen Fehlalarm.
 
-Aufwand: Die Kette wird inkrementell ab dem zuletzt bestätigten Stand (seq, hash) je Mandant geprüft
-(Cache je Prozess). Vollprüfung mit `full=True` (API: ?full=1), nach VERIFY_FULL_INTERVAL_S (Default 24 h)
-und immer, wenn der bestätigte Stand nicht mehr in der DB steht. Anker werden immer vollständig geprüft
-(Signatur + Hash der Revision an der Anker-Seq).
+Aufwand – inkrementell ab dem bestätigten Prüfstand (Tabelle `verify_checkpoints`, eine Zeile je Mandant, für
+alle Worker/Replikas gemeinsam): Kette und Datenstand sind bis Seq S mit Kettenkopf H bestätigt, die letzte
+Vollprüfung lief am T auf Stand F. Eine Standardprüfung (PDF-Integritätsabschnitt, /audit/verify) prüft nur
+  - die Kette ab (S, H); die Revision an Seq S muss noch den Hash H haben (sonst Vollprüfung),
+  - die Datensätze mit Revision oder last_seq > S gegen ihre letzte Revision,
+  - die Anzahl Datensätze je Objekttyp (Stand bei S + seither neu angelegte Objekte → erkennt direkt
+    eingefügte/entfernte Zeilen),
+  - die signierten Anker mit Seq > S (ältere deckt H ab: ein Neuberechnen der Kette ändert H).
+Erst die nächste Vollprüfung erkennt: Änderungen an bereits bestätigten Revisionen ohne Neuberechnen der
+Folgehashes und an seither unveränderten Datensätzen (beides nur mit DB-Vollzugriff bzw. abgeschalteten Triggern).
+Vollprüfung: `full=True` (API ?full=1, je Mandant ein Lauf gleichzeitig), ohne gültigen Prüfstand und sobald
+die letzte älter als VERIFY_FULL_INTERVAL_S (Default 24 h) ist – dann übernimmt sie der Worker, der den
+try-Advisory-Lock "verify_full" erhält; die übrigen prüfen so lange inkrementell weiter.
+
+Absicherung des Prüfstands: mit ANCHOR_SIGNING_KEY Ed25519-signiert (Schlüssel wie bei den Ankern, liegt nicht in
+der DB). Fehlende/ungültige Signatur, unbekannter Schlüssel, S > Mandantenstand, geänderter Hash an S oder
+Vollprüfungszeitpunkt in der Zukunft → Vollprüfung. Ohne Schlüssel ist der Prüfstand unsigniert (wer die DB
+schreiben kann, könnte die Vollprüfung hinauszögern; ?full=1 prüft immer vollständig). Fortschreiben nur
+monoton, in eigener kurzer Transaktion unter Advisory-Lock je Mandant: Vollprüfung mit Stand ≥ letzter
+Vollprüfung, inkrementell nur auf derselben Vollprüfung mit grösserer Seq. Jeder Befund (Kette, Datenstand,
+Anker) entwertet den Prüfstand; erst eine fehlerfreie Vollprüfung auf einem neueren Stand setzt ihn wieder.
 
 Schlüsselwechsel: ANCHOR_PUBLIC_KEYS = kommagetrennte alte Ed25519-Public-Keys (Base64, raw 32 Byte);
 Anker mit deren key_id bleiben gültig.
@@ -19,20 +36,22 @@ import hashlib
 import json
 import logging
 import os
-import threading
-import time
+from collections import defaultdict
+from dataclasses import dataclass
 from functools import lru_cache
+from itertools import batched
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 from sqlalchemy import and_, func, select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from . import jobs, models, security
 from .attachments import persist_blob_checks, verify_blobs
 from .audit import canonical, verify_chain
-from .db import snapshot_session
+from .db import SessionLocal, snapshot_session
 from .sync import ENTITIES, JOURNAL_ONLY, REVISION_META, snapshot
 
 log = logging.getLogger("fahrzeugbuch.integrity")
@@ -114,54 +133,124 @@ def maybe_anchor(db: Session, tenant: models.Tenant, force: bool = False) -> mod
     return a
 
 
-# ---------- bestätigter Kettenstand (inkrementelle Prüfung) ----------
-_verified: dict[tuple[str, int], tuple[int, str, float]] = {}   # (DB, Mandant) → (seq, hash, Vollprüfung)
-_verified_lock = threading.Lock()
+# ---------- bestätigter Prüfstand (inkrementelle Prüfung) ----------
+CLOCK_SKEW = dt.timedelta(minutes=5)
 
 
-def _full_interval() -> float:
+def full_interval() -> float:
+    """VERIFY_FULL_INTERVAL_S: Vollprüfung fällig nach so vielen Sekunden (Default 24 h)."""
     try:
         return float(os.environ.get("VERIFY_FULL_INTERVAL_S") or 86400)
     except ValueError:
         return 86400.0
 
 
-def _cache_key(db: Session, tenant_id: int) -> tuple[str, int]:
-    return str(db.get_bind().url), tenant_id
+def _utcnow() -> str:
+    return dt.datetime.now(dt.UTC).isoformat(timespec="seconds")
 
 
-def clear_verify_cache() -> None:
-    with _verified_lock:
-        _verified.clear()
+@dataclass(frozen=True)
+class Checkpoint:
+    """Bestätigter Stand: Kette + Datenstand bis `seq` (Kopf `head_hash`, `counts` Datensätze je Objekttyp);
+    letzte Vollprüfung am `full_at` (UTC ISO) auf Stand `full_seq`."""
+    seq: int
+    head_hash: str
+    counts: dict[str, int]
+    full_seq: int
+    full_at: str
+
+    def full_due(self) -> bool:
+        age = dt.datetime.now(dt.UTC) - dt.datetime.fromisoformat(self.full_at)
+        return age.total_seconds() > full_interval()
 
 
-def _start_point(db: Session, tenant: models.Tenant) -> tuple[tuple[int, str] | None, float]:
-    """Bestätigter Stand, sofern noch gültig: Revision an der Seq hat noch denselben Hash und die letzte
-    Vollprüfung ist nicht älter als VERIFY_FULL_INTERVAL_S."""
-    with _verified_lock:
-        hit = _verified.get(_cache_key(db, tenant.id))
-    if hit is None:
-        return None, time.monotonic()
-    seq, head, full_at = hit
-    if time.monotonic() - full_at > _full_interval() or seq > tenant.seq:
-        return None, time.monotonic()
-    stored = db.scalar(select(models.Revision.hash).where(models.Revision.tenant_id == tenant.id,
-                                                           models.Revision.seq == seq))
-    if stored != head:
-        return None, time.monotonic()
-    return (seq, head), full_at
+def checkpoint_message(slug: str, row: models.VerifyCheckpoint) -> bytes:
+    fields = {"tenant": slug, "seq": row.seq, "head_hash": row.head_hash, "counts": row.counts,
+              "full_seq": row.full_seq, "full_at": row.full_at, "verified_at": row.verified_at}
+    return ("fahrzeugbuch-verified|" + canonical(fields)).encode()
 
 
-def verify_chain_cached(db: Session, tenant: models.Tenant, full: bool = False) -> dict:
-    start, full_at = (None, time.monotonic()) if full else _start_point(db, tenant)
-    chain = verify_chain(db, tenant, start)
-    key = _cache_key(db, tenant.id)
-    with _verified_lock:
-        if chain["ok"]:
-            _verified[key] = (chain["count"], chain["head_hash"], full_at)
-        else:
-            _verified.pop(key, None)
-    return {**chain, "incremental_from": start[0] if start else None}
+def _signature_ok(slug: str, row: models.VerifyCheckpoint) -> bool:
+    keys = verification_keys()
+    if not keys:                      # ohne Schlüssel unsigniert (s. Modul-Docstring)
+        return True
+    pub = keys.get(row.key_id or "")
+    if pub is None or not row.signature:
+        return False
+    try:
+        pub.verify(bytes.fromhex(row.signature), checkpoint_message(slug, row))
+    except (InvalidSignature, ValueError):
+        return False
+    return True
+
+
+def load_checkpoint(db: Session, tenant: models.Tenant) -> Checkpoint | None:
+    """Gültiger Prüfstand des Mandanten im Snapshot `db` oder None (→ Vollprüfung)."""
+    row = db.get(models.VerifyCheckpoint, tenant.id)
+    if row is None or row.full_at is None:
+        return None
+    reason = None
+    try:
+        full_at = dt.datetime.fromisoformat(row.full_at)
+        counts = {str(k): int(v) for k, v in json.loads(row.counts).items()}
+    except (TypeError, ValueError, AttributeError):
+        full_at, counts, reason = None, {}, "unlesbar"
+    if reason is None and not _signature_ok(tenant.slug, row):
+        reason = "Signatur fehlt oder ungültig"
+    elif reason is None and (full_at.tzinfo is None or full_at > dt.datetime.now(dt.UTC) + CLOCK_SKEW):
+        reason = "Vollprüfungszeitpunkt ungültig"
+    elif reason is None and row.seq > tenant.seq:
+        reason = "neuer als der Mandantenstand"
+    elif reason is None and ENTITIES.keys() - counts.keys():
+        reason = "ohne Zählstand für neue Objekttypen"
+    elif reason is None:
+        stored = models.GENESIS if row.seq == 0 else db.scalar(select(models.Revision.hash).where(
+            models.Revision.tenant_id == tenant.id, models.Revision.seq == row.seq))
+        if stored != row.head_hash:
+            reason = f"Revision {row.seq} hat nicht mehr den bestätigten Hash"
+    if reason:
+        log.warning("Prüfstand Mandant %s verworfen (%s) – Vollprüfung", tenant.slug, reason)
+        return None
+    return Checkpoint(row.seq, row.head_hash, counts, row.full_seq, row.full_at)
+
+
+def _advances(row: models.VerifyCheckpoint, new: Checkpoint, full: bool) -> bool:
+    if full:      # Vollprüfung: nicht älter als die gespeicherte, nach einem Befund nur auf neuerem Stand
+        return new.seq >= row.full_seq and (row.failed_seq is None or new.seq > row.failed_seq)
+    return (row.full_at == new.full_at and row.full_seq == new.full_seq and row.failed_seq is None
+            and new.seq > row.seq)
+
+
+def _persist_checkpoint(tenant: models.Tenant, new: Checkpoint | None, full: bool, seq: int) -> None:
+    """Prüfstand fortschreiben (`new`) bzw. nach einem Befund auf Stand `seq` entwerten (`new` None).
+    Eigene, kurze Transaktion (Snapshot ist nur lesend); Fehler sind unkritisch (nächste Prüfung voll)."""
+    try:
+        with SessionLocal() as db:
+            jobs.xact_lock(db, "verify_checkpoint", tenant.id)
+            row = db.get(models.VerifyCheckpoint, tenant.id)
+            fresh = row is None
+            if fresh:
+                row = models.VerifyCheckpoint(tenant_id=tenant.id, seq=0, head_hash=models.GENESIS, counts="{}",
+                                              full_seq=0)
+                db.add(row)
+            if new is None:
+                if row.full_at is None and (row.failed_seq or 0) >= seq:
+                    return
+                row.full_at = row.key_id = row.signature = None
+                row.failed_seq = max(row.failed_seq or 0, seq)
+            else:
+                if not fresh and not _advances(row, new, full):
+                    return
+                row.seq, row.head_hash, row.counts = new.seq, new.head_hash, canonical(new.counts)
+                row.full_seq, row.full_at, row.verified_at = new.full_seq, new.full_at, _utcnow()
+                if full:
+                    row.failed_seq = None
+                key = signing_key()
+                row.key_id = key_id(key) if key else None
+                row.signature = key.sign(checkpoint_message(tenant.slug, row)).hex() if key else None
+            db.commit()
+    except SQLAlchemyError as e:
+        log.warning("Prüfstand Mandant %s nicht gespeichert (%s)", tenant.slug, type(e).__name__)
 
 
 # ---------- Prüfungen ----------
@@ -198,28 +287,40 @@ def _orphan_revisions(db: Session, tenant_id: int, entity: str, model, limit: in
         models.Revision.tenant_id == tenant_id, models.Revision.entity == entity, ~exists).limit(limit))
 
 
-def verify_state(db: Session, tenant: models.Tenant) -> list[str]:
+def _columns(model, schema) -> list:
+    return [model.id, model.version, model.deleted, *(getattr(model, k) for k in schema.model_fields)]
+
+
+def _compare(entity: str, schema, defaults: dict, rows, latest: dict, problems: list[str]) -> None:
+    for row in rows:
+        rev = latest.get(row.id)
+        if rev is None:
+            problems.append(f"{entity} {row.id}: Datensatz ohne Revision")
+        elif rev.version != row.version or not _same(json.loads(rev.data),
+                                                     json.loads(canonical(snapshot(row, schema))), defaults):
+            problems.append(f"{entity} {row.id}: weicht von Revision {rev.seq} ab")
+
+
+def verify_state(db: Session, tenant: models.Tenant, counts: dict[str, int] | None = None) -> list[str]:
     """Jeder Datensatz muss exakt dem Stand seiner letzten Revision entsprechen.
     Konstanter Speicher: Datensätze werden gestreamt und in Blöcken von STATE_BATCH mit ihren letzten Revisionen
-    verglichen; Revisionen ohne Datensatz per Anti-Join. Höchstens MAX_PROBLEMS Befunde werden gesammelt."""
+    verglichen; Revisionen ohne Datensatz per Anti-Join. Höchstens MAX_PROBLEMS Befunde werden gesammelt.
+    `counts` (optional) erhält die Anzahl Datensätze je Objekttyp (für den Prüfstand)."""
     problems: list[str] = []
     seen_entities = set()
     for entity, (model, schema, _) in ENTITIES.items():
         seen_entities.add(entity)
         defaults = {k: f.default for k, f in schema.model_fields.items()}
-        cols = [model.id, model.version, model.deleted, *(getattr(model, k) for k in schema.model_fields)]
-        q = select(*cols).where(model.tenant_id == tenant.id)
+        q = select(*_columns(model, schema)).where(model.tenant_id == tenant.id)
+        n = 0
         for part in db.execute(q.execution_options(yield_per=STATE_BATCH)).partitions():
+            n += len(part)
             latest = {r.entity_id: r for r in _latest_revisions(db, tenant.id, entity, [row.id for row in part])}
-            for row in part:
-                rev = latest.get(row.id)
-                if rev is None:
-                    problems.append(f"{entity} {row.id}: Datensatz ohne Revision")
-                elif rev.version != row.version or not _same(json.loads(rev.data),
-                                                             json.loads(canonical(snapshot(row, schema))), defaults):
-                    problems.append(f"{entity} {row.id}: weicht von Revision {rev.seq} ab")
+            _compare(entity, schema, defaults, part, latest, problems)
             if len(problems) >= MAX_PROBLEMS:
                 return problems[:MAX_PROBLEMS]
+        if counts is not None:
+            counts[entity] = n
         problems += [f"{entity} {i}: Revision ohne Datensatz"
                      for i in _orphan_revisions(db, tenant.id, entity, model, MAX_PROBLEMS)]
     # Revisionen unbekannter Objekttypen (reine Journal-Einträge wie Mitgliederänderungen sind bekannt;
@@ -231,12 +332,58 @@ def verify_state(db: Session, tenant: models.Tenant) -> list[str]:
     return problems[:MAX_PROBLEMS]
 
 
-def verify_anchors(db: Session, tenant: models.Tenant) -> dict:
+def verify_state_since(db: Session, tenant: models.Tenant, since: int,
+                       counts_before: dict[str, int]) -> tuple[list[str], dict[str, int]]:
+    """Inkrementeller Abgleich ab dem bestätigten Stand `since`: nur Objekte mit Revision oder last_seq > since
+    gegen ihre letzte Revision, dazu die Anzahl Datensätze je Objekttyp (Stand bei `since` + seither neu
+    angelegte Objekte). Liefert (Befunde, Anzahl je Objekttyp jetzt)."""
+    touched: dict[str, set[str]] = defaultdict(set)
+    for entity, eid in db.execute(select(models.Revision.entity, models.Revision.entity_id).where(
+            models.Revision.tenant_id == tenant.id, models.Revision.seq > since)):
+        touched[entity].add(eid)
+    problems = [f"{e}: unbekannter Objekttyp im Journal" for e in sorted(touched)
+                if e not in ENTITIES and e not in JOURNAL_ONLY]
+    counts: dict[str, int] = {}
+    for entity, (model, schema, _) in ENTITIES.items():
+        ids = touched.get(entity, set())
+        ids |= set(db.scalars(select(model.id).where(model.tenant_id == tenant.id, model.last_seq > since)))
+        defaults = {k: f.default for k, f in schema.model_fields.items()}
+        created = 0
+        for chunk in batched(sorted(ids), STATE_BATCH):
+            rows = db.execute(select(*_columns(model, schema)).where(model.tenant_id == tenant.id,
+                                                                    model.id.in_(chunk))).all()
+            latest = {r.entity_id: r for r in _latest_revisions(db, tenant.id, entity, list(chunk))}
+            _compare(entity, schema, defaults, rows, latest, problems)
+            present = {r.id for r in rows}
+            problems += [f"{entity} {i}: Revision ohne Datensatz" for i in chunk if i in latest and i not in present]
+            created += len(db.scalars(select(models.Revision.entity_id).where(
+                models.Revision.tenant_id == tenant.id, models.Revision.entity == entity,
+                models.Revision.entity_id.in_(chunk)).group_by(models.Revision.entity_id)
+                .having(func.min(models.Revision.seq) > since)).all())
+        counts[entity] = db.scalar(select(func.count()).select_from(model).where(model.tenant_id == tenant.id))
+        expected = counts_before.get(entity, 0) + created
+        if counts[entity] != expected:
+            problems.append(f"{entity}: {counts[entity]} Datensätze statt {expected} laut Journal "
+                            "(ohne Revision eingefügt oder entfernt)")
+        if len(problems) >= MAX_PROBLEMS:
+            break
+    return problems[:MAX_PROBLEMS], counts
+
+
+def verify_anchors(db: Session, tenant: models.Tenant, since: int | None = None) -> dict:
+    """Signatur + Hash der Revision an der Anker-Seq; mit `since` nur Anker mit Seq > since (ältere sind über
+    den bestätigten Kettenkopf abgedeckt). `anchors` zählt immer alle."""
     keys = verification_keys()
-    anchors = list(db.scalars(select(models.Anchor).where(models.Anchor.tenant_id == tenant.id)
-                              .order_by(models.Anchor.seq)))
-    result = {"signed": signing_key() is not None, "anchors": len(anchors), "anchor_problems": []}
+    q = select(models.Anchor).where(models.Anchor.tenant_id == tenant.id)
+    if since is not None:
+        q = q.where(models.Anchor.seq > since)
+    anchors = list(db.scalars(q.order_by(models.Anchor.seq)))
+    total = len(anchors) if since is None else db.scalar(
+        select(func.count()).select_from(models.Anchor).where(models.Anchor.tenant_id == tenant.id))
+    result = {"signed": signing_key() is not None, "anchors": total, "anchors_checked": len(anchors),
+              "anchor_problems": []}
     if not keys:
+        result["anchors_checked"] = 0
         return result
     hashes = dict(db.execute(select(models.Revision.seq, models.Revision.hash)
                              .where(models.Revision.tenant_id == tenant.id,
@@ -258,11 +405,29 @@ def verify_anchors(db: Session, tenant: models.Tenant) -> dict:
 
 def verify_all(db: Session, tenant: models.Tenant, full: bool = False) -> dict:
     """Alle Prüfungen in der Sitzung `db` (sollte ein Snapshot sein). Der Mandantenstand wird in
-    derselben Sitzung frisch gelesen – ein veraltetes Tenant-Objekt des Aufrufers spielt keine Rolle."""
+    derselben Sitzung frisch gelesen – ein veraltetes Tenant-Objekt des Aufrufers spielt keine Rolle.
+    Inkrementell ab dem bestätigten Prüfstand, sonst bzw. mit `full` vollständig (s. Modul-Docstring)."""
     tenant = db.get(models.Tenant, tenant.id, populate_existing=True)
-    chain = verify_chain_cached(db, tenant, full)
-    state = verify_state(db, tenant)
-    anchors = verify_anchors(db, tenant)
+    started = _utcnow()
+    cp = None if full else load_checkpoint(db, tenant)
+    if cp is not None and cp.full_due() and jobs.xact_lock(db, "verify_full", tenant.id, wait=False):
+        cp = None             # Vollprüfung fällig – dieser Worker übernimmt sie (übrige: weiter inkrementell)
+    counts: dict[str, int] = {}
+    if cp is None:
+        chain = verify_chain(db, tenant)
+        state = verify_state(db, tenant, counts)
+        anchors = verify_anchors(db, tenant)
+    else:
+        chain = verify_chain(db, tenant, (cp.seq, cp.head_hash))
+        state, counts = verify_state_since(db, tenant, cp.seq, cp.counts)
+        anchors = verify_anchors(db, tenant, since=cp.seq)
+    full_seq, full_at = (chain["count"], started) if cp is None else (cp.full_seq, cp.full_at)
+    if chain["ok"] and not state and not anchors["anchor_problems"]:
+        if cp is None or chain["count"] > cp.seq:
+            _persist_checkpoint(tenant, Checkpoint(chain["count"], chain["head_hash"], counts, full_seq, full_at),
+                                full=cp is None, seq=chain["count"])
+    else:
+        _persist_checkpoint(tenant, None, full=cp is None, seq=tenant.seq)
     blobs = verify_blobs(db, tenant, use_cache=not full)
     if blobs["updates"]:
         persist_blob_checks(tenant.id, blobs["updates"])
@@ -278,9 +443,12 @@ def verify_all(db: Session, tenant: models.Tenant, full: bool = False) -> dict:
         "chain_ok": chain["ok"],
         "state_ok": not state,
         "problems": state[:MAX_LISTED] + anchors["anchor_problems"][:MAX_LISTED] + blobs["problems"][:MAX_LISTED],
-        **{k: anchors[k] for k in ("signed", "anchors")},
+        **{k: anchors[k] for k in ("signed", "anchors", "anchors_checked")},
         "blobs_checked": blobs["checked"],
         "blobs_missing": blobs["missing"],
+        "incremental_from": cp.seq if cp else None,
+        "full_seq": full_seq,
+        "full_at": full_at,
     }
 
 

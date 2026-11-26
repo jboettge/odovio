@@ -6,7 +6,7 @@ Stand: 25.11.2026. Herkunft: `jboettge/DroidSim`, Branch `claude/digitales-fahrz
 
 | Pfad | Inhalt |
 |---|---|
-| `server/` | FastAPI, SQLAlchemy 2, Alembic (0001–0003), PostgreSQL (Prod) / SQLite (Tests), reportlab-PDF. Dockerfile mehrstufig (Web-Build + API), Build-Kontext = Repo-Root |
+| `server/` | FastAPI, SQLAlchemy 2, Alembic (0001–0004), PostgreSQL (Prod) / SQLite (Tests), reportlab-PDF. Dockerfile mehrstufig (Web-Build + API), Build-Kontext = Repo-Root |
 | `web/` | Vue 3 + TS + Vite, oidc-client-ts; wird ins API-Image gebaut und unter `/` ausgeliefert. Mock-Server `web/mock/` |
 | `ios/` | SwiftUI (iOS 17+), XcodeGen (`project.yml`), Unit-Tests `ios/Tests/FahrzeugbuchTests` |
 | `keycloak/setup-client.sh` | Clients `fahrzeugbuch-ios` / `fahrzeugbuch-web`, Gruppen je Mandant (write, `/lesen`, `/admin`), optionale Realm-Härtung |
@@ -27,7 +27,8 @@ Kernprinzipien: local-first App mit Outbox/Sync (`/sync`, `/changes`), revisions
 
 | Komponente | Ergebnis |
 |---|---|
-| Server SQLite | 311 bestanden, 31 übersprungen (Valkey/S3/PG-spezifisch) |
+| Server SQLite | 326 bestanden, 31 übersprungen (Valkey/S3/PG-spezifisch) |
+| Server PG 16 + Valkey (ohne S3, lokal 25.11.) | 352 bestanden, 5 übersprungen (S3) |
 | Server PG + Valkey + S3 (RustFS) | 342 bestanden (lokal); in CI als Services |
 | Web | 75 Unit, 22 E2E funktional + 1 Perf (90k Fahrten), `npm audit` 0 |
 | iOS | 87 XCTests grün (CI macOS-15, Simulator) |
@@ -61,7 +62,7 @@ Kernprinzipien: local-first App mit Outbox/Sync (`/sync`, `/changes`), revisions
 
 1. **TestFlight**: vorbereitet (`docs/TESTFLIGHT.md`); erster Lauf mit Xcode 26 ausstehend.
 2. **Echte Geräte-Tests**: Hintergrund-Aufzeichnung, Automatik, Kurzbefehle, Akku, Scan mit Kamera.
-3. **PDF-Last**: jedes PDF gleicht alle Datensätze ab (Integritätsabschnitt) → bei ~67k Fahrten p50 ≈ 28 s, ~0.2 PDF/s; begrenzt per `PDF_CONCURRENCY` (503 + Retry-After). Abhilfe (z. B. inkrementeller Abgleich / Cache je Kettenkopf) ändert Semantik → Nutzerentscheid.
+3. **PDF-Last** – *umgesetzt (Nutzerentscheid: Semantik darf sich ändern)*: Integritätsprüfung inkrementell ab dem bestätigten Prüfstand je Mandant (Tabelle `verify_checkpoints`, Alembic 0004, signiert mit `ANCHOR_SIGNING_KEY`, gemeinsam für alle Worker). PDF-Integritätsabschnitt 3.7 s (warm) bzw. 8.5 s (erster Bericht je Worker) → 0.04 s bei 67k Fahrten; PDF-only-Lasttest 0.4 → 1.3 PDF/s, p50 14.9 → 4.2 s (Details `server/loadtest/README.md`). Vollprüfung per `?full=1` bzw. automatisch nach `VERIFY_FULL_INTERVAL_S`; das PDF weist «vollständig am … (Revision 1–F), seither inkrementell bis Revision N» aus. Offen: täglichen Vollprüfungs-Aufruf (n8n) einrichten; ohne Signaturschlüssel ist der Prüfstand unsigniert. Rest-Engpass im Mischbetrieb: Rendern (CPU) und Mandantensperre für den Anker vor dem PDF.
 4. **Sync** schreibt je Mandant seriell (Mandantenzeilen-Lock) → p95 hoch unter Last; bewusst wegen Hash-Kette.
 5. **Helm** in echtem Cluster installieren (k3s/Proxmox), Valkey-/S3-Pfad in CI verifizieren.
 6. Lasttest auf Ziel-Hardware (EPYC) wiederholen (`server/loadtest/README.md`).
@@ -71,6 +72,7 @@ Kernprinzipien: local-first App mit Outbox/Sync (`/sync`, `/changes`), revisions
 ## Bekannte Probleme / Grenzen
 
 - Lasttest (4 vCPU, 1 Mio. Revisionen, 32 Nutzer): 1 Worker 42 RPS / p95 2.1 s, 4 Worker 87 RPS / p95 1.6 s; PDF siehe oben.
+- Inkrementelle Integritätsprüfung: Manipulationen bereits bestätigter Revisionen (ohne Neuberechnen der Kette) bzw. unveränderter Datensätze erkennt erst die nächste Vollprüfung (≤ `VERIFY_FULL_INTERVAL_S` nach der letzten, sofern ein Bericht/Verify sie auslöst).
 - Rate-Limits/Sperren ohne Valkey nur im Prozess (1 Worker, Reset bei Neustart); `FORWARDED_ALLOW_IPS` muss die Proxy-IP sein.
 - Web: Voll-Sync hält alle Fachdaten im Tab (~130 MB bei 100k Fahrten).
 - Lokalmodus iOS: Journal-Abgleich kann bei Zeitzonenwechsel falsch-positiv melden.
@@ -78,5 +80,5 @@ Kernprinzipien: local-first App mit Outbox/Sync (`/sync`, `/changes`), revisions
 
 ## Offene Nutzerentscheide
 
-Entschieden 25.11.2026: PDF-Integritätsprüfung beschleunigen (inkrementell/Cache); Screenshot-Workflow bleibt auf Branches (nicht `main`); Valkey standardmässig aktiv (Compose, `STATE_BACKEND=redis`); Belege im Dateisystem (`STORAGE_BACKEND=fs`); Betrieb unter https://www.odovio.ch; IdP Authentik; iOS-Anzeigename `odovio`, Version aus Tag `ios-vX.Y.Z`.
+Entschieden 25.11.2026: PDF-Integritätsprüfung inkrementell (umgesetzt, siehe Punkt 3); Screenshot-Workflow bleibt auf Branches (nicht `main`); Valkey standardmässig aktiv (Compose, `STATE_BACKEND=redis`); Belege im Dateisystem (`STORAGE_BACKEND=fs`); Betrieb unter https://www.odovio.ch als Neustart (keine Datenübernahme); IdP bleibt Keycloak (ein Realm, Clients `fahrzeugbuch-ios`/`fahrzeugbuch-web`), Mitgliederverwaltung nur im Web; iOS-Anzeigename `odovio`, Version aus Tag `ios-vX.Y.Z`.
 - Apple-Developer-Team `Q66V4Q95B4`, Bundle-ID `ch.odovio` (entschieden). Weitere iOS-Entscheide: `docs/TESTFLIGHT.md`.

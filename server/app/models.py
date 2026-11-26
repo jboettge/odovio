@@ -328,6 +328,29 @@ class BlobCheck(Base):
     checked_at: Mapped[str] = mapped_column(String(32))
 
 
+class VerifyCheckpoint(Base):
+    """Zuletzt bestätigter Prüfstand je Mandant (inkrementelle Integritätsprüfung, Alembic 0004).
+
+    Hash-Kette und Abgleich Datensatz ↔ Journal sind bis `seq` (Kettenkopf `head_hash`) bestätigt; die letzte
+    Vollprüfung lief am `full_at` auf dem Stand `full_seq`. Kein Teil des Journals (veränderlich, eine Zeile je
+    Mandant); mit ANCHOR_SIGNING_KEY Ed25519-signiert. Fehlend, ungültig oder `full_at` NULL → Vollprüfung.
+    `failed_seq`: Stand des letzten Befunds – danach gilt erst wieder eine fehlerfreie Vollprüfung mit
+    grösserem Stand."""
+
+    __tablename__ = "verify_checkpoints"
+
+    tenant_id: Mapped[int] = mapped_column(ForeignKey("tenants.id"), primary_key=True)
+    seq: Mapped[int] = mapped_column(Integer, default=0)
+    head_hash: Mapped[str] = mapped_column(String(64), default=GENESIS)
+    counts: Mapped[str] = mapped_column(Text, default="{}")   # JSON {Objekttyp: Anzahl Datensätze} bei `seq`
+    full_seq: Mapped[int] = mapped_column(Integer, default=0)
+    full_at: Mapped[str | None] = mapped_column(String(32))   # UTC ISO-8601
+    verified_at: Mapped[str | None] = mapped_column(String(32))
+    failed_seq: Mapped[int | None] = mapped_column(Integer)
+    key_id: Mapped[str | None] = mapped_column(String(16))
+    signature: Mapped[str | None] = mapped_column(String(128))
+
+
 # ---------- zusammengesetzte Indizes ----------
 # Pull (`/changes`): je Tabelle WHERE tenant_id = ? AND last_seq > ? ORDER BY last_seq
 SYNCED_MODELS = (Vehicle, OdometerReading, FuelEntry, Maintenance, MaintenanceItem, MaintenanceMaterial,

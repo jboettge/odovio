@@ -7,6 +7,9 @@ Was nur einmal laufen darf und wie es koordiniert ist:
                                      doppelter Anker, auch ohne Sperre der Mandantenzeile; frei beim Commit
   Vollprüfung (?full=1)               try-xact-Lock ("verify_full", Mandant) im Snapshot; belegt → 409 mit
                                      Retry-After (die Prüfung eines anderen Workers läuft bereits)
+  fällige Vollprüfung (PDF/Verify)    derselbe try-Lock; belegt → dieser Worker prüft inkrementell weiter
+  Prüfstand fortschreiben             xact-Lock ("verify_checkpoint", Mandant) in eigener kurzer Transaktion;
+                                     nur monoton (integrity._advances), Befund entwertet ihn
   Webhook-Zustellung                 BackgroundTask genau des Workers, der die Anfrage bearbeitet hat (je
                                      Ereignis genau einmal angestossen; keine periodischen Jobs/Scheduler)
   Aufräumen flüchtiger Zustände       per TTL im State-Backend (kein Job nötig)

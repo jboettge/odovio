@@ -147,7 +147,7 @@ Optionen:
 - DB-Pool je Worker (`DB_POOL_SIZE`, `DB_MAX_OVERFLOW`); Startprüfung: Worker × (Pool + Overflow) + Reserve ≤ `PG_MAX_CONNECTIONS`. PostgreSQL-Tuning (`PG_*`) mit Tabelle für 8/16/32 GB in `.env.example`.
 - Ressourcen je Dienst: `API_CPUS`, `API_MEMORY`, `DB_CPUS`, `DB_MEMORY`.
 - Metriken: `/metrics` (Prometheus, nur mit `METRICS_TOKEN` oder aus `METRICS_ALLOW`); Probes `/health/live`, `/health/ready`.
-- Lasttest: `server/loadtest/README.md` (4 vCPU, 1 Mio. Revisionen: 1 Worker 42 RPS → 4 Worker 87 RPS, p50 593 → 171 ms). Engpass: PDF (Integritätsabgleich aller Datensätze, begrenzt per `PDF_CONCURRENCY`) und Schreiben je Mandant (seriell).
+- Lasttest: `server/loadtest/README.md` (4 vCPU, 1 Mio. Revisionen: 1 Worker 42 RPS → 4 Worker 87 RPS, p50 593 → 171 ms). PDF: Integritätsprüfung inkrementell ab dem bestätigten Prüfstand (≈ 0.04 s statt 3.7–8 s bei 67k Fahrten), Rendern begrenzt per `PDF_CONCURRENCY`. Engpass bleibt das Schreiben je Mandant (seriell).
 
 **Kubernetes**: Helm-Chart `deploy/helm/fahrzeugbuch` – vertikal per VPA (Worker folgen dem CPU-Limit), horizontal per HPA (dann Valkey + Belege in S3 oder RWX-Volume, `STORAGE_BACKEND=s3|fs`). Migration als Helm-Hook-Job, Geheimnisse als `*_FILE`. Details: [deploy/helm/fahrzeugbuch/README.md](deploy/helm/fahrzeugbuch/README.md).
 
@@ -191,7 +191,7 @@ Schreiben ausschliesslich über `/sync` → jede Änderung läuft durch das Revi
 | GET | `/api/t/{mandant}/vehicles` · `/vehicles/{id}/stats` | Übersicht, Verbrauch, Fälligkeiten |
 | GET | `/api/t/{mandant}/vehicles/{id}/report.pdf?from=&to=` | PDF-Export |
 | GET | `/api/t/{mandant}/history/{entity}/{id}` | Revisionen eines Eintrags |
-| GET | `/api/t/{mandant}/audit/verify` | Kette + Abgleich Datenstand + signierte Anker prüfen |
+| GET | `/api/t/{mandant}/audit/verify[?full=1]` | Kette + Abgleich Datenstand + signierte Anker prüfen (inkrementell; `full=1` vollständig) |
 | GET | `/api/t/{mandant}/audit/anchors` | Signierte Anker zur externen Archivierung |
 
 ### Sync-Protokoll
@@ -216,6 +216,7 @@ POST /api/t/privat/sync
 - **Signierte Anker** (Ed25519, Schlüssel ausserhalb der DB): erkennen auch ein vollständiges Neuberechnen der Kette; externe Ablage der Anker schützt zusätzlich gegen Löschen
 - **DB-Rollen**: API läuft als `fahrzeugbuch_app` (kein Owner/Superuser): kann Trigger nicht deaktivieren, Journal/Anker nicht ändern, nichts löschen. Trigger sperren `UPDATE/DELETE/TRUNCATE` auf `revisions` und `anchors`
 - `/audit/verify` und jedes PDF zeigen: Kette, Datenstand, Anker; PDF enthält Kettenkopf und letzten signierten Anker
+- **Inkrementelle Prüfung** (Tabelle `verify_checkpoints`, Alembic 0004): je Mandant gilt der zuletzt bestätigte Stand (Seq + Kettenkopf, mit `ANCHOR_SIGNING_KEY` Ed25519-signiert) für alle Worker. PDFs und `/audit/verify` prüfen nur neue Revisionen (Kette), seither geänderte Datensätze, die Anzahl Datensätze je Typ und neue Anker. Vollprüfung mit `?full=1`, ohne gültigen Prüfstand und sobald die letzte älter als `VERIFY_FULL_INTERVAL_S` (24 h) ist. Das PDF nennt Zeitpunkt/Stand der letzten Vollprüfung und den inkrementellen Bereich. Bis zur nächsten Vollprüfung unentdeckt bleiben direkte DB-Änderungen an bereits bestätigten Revisionen (ohne Neuberechnen der Kette) und an seither unveränderten Datensätzen – Empfehlung: täglich `GET /audit/verify?full=1` (z. B. n8n) zusätzlich zur Anker-Archivierung
 - Grenzen: Wer Owner-Passwort **und** Signaturschlüssel besitzt, kann weiterhin manipulieren – erkennbar nur über extern archivierte Anker/PDFs. Keine zertifizierte GeBüV-/GoBD-Lösung.
 
 ## Verbrauchsberechnung

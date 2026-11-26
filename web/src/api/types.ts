@@ -436,6 +436,9 @@ export interface AuditResult {
   blobs_checked: number
   blobs_missing: number
   incremental_from?: number | null
+  full_seq?: number | null
+  full_at?: string | null
+  anchors_checked?: number | null
 }
 
 export interface Anchor {

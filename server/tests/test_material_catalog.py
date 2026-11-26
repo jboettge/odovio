@@ -175,7 +175,7 @@ def test_verify_state_detects_article_tampering(client):
     assert client.get(f"{T}/audit/verify").json()["ok"]
     with engine.begin() as conn:
         conn.execute(text("UPDATE material_articles SET unit_price = 1 WHERE id = :i"), {"i": a})
-    v = client.get(f"{T}/audit/verify").json()
+    v = client.get(f"{T}/audit/verify?full=1").json()
     assert v["chain_ok"] is True and v["state_ok"] is False and v["ok"] is False
     assert any(a in p and "material_article" in p for p in v["problems"])
 
