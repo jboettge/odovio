@@ -29,6 +29,9 @@ eine Begründung (≥ 10 Zeichen).
 
 ## Entwicklung
 
+Voraussetzung: Node.js 24 (`engines.node` `>=24`), npm 11. Werkzeuge: Vite 8 (Rolldown), Vitest 5, TypeScript 6,
+vue-tsc 3, ESLint 10 (Flat Config), Playwright 1.65 (Chromium-Revision 1255).
+
 ```bash
 npm ci
 npm run mock          # Mock-API + Mock-Keycloak auf http://127.0.0.1:8787
@@ -102,14 +105,15 @@ Hash unter `/assets/`) und danach mit `scripts/compress.mjs` die vorkomprimierte
 Ausgelegt auf viele Jahre, viele Fahrzeuge und 100k+ Fahrten je Fahrzeugbuch, bei wenig Last auf dem Server.
 
 **Bundle und Auslieferung**
-- Alle Routen lazy (`() => import(…)`). Stabile Chunks (`vite.config.ts`): `vendor-vue`, `vendor-router`,
+- Alle Routen lazy (`() => import(…)`). Stabile Chunks (`vite.config.ts`, Rolldown `codeSplitting.groups` mit
+  Prioritäten): `vendor-vue`, `vendor-router`,
   `vendor-oidc` (Hash ändert sich nur bei Updates der Abhängigkeit → bleiben über App-Releases im Browser-Cache),
   `core` (alles statisch vom Entry Erreichbare), `charts` (SVG-Diagramme, Ausdünnung), `export` (PDF/CSV/Belege,
   Beleg-Cache), `lists` (virtuelles Scrollen, Seitenwahl). `index.html` lädt nur den Startpfad; Routen-Chunks erst bei
   Bedarf. Vue ohne Options-API (`__VUE_OPTIONS_API__: false`).
 - Budgets in `package.json` → `budgets` (KiB, gzip), geprüft mit `npm run size` (auch in CI): Startpfad-JS ≤ 72,
-  Pfad bis Übersicht ≤ 85, CSS ≤ 8, jeder Chunk ≤ 32, Worker ≤ 8. Stand: Startpfad 68.6 KiB gzip (61.5 KiB brotli),
-  bis Übersicht 80.7 KiB, CSS 5.6 KiB, grösster Chunk `vendor-vue` 26.0 KiB.
+  Pfad bis Übersicht ≤ 85, CSS ≤ 8, jeder Chunk ≤ 32, Worker ≤ 8. Stand: Startpfad 65.9 KiB gzip (59.3 KiB brotli),
+  bis Übersicht 77.7 KiB, CSS 5.6 KiB, grösster Chunk `vendor-vue` 24.9 KiB.
 - Vorkomprimierung (Vertrag mit dem Server): `npm run build` erzeugt für jede Text-Datei in `dist/` ab 1 KiB
   (`.html .js .css .svg .json .txt …`) `<datei>.br` (Brotli Q11) und `<datei>.gz` (gzip 9). `npm run size` prüft
   Vollständigkeit und verlustfreie Dekomprimierung; der Mock liefert sie wie der Server mit `Content-Encoding`/`Vary`
