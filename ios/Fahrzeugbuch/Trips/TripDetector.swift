@@ -67,6 +67,9 @@ final class TripDetector: NSObject, CLLocationManagerDelegate {
     private var monitorTask: Task<Void, Never>?
     private var tickTask: Task<Void, Never>?
     private var places: [MonitoredPlace] = []
+    /// Regionsabgleich seriell: nie zwei gleichzeitig (sonst zwei `CLMonitor` gleichen Namens → Absturz)
+    private var regionSyncTask: Task<Void, Never>?
+    private var regionSyncPending = false
 
     private var lastActivity: MotionSample?
     private var automotiveSince: Date?
@@ -93,7 +96,7 @@ final class TripDetector: NSObject, CLLocationManagerDelegate {
             startMotionUpdates()
         }
         startLocationTriggers()
-        Task { await self.syncRegions() }
+        scheduleRegionSync()
     }
 
     func disable() {
@@ -104,7 +107,7 @@ final class TripDetector: NSObject, CLLocationManagerDelegate {
         manager?.stopMonitoringSignificantLocationChanges()
         manager?.stopMonitoringVisits()
         if wasEnabled || monitor != nil {
-            Task { await self.syncRegions() }
+            scheduleRegionSync()
         }
     }
 
@@ -112,7 +115,7 @@ final class TripDetector: NSObject, CLLocationManagerDelegate {
     func updatePlaces(_ places: [MonitoredPlace]) {
         self.places = places
         guard isEnabled else { return }
-        Task { await self.syncRegions() }
+        scheduleRegionSync()
     }
 
     /// Aufzeichnung läuft; `auto == true` → automatischer Stopp, sonst nur Stillstands-Vorschlag.
@@ -283,10 +286,29 @@ final class TripDetector: NSObject, CLLocationManagerDelegate {
     private func authorizationChanged() {
         guard isEnabled else { return }
         startLocationTriggers()
-        Task { await self.syncRegions() }
+        scheduleRegionSync()
+    }
+
+    /// Abgleich anstossen; läuft schon einer, wird danach genau einmal nachgezogen.
+    private func scheduleRegionSync() {
+        if regionSyncTask != nil {
+            regionSyncPending = true
+            return
+        }
+        regionSyncTask = Task { [weak self] in
+            while let self {
+                self.regionSyncPending = false
+                await self.syncRegions()
+                if !self.regionSyncPending {
+                    self.regionSyncTask = nil
+                    return
+                }
+            }
+        }
     }
 
     /// Regionen auf die (max. 20 nächstgelegenen) Orte abgleichen; deaktiviert → alle entfernen.
+    /// Nur über `scheduleRegionSync()` aufrufen.
     private func syncRegions() async {
         let status = manager?.authorizationStatus ?? .notDetermined
         let authorized = status == .authorizedAlways || status == .authorizedWhenInUse
