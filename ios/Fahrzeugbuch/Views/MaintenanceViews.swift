@@ -721,6 +721,14 @@ private struct MaterialEditView: View {
         return "Der Artikel wird beim Sichern der Wartung angelegt und steht danach zur Auswahl."
     }
 
+    /// Stepper-Bindung an die Texteingabe: −/+ um 1, nie unter 1 (leere/ungültige Eingabe zählt als 1)
+    private var quantityStep: Binding<Double> {
+        Binding(
+            get: { max(1, draft.quantity.asDouble ?? 1) },
+            set: { draft.quantity = Fmt.editQty(max(1, $0)) }
+        )
+    }
+
     // MARK: Validierung
 
     private var nameValid: Bool {
@@ -780,7 +788,18 @@ private struct MaterialEditView: View {
                 }
 
                 Section {
-                    UnitField("Menge", text: $draft.quantity, unit: draft.unit.nilIfEmpty ?? "Stk")
+                    LabeledContent("Menge") {
+                        HStack(spacing: 8) {
+                            TextField("Menge", text: $draft.quantity)
+                                .keyboardType(.decimalPad)
+                                .multilineTextAlignment(.trailing)
+                            Text(draft.unit.nilIfEmpty ?? "Stk").foregroundStyle(.secondary)
+                            // Menge ohne Tastatur ändern (ganze Schritte; Dezimalwerte bleiben per Eingabe möglich)
+                            Stepper("Menge", value: quantityStep, in: 1...MaintenanceMaterial.maxQuantity, step: 1)
+                                .labelsHidden()
+                                .fixedSize()
+                        }
+                    }
                     LabeledContent("Einheit") {
                         HStack(spacing: 8) {
                             TextField("Stk", text: $draft.unit)
@@ -839,7 +858,8 @@ private struct MaterialEditView: View {
             }
             .discardGuard(hasChanges: draft != original, isAsking: $askDiscard)
         }
-        .presentationDetents([.medium, .large])
+        // volle Höhe: bei halber Höhe verdeckte die Zahlentastatur das Mengenfeld
+        .presentationDetents([.large])
     }
 
     private var catalogSection: some View {
