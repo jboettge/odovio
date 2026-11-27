@@ -115,6 +115,7 @@ struct TripReviewView: View {
             }
         }
         .navigationTitle(titleText)
+        .keyboardDoneToolbar()   // Kilometerstand per Zahlentastatur (U7)
         .navigationBarTitleDisplayMode(.inline)
         .onAppear(perform: begin)
         .onDisappear { coordinator.refreshReminders() }   // Erinnerung an offene Bestätigungen aktualisieren

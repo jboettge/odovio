@@ -13,7 +13,9 @@ import UserNotifications
 ///
 /// Registrierung: `TripNotifications.shared.register()` früh beim Start (in `TripCoordinator.configure`
 /// und im `AppDelegate`), damit auch Aktionen nach einem Kaltstart ankommen.
-/// Datenschutz: Inhalte nur mit km, Uhrzeit und ggf. Ortsnamen (nie im Privatmodus).
+/// Datenschutz (I3): Inhalte nur mit km, Uhrzeit und Kategorie-Vorschlag – keine Orte, Adressen oder Kunden
+/// (Mitteilungen erscheinen auf dem Sperrbildschirm). Bei «Vorschau: Wenn entsperrt» zeigt iOS den Platzhalter
+/// der Kategorie.
 @MainActor
 final class TripNotifications: NSObject, UNUserNotificationCenterDelegate {
     static let shared = TripNotifications()
@@ -61,10 +63,14 @@ final class TripNotifications: NSObject, UNUserNotificationCenterDelegate {
         let personal = UNNotificationAction(identifier: Action.personal, title: "Privat",
                                             options: [.authenticationRequired])
         center.setNotificationCategories([
-            UNNotificationCategory(identifier: Category.idle, actions: [stop], intentIdentifiers: []),
-            UNNotificationCategory(identifier: Category.detected, actions: [business, personal], intentIdentifiers: []),
-            UNNotificationCategory(identifier: Category.review, actions: [], intentIdentifiers: []),
-            UNNotificationCategory(identifier: Category.info, actions: [], intentIdentifiers: []),
+            UNNotificationCategory(identifier: Category.idle, actions: [stop], intentIdentifiers: [],
+                                   hiddenPreviewsBodyPlaceholder: "Fahrt beenden?", options: []),
+            UNNotificationCategory(identifier: Category.detected, actions: [business, personal], intentIdentifiers: [],
+                                   hiddenPreviewsBodyPlaceholder: "Fahrt erkannt", options: []),
+            UNNotificationCategory(identifier: Category.review, actions: [], intentIdentifiers: [],
+                                   hiddenPreviewsBodyPlaceholder: "Fahrten bestätigen", options: []),
+            UNNotificationCategory(identifier: Category.info, actions: [], intentIdentifiers: [],
+                                   hiddenPreviewsBodyPlaceholder: "Hinweis zur Fahrt", options: []),
         ])
     }
 
@@ -105,8 +111,9 @@ final class TripNotifications: NSObject, UNUserNotificationCenterDelegate {
         center.removeDeliveredNotifications(withIdentifiers: [Identifier.idle])
     }
 
-    /// (b) Automatisch erkannte Fahrt: „18 km erkannt“ mit Geschäftlich/Privat.
-    func notifyDetected(_ trip: Trip, tenant: String, route: String?) async {
+    /// (b) Automatisch erkannte Fahrt: «18 km erkannt» mit Geschäftlich/Privat. Start/Ziel erscheinen nicht
+    /// (Sperrbildschirm, I3) – sie stehen beim Öffnen im Review.
+    func notifyDetected(_ trip: Trip, tenant: String) async {
         guard trip.status != "confirmed", trip.status != "locked", await isAllowed() else { return }
         let km = trip.distanceKm ?? trip.distanceGps ?? 0
         let content = UNMutableNotificationContent()
@@ -116,7 +123,6 @@ final class TripNotifications: NSObject, UNUserNotificationCenterDelegate {
             parts.append(Self.timeFormatter.string(from: start)
                          + (trip.endDate.map { "–" + Self.timeFormatter.string(from: $0) } ?? ""))
         }
-        if !trip.privateMode, let route { parts.append(route) }
         if let s = trip.suggestionCategory, s != TripCategory.unknown.rawValue {
             parts.append("Vorschlag: \(TripCategory.of(s).label)")
         }

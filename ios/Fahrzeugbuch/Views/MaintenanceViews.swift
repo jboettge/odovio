@@ -341,12 +341,17 @@ struct MaintenanceFormView: View {
                 Section {
                     ForEach($items) { $item in
                         HStack {
+                            // Tippfläche ≥ 44 pt, mit Beschriftung für VoiceOver (U6)
                             Button { item.done.toggle() } label: {
                                 Image(systemName: item.done ? "checkmark.circle.fill" : "circle")
-                                    .foregroundStyle(item.done ? .green : .secondary)
+                                    .foregroundStyle(item.done ? Color.successText : Color.secondary)
                                     .imageScale(.large)
+                                    .frame(minWidth: 44, minHeight: 44)
+                                    .contentShape(Rectangle())
                             }
                             .buttonStyle(.plain)
+                            .accessibilityLabel(item.label.trimmed.isEmpty ? "Punkt abhaken" : "\(item.label) abhaken")
+                            .accessibilityValue(item.done ? "erledigt" : "offen")
                             TextField("Punkt", text: $item.label)
                         }
                     }
@@ -357,7 +362,9 @@ struct MaintenanceFormView: View {
                         TextField("Neuer Punkt", text: $newItem)
                             .onSubmit(addItem)
                         Button(action: addItem) { Image(systemName: "plus.circle.fill") }
+                            .frame(minWidth: 44, minHeight: 44)
                             .disabled(newItem.trimmed.isEmpty)
+                            .accessibilityLabel("Punkt hinzufügen")
                     }
                 } header: {
                     Text("Checkliste")
@@ -378,6 +385,7 @@ struct MaintenanceFormView: View {
                 }
             }
             .navigationTitle(maintenance == nil ? "Neue Wartung" : "Wartung bearbeiten")
+            .keyboardDoneToolbar()   // Zahlentastatur ohne Eingabetaste (U7)
             .formToolbar(canSave: store.canWrite && !title.trimmed.isEmpty
                             && (!reasonRequired || CorrectionReason.isValid(reason)),
                          hasChanges: hasChanges, save: save)
@@ -831,6 +839,7 @@ private struct MaterialEditView: View {
                 catalogOptionsSection
             }
             .navigationTitle(isNew ? "Neues Material" : "Material bearbeiten")
+            .keyboardDoneToolbar()   // Zahlentastatur ohne Eingabetaste (U7)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {

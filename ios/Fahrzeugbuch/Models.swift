@@ -510,6 +510,43 @@ struct RejectedOp: Codable, Identifiable, Hashable {
     var needsReason: Bool { error.localizedCaseInsensitiveContains("Begründung") }
 }
 
+extension RejectedOp {
+    private enum CodingKeys: String, CodingKey {
+        case id, entity, entityId, action, label, error, date, snapshot, reason, at
+    }
+
+    /// Q11: Die Mandantendatei speichert `Date` nur als Tag (yyyy-MM-dd) → der Zeitpunkt der Ablehnung steht
+    /// zusätzlich als ISO-8601 in `at`. Ältere Dateien ohne `at` liefern nur den Tag.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        entity = try c.decode(String.self, forKey: .entity)
+        entityId = try c.decode(String.self, forKey: .entityId)
+        action = try c.decode(String.self, forKey: .action)
+        label = try c.decode(String.self, forKey: .label)
+        error = try c.decode(String.self, forKey: .error)
+        let day = try c.decode(Date.self, forKey: .date)
+        let at = try c.decodeIfPresent(String.self, forKey: .at)
+        date = at.flatMap { ISODate.parse($0) } ?? day
+        snapshot = try c.decodeIfPresent(Data.self, forKey: .snapshot)
+        reason = try c.decodeIfPresent(String.self, forKey: .reason)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(id, forKey: .id)
+        try c.encode(entity, forKey: .entity)
+        try c.encode(entityId, forKey: .entityId)
+        try c.encode(action, forKey: .action)
+        try c.encode(label, forKey: .label)
+        try c.encode(error, forKey: .error)
+        try c.encode(date, forKey: .date)   // Tag (kompatibel mit älteren App-Versionen)
+        try c.encode(ISODate.string(date), forKey: .at)
+        try c.encodeIfPresent(snapshot, forKey: .snapshot)
+        try c.encodeIfPresent(reason, forKey: .reason)
+    }
+}
+
 // MARK: - Fahrtenbuch
 
 /// Kategorie einer Fahrt. Rohwerte wie Server (`private` ist in Swift ein Schlüsselwort → `personal`).
@@ -792,8 +829,9 @@ struct Trip: SyncEntity {
     var isConfirmed: Bool { status == "confirmed" || status == "locked" }
     /// Muss noch bestätigt/klassifiziert werden (gesperrte Fahrten nie)
     var needsReview: Bool { !isLocked && (!isConfirmed || category == TripCategory.unknown.rawValue) }
-    /// "YYYY-MM" des (lokalen) Startdatums wie Server (`start_at[:7]`)
-    var monthKey: String { String(startAt.prefix(7)) }
+    /// "YYYY-MM" des Starts in Zürcher Zeit wie Server (`timeutil.local_month`, Q12) – auch für Fahrten im
+    /// Ausland am Monatswechsel; ohne lesbaren Zeitpunkt der Datumsteil des Texts.
+    var monthKey: String { startDate.map { LogbookRules.month($0) } ?? String(startAt.prefix(7)) }
     var hasSuggestion: Bool { suggestionCategory != nil }
 
     /// Distanz wie Server: km-Stand, sonst Route, sonst GPS

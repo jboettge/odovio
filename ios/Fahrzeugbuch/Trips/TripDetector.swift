@@ -3,7 +3,7 @@ import CoreMotion
 import Foundation
 
 /// Ort, um den eine CLMonitor-Region als Weck-Trigger gelegt wird.
-struct MonitoredPlace {
+struct MonitoredPlace: Codable, Equatable {
     var id: String
     var lat: Double
     var lon: Double
@@ -65,6 +65,11 @@ final class TripDetector: NSObject, CLLocationManagerDelegate {
     /// Nur Buchstaben/Ziffern: CoreLocation bricht bei anderen Zeichen (Punkt, Bindestrich) mit
     /// «Monitor name is not valid» ab (NSInternalInconsistencyException in `CLMonitor.init`).
     static let monitorName = "fahrzeugbuchOrte"
+
+    /// CLMonitor öffnen? Bei aktiver Automatik mit Standortberechtigung immer (unabhängig von den Orten, Q7).
+    nonisolated static func shouldOpenMonitor(enabled: Bool, authorized: Bool) -> Bool {
+        enabled && authorized
+    }
 
     /// Bedingungs-Identifier ebenfalls nur aus Buchstaben/Ziffern (Q13: Orts-IDs sind UUIDs mit Bindestrich).
     nonisolated static func monitorIdentifier(_ placeId: String) -> String {
@@ -383,7 +388,10 @@ final class TripDetector: NSObject, CLLocationManagerDelegate {
             wanted = Array(list.prefix(Self.maxRegions))
         }
         if monitor == nil {
-            guard !wanted.isEmpty else { return }
+            // Immer öffnen, sobald die Automatik aktiv ist – auch ohne (bekannte) Orte: iOS liefert ein
+            // Weck-Ereignis nur an einen geöffneten Monitor gleichen Namens (Q7). Deaktiviert und noch nie
+            // geöffnet: nichts zu tun.
+            guard Self.shouldOpenMonitor(enabled: isEnabled, authorized: authorized) else { return }
             let m = await CLMonitor(Self.monitorName)
             monitor = m
             monitorTask = Task { [weak self] in

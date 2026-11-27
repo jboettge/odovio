@@ -197,7 +197,7 @@ final class TenantStore {
         guard let data = try? await apiProvider().download("api/t/\(tenant.slug)/attachments/\(a.id)/blob"),
               !data.isEmpty else { return nil }
         guard AttachmentFiles.sha256(data) == a.sha256.lowercased() else {
-            notices.append("Beleg „\(a.kindLabel)“ wurde nicht angezeigt: Die Prüfsumme der heruntergeladenen Datei "
+            notices.append("Beleg «\(a.kindLabel)» wurde nicht angezeigt: Die Prüfsumme der heruntergeladenen Datei "
                            + "stimmt nicht mit dem Beleg überein (Datei beschädigt oder verändert).")
             return nil
         }
@@ -1071,7 +1071,7 @@ final class TenantStore {
         switch entity {
         case FuelEntry.entityName: if let f = fuel[id] { return "\(base) \(day(f.date))" }
         case OdometerReading.entityName: if let o = odometer[id] { return "\(base) \(day(o.date))" }
-        case Maintenance.entityName: if let m = maintenance[id] { return "\(base) „\(m.title)“ \(day(m.date))" }
+        case Maintenance.entityName: if let m = maintenance[id] { return "\(base) «\(m.title)» \(day(m.date))" }
         case Trip.entityName:
             if let t = trips[id] {
                 let when = t.startDate.map(day) ?? String(t.startAt.prefix(10))
@@ -1694,7 +1694,7 @@ final class TenantStore {
             let backup = quarantineFile()
             cursor = 0
             storeLoadIssue = "Die lokale Datei konnte nicht gelesen werden"
-                + (backup.map { " und wurde als „\($0)“ gesichert" } ?? "")
+                + (backup.map { " und wurde als «\($0)» gesichert" } ?? "")
                 + (isLocal ? ". Die Daten werden aus dem lokalen Journal wiederhergestellt."
                    : ". Die Daten werden neu vom Server geladen; nicht synchronisierte Änderungen sind in der Sicherung enthalten.")
         }
@@ -1760,7 +1760,7 @@ final class TenantStore {
             let backup = quarantineFile()
             cursor = 0
             storeLoadIssue = "Die lokale Datei konnte nicht gelesen werden"
-                + (backup.map { " und wurde als „\($0)“ gesichert" } ?? "") + "."
+                + (backup.map { " und wurde als «\($0)» gesichert" } ?? "") + "."
         }
         // Während der Sperre erfasste Änderungen übernehmen
         for op in memory.outbox where !outbox.contains(where: { $0.opId == op.opId }) {
@@ -1804,9 +1804,13 @@ final class TenantStore {
         observers.add(center.addObserver(forName: Notification.Name("UIApplicationProtectedDataDidBecomeAvailable"),
                                          object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated {
-                guard let self, self.persistBlocked else { return }
-                self.reloadIfBlocked()
-                Task { await self.sync() }
+                guard let self else { return }
+                if self.persistBlocked || self.localJournal?.isBlocked == true {
+                    self.reloadIfBlocked()
+                    Task { await self.sync() }
+                }
+                // Entsperrt: während der Sperre zurückgestellte Journal-Zeilen sofort anhängen (Q8)
+                self.localJournal?.flush()
             }
         })
     }

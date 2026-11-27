@@ -1133,6 +1133,7 @@ struct TripFormView: View {
                 }
             }
             .navigationTitle(titleText)
+            .keyboardDoneToolbar()   // Zahlentastatur ohne Eingabetaste (U7)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -1428,6 +1429,7 @@ struct TripSplitView: View {
                 }
             }
             .navigationTitle("Fahrt aufteilen")
+            .keyboardDoneToolbar()   // Zahlentastatur ohne Eingabetaste (U7)
             .formToolbar(canSave: store.canWrite && errors.isEmpty, save: save)
             .onAppear(perform: prefill)
         }

@@ -60,18 +60,21 @@ targets:
             UIApplicationShortcutItemSubtitle: Mit dem Standardfahrzeug
             UIApplicationShortcutItemIconType: UIApplicationShortcutIconTypePlay
         # Intelligentes Fahrtenbuch (ios/Fahrzeugbuch/Trips)
+        # I4: Servermodus ehrlich beschreiben (reduzierter Track, Wohnort-Umgebung) – wie der «Immer»-Text
         NSLocationWhenInUseUsageDescription: >-
           Das Fahrtenbuch nutzt deinen Standort nur während einer Fahrt, um Distanz sowie Start- und Zielort
           zu erfassen. Die GPS-Rohdaten bleiben auf diesem iPhone und werden 30 Tage nach Bestätigung der
-          Fahrt gelöscht. Im Privatmodus wird kein Track gespeichert.
+          Fahrt gelöscht. Mit Server erhält dein Fahrzeugbuch-Server Start/Ziel als Adresse, die Distanz und
+          zur Strassendistanz-Berechnung den reduzierten Track ohne Wohnort-Umgebung und ohne die
+          ersten/letzten 200 m (dort nicht gespeichert). Im Privatmodus wird kein Track gespeichert.
         NSLocationAlwaysAndWhenInUseUsageDescription: >-
-          Mit „Immer“ erkennt das Fahrtenbuch Fahrten automatisch und zeichnet sie auch bei gesperrtem iPhone
+          Mit «Immer» erkennt das Fahrtenbuch Fahrten automatisch und zeichnet sie auch bei gesperrtem iPhone
           auf. Ausserhalb von Fahrten wird nur grob erkannt, ob du losfährst (bekannte Orte, wesentliche
           Standortänderungen) – kein Bewegungsprofil. Die Rohdaten bleiben auf dem Gerät; dein
           Fahrzeugbuch-Server erhält Start/Ziel als Adresse, die Distanz und zur Strassendistanz-Berechnung
           den reduzierten Track ohne Wohnort-Umgebung und ohne die ersten/letzten 200 m (dort nicht gespeichert).
         NSMotionUsageDescription: >-
-          Bewegungsdaten („im Auto“, „stillstehend“, „gehend“) werden nur auf dem iPhone ausgewertet, um
+          Bewegungsdaten («im Auto», «stillstehend», «gehend») werden nur auf dem iPhone ausgewertet, um
           Beginn und Ende einer Fahrt automatisch zu erkennen. Sie verlassen das Gerät nicht.
         NSCalendarsFullAccessUsageDescription: >-
           Termine werden nur auf dem iPhone gelesen, um zu einer Fahrt den passenden Termin als Zweck
@@ -81,7 +84,7 @@ targets:
         NSCameraUsageDescription: >-
           Die Kamera wird nur verwendet, um Zapfsäule, Tankquittung oder Tacho zu fotografieren und die
           Fahrgestellnummer (VIN) zu scannen. Text- und Strichcode-Erkennung laufen auf diesem iPhone. Ein Foto verlässt das Gerät nur, wenn du es als Beleg
-          speicherst (Übertragung auf deinen Fahrzeugbuch-Server) oder ausdrücklich „Mit KI auswerten“ wählst.
+          speicherst (Übertragung auf deinen Fahrzeugbuch-Server) oder ausdrücklich «Mit KI auswerten» wählst.
         UIBackgroundModes: [location]
   FahrzeugbuchTests:
     type: bundle.unit-test

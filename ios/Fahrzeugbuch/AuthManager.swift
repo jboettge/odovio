@@ -43,7 +43,7 @@ enum AuthError: LocalizedError {
         case .server(let m): "Anmeldeserver-Fehler: \(m)"
         case .issuerChanged(let issuer):
             "Der Anmeldeserver hat sich geändert (\(issuer)). Wenn das beabsichtigt ist: "
-                + "„Anmeldeserver zurücksetzen“ wählen und neu anmelden."
+                + "«Anmeldeserver zurücksetzen» wählen und neu anmelden."
         }
     }
 }
@@ -107,18 +107,36 @@ final class AuthManager {
     }()
 
     init() {
+        let saved = Self.loadSavedSession()
+        refreshToken = saved.token
+        binding = saved.binding
+        isLoggedIn = saved.token != nil
+        userName = saved.userName
+    }
+
+    /// Start vor der ersten Entsperrung (Q6): Die Keychain war nicht lesbar – das heisst nicht «abgemeldet».
+    /// Nach der Entsperrung die gespeicherte Anmeldung laden (nur, solange keine neue besteht).
+    func reloadAfterFirstUnlock() {
+        guard !isLoggedIn else { return }
+        let saved = Self.loadSavedSession()
+        refreshToken = saved.token
+        binding = saved.binding
+        isLoggedIn = saved.token != nil
+        userName = saved.userName
+    }
+
+    /// Gespeicherte Anmeldung aus Keychain/UserDefaults (Token nur mit Bindung an den Server, I1).
+    private static func loadSavedSession() -> (token: String?, binding: TokenBinding?, userName: String?) {
         Keychain.removeAllAfterFreshInstall()
         var token = Keychain.get("refreshToken")
-        let stored = Keychain.get(AuthManager.bindingKey).flatMap { try? JSONDecoder().decode(TokenBinding.self, from: Data($0.utf8)) }
+        let stored = Keychain.get(bindingKey).flatMap { try? JSONDecoder().decode(TokenBinding.self, from: Data($0.utf8)) }
         if token != nil && stored == nil {
             // Token älterer Versionen ohne Bindung: Server unbekannt → nicht verwenden, neu anmelden (I1)
             Keychain.set("", for: "refreshToken")
             token = nil
         }
-        refreshToken = token
-        binding = token == nil ? nil : stored
-        isLoggedIn = token != nil
-        userName = token == nil ? nil : UserDefaults.standard.string(forKey: "userName")
+        guard let token else { return (nil, nil, nil) }
+        return (token, stored, UserDefaults.standard.string(forKey: "userName"))
     }
 
     // MARK: Öffentliche API
@@ -162,10 +180,17 @@ final class AuthManager {
         ])
         let newBinding = TokenBinding(server: TokenBinding.normalize(server), issuer: cfg.issuer, clientId: cfg.clientId)
         binding = newBinding
+        var saved = false
         if let data = try? JSONEncoder().encode(newBinding), let text = String(data: data, encoding: .utf8) {
-            Keychain.set(text, for: Self.bindingKey)
+            saved = Keychain.set(text, for: Self.bindingKey)
         }
-        store(tokens)
+        saved = store(tokens) && saved
+        guard saved else {
+            // Ohne gespeicherte Bindung/Refresh-Token wäre man nach einem Neustart still abgemeldet (Q14)
+            clearSession()
+            throw AuthError.callback("Die Anmeldung konnte nicht im Schlüsselbund gespeichert werden. "
+                                     + "Bitte erneut versuchen.")
+        }
         UserDefaults.standard.set(cfg.issuer, forKey: Self.pinnedIssuerKey)
         UserDefaults.standard.set(cfg.clientId, forKey: Self.pinnedClientKey)
         guard let sub = Self.claim(tokens.accessToken, "sub") else { throw AuthError.callback("Token ohne sub") }
@@ -249,18 +274,23 @@ final class AuthManager {
         }
     }
 
-    private func store(_ tokens: TokenResponse) {
+    /// Tokens übernehmen; Rückgabe: `false`, wenn ein geliefertes Refresh-Token nicht in der Keychain
+    /// gespeichert werden konnte (Q14).
+    @discardableResult
+    private func store(_ tokens: TokenResponse) -> Bool {
         accessToken = tokens.accessToken
         expiry = Date().addingTimeInterval(TimeInterval(tokens.expiresIn ?? 60))
+        var saved = true
         if let rt = tokens.refreshToken {
             refreshToken = rt
-            Keychain.set(rt, for: "refreshToken")
+            saved = Keychain.set(rt, for: "refreshToken")
         }
         if let name = Self.claim(tokens.accessToken, "preferred_username") ?? Self.claim(tokens.accessToken, "name") {
             userName = name
             UserDefaults.standard.set(name, forKey: "userName")
         }
         isLoggedIn = true
+        return saved
     }
 
     /// Lädt Issuer/Client vom Server und die Discovery vom Issuer – mit Prüfungen gegen
