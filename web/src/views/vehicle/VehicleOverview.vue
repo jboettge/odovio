@@ -1,6 +1,5 @@
 <script setup lang="ts">
-import { errorText } from '../../store/toasts'
-import { computed, ref, watch } from 'vue'
+import { computed } from 'vue'
 import Kpi from '../../components/Kpi.vue'
 import Icon from '../../components/Icon.vue'
 import Loading from '../../components/Loading.vue'
@@ -17,21 +16,14 @@ import type { HealthResult } from '../../lib/slim'
 import { useAsync } from '../../use/async'
 
 const { vid, vehicle, fuel, maintenance, tenant, writable } = useVehicle()
-const s = ref<Stats | null>(null)
-const error = ref<string | null>(null)
-
-watch(
-  () => [vid.value, dataState.loadedAt] as const,
-  async () => {
-    error.value = null
-    try {
-      s.value = await stats(tenant.value, vid.value)
-    } catch (e) {
-      error.value = errorText(e)
-    }
-  },
-  { immediate: true },
+// Kennzahlen vom Server: veraltete Antworten (Fahrzeugwechsel) werden verworfen, Fehler mit «Erneut versuchen»
+const statsRes = useAsync(
+  () => ({ tenant: tenant.value, vid: vid.value, at: dataState.loadedAt }),
+  (a) => stats(a.tenant, a.vid),
+  null as Stats | null,
 )
+const s = computed(() => statsRes.data.value)
+const error = statsRes.error
 
 const NO_HEALTH: HealthResult = { open: 0, gaps: 0, gapKm: 0, estimated: 0 }
 // Kilometerkette/offene Fahrten über alle Fahrten des Fahrzeugs im Web Worker
@@ -76,7 +68,10 @@ const monthlyTotal = computed(() => monthly.value.reduce((a, d) => a + d.values[
 </script>
 
 <template>
-  <AlertBox v-if="error" kind="danger" live>{{ error }}</AlertBox>
+  <AlertBox v-if="error && !statsRes.pending.value" kind="danger" title="Kennzahlen konnten nicht geladen werden" live>
+    <p>{{ error }}</p>
+    <button type="button" class="btn btn-sm" @click="statsRes.reload()"><Icon name="refresh" size="sm" />Erneut versuchen</button>
+  </AlertBox>
   <Loading v-else-if="!s" text="Kennzahlen werden geladen …" />
   <div v-else class="stack">
     <div v-if="writable && !vehicle?.deleted" class="row" role="group" aria-label="Erfassen">

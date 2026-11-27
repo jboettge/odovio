@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { errorText } from '../store/toasts'
-// Seitenpanel: Verlauf eines Eintrags aus dem Änderungsprotokoll (Hash-Kette).
-import { computed, ref, watch } from 'vue'
+// Seitenpanel: Verlauf eines Eintrags aus dem Änderungsprotokoll (Hash-Kette). Wechselt der Eintrag während des
+// Ladens, wird die alte Anfrage abgebrochen (keine veraltete Antwort im Panel).
+import { computed } from 'vue'
 import Modal from './Modal.vue'
+import Icon from './Icon.vue'
 import Loading from './Loading.vue'
 import AlertBox from './AlertBox.vue'
 import { endpoints } from '../api/endpoints'
@@ -10,31 +11,20 @@ import type { Revision } from '../api/types'
 import { diffRevisions, fieldLabel, valueText } from '../lib/history'
 import { ACTION_LABELS, ENTITY_LABELS } from '../lib/labels'
 import { dateTime, shortHash } from '../lib/format'
+import { useAsync } from '../use/async'
 
 const props = defineProps<{ tenant: string; entity: string | null; id: string | null; title?: string }>()
 const emit = defineEmits<{ close: [] }>()
 
-const revs = ref<Revision[]>([])
-const loading = ref(false)
-const error = ref<string | null>(null)
-
-watch(
-  () => [props.entity, props.id] as const,
-  async ([entity, id]) => {
-    revs.value = []
-    error.value = null
-    if (!entity || !id) return
-    loading.value = true
-    try {
-      revs.value = await endpoints.history(props.tenant, entity, id)
-    } catch (e) {
-      error.value = errorText(e)
-    } finally {
-      loading.value = false
-    }
-  },
-  { immediate: true },
+const res = useAsync(
+  () => ({ tenant: props.tenant, entity: props.entity, id: props.id }),
+  (a, signal): Promise<Revision[]> => (a.entity && a.id ? endpoints.history(a.tenant, a.entity, a.id, signal) : Promise.resolve([])),
+  [] as Revision[],
+  { resetOnError: true },
 )
+const revs = res.data
+const loading = res.pending
+const error = res.error
 
 const items = computed(() =>
   revs.value
@@ -47,7 +37,10 @@ const heading = computed(() => props.title ?? `Verlauf: ${ENTITY_LABELS[props.en
 <template>
   <Modal :open="Boolean(entity && id)" :title="heading" variant="panel" @close="emit('close')">
     <Loading v-if="loading" text="Verlauf wird geladen …" />
-    <AlertBox v-else-if="error" kind="danger" live>{{ error }}</AlertBox>
+    <AlertBox v-else-if="error" kind="danger" live>
+      <p>{{ error }}</p>
+      <button type="button" class="btn btn-sm" @click="res.reload()"><Icon name="refresh" size="sm" />Erneut versuchen</button>
+    </AlertBox>
     <p v-else-if="!items.length" class="muted">Keine Einträge im Änderungsprotokoll.</p>
     <ol v-else class="timeline" aria-label="Revisionen, neueste zuerst">
       <li v-for="{ r, changes } in items" :key="r.seq">

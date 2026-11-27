@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import SourceLink from './components/SourceLink.vue'
 import { useRoute, useRouter } from 'vue-router'
 import Icon from './components/Icon.vue'
@@ -9,7 +9,7 @@ import AlertBox from './components/AlertBox.vue'
 import { authState, logout } from './auth/oidc'
 import { watchIdle, type IdleWatch } from './auth/idle'
 import { currentTenant, displayName, role, selectTenant, session, tenants } from './store/session'
-import { dataState, load, reset, vehiclesByName } from './store/data'
+import { dataState, load, refreshIfStale, reset, vehiclesByName } from './store/data'
 import { visibleNav, type NavItem } from './lib/roles'
 import { ROLE_LABELS } from './lib/roles'
 
@@ -99,6 +99,35 @@ function onTenantChange(e: Event) {
 function retry() {
   if (session.tenant) load(session.tenant, { force: true }).catch(() => undefined)
 }
+
+// Zurück im Tab/Fenster: Änderungen (z. B. aus der App) nachladen – gedrosselt, siehe refreshIfStale
+function onReturn() {
+  if (document.visibilityState === 'visible' && authState.user) refreshIfStale()?.catch(() => undefined)
+}
+onMounted(() => {
+  document.addEventListener('visibilitychange', onReturn)
+  window.addEventListener('focus', onReturn)
+})
+onBeforeUnmount(() => {
+  document.removeEventListener('visibilitychange', onReturn)
+  window.removeEventListener('focus', onReturn)
+})
+
+/*
+ * Schmale Bildschirme: Navigation als Ausklappmenü («Menü»), damit der Inhalt sofort sichtbar ist. Nach der Wahl
+ * eines Eintrags (Routenwechsel) und mit Escape klappt es wieder zu; Escape gibt den Fokus an den Menü-Knopf zurück.
+ */
+const navOpen = ref(false)
+const navToggle = ref<HTMLButtonElement | null>(null)
+watch(
+  () => route.fullPath,
+  () => (navOpen.value = false),
+)
+function onNavKeydown(e: KeyboardEvent) {
+  if (e.key !== 'Escape' || !navOpen.value) return
+  navOpen.value = false
+  void nextTick(() => navToggle.value?.focus())
+}
 </script>
 
 <template>
@@ -111,7 +140,17 @@ function retry() {
       <span class="brand-logo"><Icon name="car" /></span>Fahrzeugbuch
     </RouterLink>
     <header class="topbar">
-      <div v-if="tenants.length > 1" class="row">
+      <button
+        ref="navToggle"
+        type="button"
+        class="btn btn-sm nav-toggle"
+        :aria-expanded="navOpen ? 'true' : 'false'"
+        aria-controls="sidenav"
+        @click="navOpen = !navOpen"
+      >
+        <Icon :name="navOpen ? 'x' : 'menu'" size="sm" />Menü
+      </button>
+      <div v-if="tenants.length > 1" class="row tenant-switch">
         <label for="tenant-select" class="muted small">Fahrzeugbuch</label>
         <select id="tenant-select" class="select" :value="tenantDraft" aria-describedby="tenant-hint" @change="onTenantChange" @keydown="onTenantKeydown" @pointerdown="keyChange = false">
           <option v-if="!session.tenant" value="" disabled>Bitte wählen</option>
@@ -120,15 +159,15 @@ function retry() {
         <span id="tenant-hint" class="sr-only">Mit Enter wechseln</span>
         <button v-if="tenantPending" type="button" class="btn btn-primary btn-sm" @click="switchTenant">Wechseln</button>
       </div>
-      <div v-else-if="currentTenant" class="row">
+      <div v-else-if="currentTenant" class="row tenant-switch">
         <span class="muted small">Fahrzeugbuch</span><strong>{{ currentTenant.name || currentTenant.slug }}</strong>
       </div>
       <RoleBadge v-if="role" :role="role" />
       <span class="topbar-spacer"></span>
-      <RouterLink to="/konto" class="topbar-user"><Icon name="user" />{{ displayName }}</RouterLink>
+      <RouterLink to="/konto" class="topbar-user"><Icon name="user" /><span class="topbar-user-name">{{ displayName }}</span></RouterLink>
       <button type="button" class="btn btn-sm" @click="signOut()"><Icon name="logout" size="sm" />Abmelden</button>
     </header>
-    <nav class="sidenav" aria-label="Hauptnavigation">
+    <nav id="sidenav" :class="['sidenav', { 'is-open': navOpen }]" aria-label="Hauptnavigation" @keydown="onNavKeydown">
       <ul>
         <li v-for="n in nav.slice(0, 1)" :key="n.to">
           <RouterLink :to="n.to"><Icon :name="n.icon" />{{ n.label }}</RouterLink>

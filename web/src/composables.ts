@@ -1,5 +1,5 @@
 // Gemeinsame Logik der Fahrzeug- und Stammdaten-Ansichten.
-import { computed, reactive, ref } from 'vue'
+import { computed, reactive, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import type { EntityMap, EntityName, FuelEntry, Maintenance, OdometerReading, SyncOp, Trip } from './api/types'
 import { ApiError } from './api/client'
@@ -80,8 +80,20 @@ export function useStorno() {
   return { state, ask, confirm, close: () => (state.open = false) }
 }
 
-/** Formular-Editor für Stammdaten (Neu/Bearbeiten → Sync-Op, danach neu laden). */
-export function useEditor<E extends EntityName>(entity: E, defaults: () => Record<string, unknown>) {
+/** Vergleichbarer Stand von Formularwerten (Änderungserkennung); Dateien zählen nur über ihre Anzahl. */
+function snapshot(v: unknown): string {
+  return JSON.stringify(v, (_k, x: unknown) => (typeof Blob !== 'undefined' && x instanceof Blob ? `blob:${x.size}` : x))
+}
+
+/** Gleicher Formularwert? (Zahlenfeld: 5 und «5» gelten als gleich) */
+const sameValue = (a: unknown, b: unknown) => a === b || (a ?? '') === (b ?? '') || String(a ?? '') === String(b ?? '')
+
+/**
+ * Formular-Editor für Stammdaten und Erfassen (Neu/Bearbeiten → Sync-Op, danach neu laden).
+ * `opts.track`: weitere Formularteile ausserhalb von `state.form` (Positionen, Belege, Begründung) für «ungespeicherte
+ * Änderungen» (Rückfrage beim Schliessen).
+ */
+export function useEditor<E extends EntityName>(entity: E, defaults: () => Record<string, unknown>, opts: { track?: () => unknown } = {}) {
   const state = reactive({
     open: false,
     id: null as string | null,
@@ -101,14 +113,45 @@ export function useEditor<E extends EntityName>(entity: E, defaults: () => Recor
    */
   let attempt = { id: '', opId: '', sent: null as string | null, extra: [] as SyncOp[] }
 
+  /* Ungespeicherte Änderungen: Stand beim Öffnen (Formular + weitere Teile) gegen den aktuellen Stand */
+  const current = () => snapshot([state.form, opts.track?.() ?? null])
+  const opened = ref('')
+  const dirty = computed(() => state.open && current() !== opened.value)
+  const markClean = () => (opened.value = current())
+
+  /*
+   * Feldfehler verschwinden, sobald das Feld geändert wird (nicht erst beim nächsten Speichern). Verglichen wird mit
+   * dem Wert bei der Prüfung; die allgemeine Meldung «Bitte die markierten Felder prüfen» geht mit dem letzten Fehler.
+   */
+  let checked: Record<string, unknown> = {}
+  watch(
+    () => Object.keys(state.errors).map((k) => [k, state.form[k]] as const),
+    (pairs) => {
+      // Fehler, die nicht aus save() stammen (z. B. Prüfung beim Verlassen des Feldes): Wert jetzt merken
+      for (const [k, v] of pairs) if (!(k in checked)) checked[k] = v
+      const stale = pairs.filter(([k, v]) => k in checked && !sameValue(v, checked[k])).map(([k]) => k)
+      if (!stale.length) return
+      const next = { ...state.errors }
+      for (const k of stale) delete next[k]
+      state.errors = next
+      if (!Object.keys(next).length && state.error === INVALID) state.error = null
+    },
+  )
+
+  function openWith(form: Record<string, unknown>, id: string | null, version: number | null) {
+    Object.assign(state, { open: true, id, version, form, errors: {}, error: null })
+    checked = {}
+    markClean()
+  }
+
   function create(extra: Record<string, unknown> = {}) {
     attempt = { id: uuid(), opId: uuid(), sent: null, extra: [] }
-    Object.assign(state, { open: true, id: null, version: null, form: { ...defaults(), ...extra }, errors: {}, error: null })
+    openWith({ ...defaults(), ...extra }, null, null)
   }
 
   function edit(rec: EntityMap[E], extra: Record<string, unknown> = {}) {
     attempt = { id: rec.id, opId: uuid(), sent: null, extra: [] }
-    Object.assign(state, { open: true, id: rec.id, version: rec.version, form: { ...rec, ...extra }, errors: {}, error: null })
+    openWith({ ...rec, ...extra }, rec.id, rec.version)
   }
 
   /** Feste ID des Datensatzes (auch vor dem ersten Speichern, z. B. für Kind-Datensätze und Belege). */
@@ -124,9 +167,11 @@ export function useEditor<E extends EntityName>(entity: E, defaults: () => Recor
   ): Promise<boolean> {
     if (!session.tenant) return false
     const data = transform ? transform({ ...state.form }) : { ...state.form }
-    state.errors = validate(entity, data)
-    if (Object.keys(state.errors).length) {
-      state.error = 'Bitte die markierten Felder prüfen.'
+    const errors = validate(entity, data)
+    checked = { ...state.form }
+    state.errors = errors
+    if (Object.keys(errors).length) {
+      state.error = INVALID
       return false
     }
     if (state.busy) return false
@@ -168,8 +213,24 @@ export function useEditor<E extends EntityName>(entity: E, defaults: () => Recor
     }
   }
 
-  return { state, create, edit, save, recordId, close: () => (state.open = false) }
+  return {
+    state,
+    create,
+    edit,
+    save,
+    recordId,
+    close: () => (state.open = false),
+    /** Formular seit dem Öffnen geändert (Rückfrage vor dem Verwerfen) */
+    get dirty() {
+      return dirty.value
+    },
+    /** aktuellen Stand als «unverändert» übernehmen (z. B. nachdem weitere Teile geladen wurden) */
+    markClean,
+  }
 }
+
+/** Allgemeine Meldung bei Feldfehlern (verschwindet mit dem letzten korrigierten Feld). */
+export const INVALID = 'Bitte die markierten Felder prüfen.'
 
 /**
  * Erfassen/Ändern im abgeschlossenen Monat braucht eine Begründung (wie der Server: nur Einträge mit km-Stand).

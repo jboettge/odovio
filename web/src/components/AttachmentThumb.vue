@@ -1,14 +1,15 @@
 <script setup lang="ts">
-import { errorText } from '../store/toasts'
 // Beleg-Vorschau: Datei per Bearer laden und als Blob-URL zeigen (nie direkt verlinken). Geladen wird erst, wenn
 // die Vorschau sichtbar wird (IntersectionObserver); geladene Belege liegen in einem begrenzten Cache (LRU),
-// verdrängte blob:-URLs werden freigegeben.
-import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
+// verdrängte blob:-URLs werden freigegeben. Fehler nach Status: 404 = Datei (noch) nicht auf dem Server,
+// sonst Meldung mit «Erneut versuchen».
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { endpoints } from '../api/endpoints'
 import type { Attachment } from '../api/types'
-import { isAbort, type BlobResult } from '../api/client'
+import { ApiError, isAbort, type BlobResult } from '../api/client'
+import { userMessage } from '../lib/security'
 import { ATTACHMENT_KIND_LABELS } from '../lib/labels'
-import { bytes } from '../lib/format'
+import { bytes, date } from '../lib/format'
 import { openBlob, saveBlob } from '../lib/download'
 import { blobCache } from '../lib/blobCache'
 import Icon from './Icon.vue'
@@ -18,6 +19,8 @@ const root = ref<HTMLElement | null>(null)
 const url = ref<string | null>(null)
 const result = ref<BlobResult | null>(null)
 const error = ref<string | null>(null)
+/** Datei fehlt auf dem Server (404): Metadaten gespeichert, Upload nicht abgeschlossen */
+const missing = ref(false)
 const loading = ref(false)
 let ctrl: AbortController | null = null
 let visible = false
@@ -28,6 +31,7 @@ async function load() {
   url.value = null
   result.value = null
   error.value = null
+  missing.value = false
   const key = `${props.tenant}:${props.attachment.id}`
   const hit = blobCache.get(key)
   if (hit) {
@@ -43,9 +47,15 @@ async function load() {
     result.value = entry.result
     url.value = entry.url
   } catch (e) {
-    if (!isAbort(e)) error.value = errorText(e)
+    if (isAbort(e) || ctrl !== my) return
+    if (e instanceof ApiError && e.status === 404) missing.value = true
+    else error.value = userMessage(e)
   } finally {
-    if (ctrl === my) loading.value = false
+    // auch nach Abbruch (z. B. Routenwechsel) keine endlose Ladeanzeige
+    if (ctrl === my) {
+      loading.value = false
+      ctrl = null
+    }
   }
 }
 
@@ -79,7 +89,9 @@ onBeforeUnmount(() => {
   ctrl?.abort()
 })
 
-const kind = ATTACHMENT_KIND_LABELS[props.attachment.kind] ?? props.attachment.kind
+const kind = computed(() => ATTACHMENT_KIND_LABELS[props.attachment.kind] ?? props.attachment.kind)
+/** Eindeutige Bezeichnung (mehrere Belege gleicher Art im selben Dialog): Art, Aufnahmedatum, Grösse */
+const desc = computed(() => [kind.value, props.attachment.taken_at ? `vom ${date(props.attachment.taken_at)}` : '', bytes(props.attachment.size)].filter(Boolean).join(', '))
 function open() {
   if (result.value) openBlob(result.value)
 }
@@ -90,10 +102,14 @@ function save() {
 
 <template>
   <figure ref="root" class="thumb">
-    <img v-if="url" :src="url" :alt="`${kind} vom Beleg`" loading="lazy" decoding="async" />
+    <img v-if="url" :src="url" :alt="`Foto: ${desc}`" loading="lazy" decoding="async" />
     <div v-else class="thumb-placeholder">
       <span v-if="loading">Lädt …</span>
-      <span v-else-if="error">{{ error.includes('Nicht') || error.includes('nicht') ? 'Datei noch nicht hochgeladen' : error }}</span>
+      <span v-else-if="missing">Datei nicht vorhanden – noch nicht hochgeladen</span>
+      <span v-else-if="error" class="thumb-error">
+        <span>{{ error }}</span>
+        <button type="button" class="btn btn-sm" :aria-label="`${desc} erneut laden`" @click="load()"><Icon name="refresh" size="sm" />Erneut versuchen</button>
+      </span>
       <span v-else-if="attachment.mime === 'application/pdf'"><Icon name="file" size="lg" /><br />PDF</span>
       <span v-else-if="attachment.mime === 'image/heic'">HEIC – im Browser nicht darstellbar</span>
       <span v-else>Wird geladen, sobald sichtbar …</span>
@@ -101,8 +117,8 @@ function save() {
     <figcaption class="thumb-cap">
       <span>{{ kind }} <span class="muted">· {{ bytes(attachment.size) }}</span><span v-if="attachment.deleted" class="badge badge-danger">storniert</span></span>
       <span v-if="result" class="row">
-        <button v-if="attachment.mime === 'application/pdf'" type="button" class="btn btn-ghost btn-icon btn-sm" :aria-label="`${kind} öffnen`" @click="open"><Icon name="eye" size="sm" /></button>
-        <button type="button" class="btn btn-ghost btn-icon btn-sm" :aria-label="`${kind} herunterladen`" @click="save"><Icon name="download" size="sm" /></button>
+        <button v-if="attachment.mime === 'application/pdf'" type="button" class="btn btn-ghost btn-icon btn-sm" :aria-label="`${desc} öffnen`" @click="open"><Icon name="eye" size="sm" /></button>
+        <button type="button" class="btn btn-ghost btn-icon btn-sm" :aria-label="`${desc} herunterladen`" @click="save"><Icon name="download" size="sm" /></button>
       </span>
     </figcaption>
   </figure>

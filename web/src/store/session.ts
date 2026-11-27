@@ -40,6 +40,8 @@ export const tenants = computed<TenantInfo[]>(() =>
 
 export const currentTenant = computed<TenantInfo | null>(() => tenants.value.find((t) => t.slug === session.tenant) ?? null)
 
+/** Anzeigename des gewählten Fahrzeugbuchs (statt Kürzel/Slug). */
+export const tenantName = computed(() => currentTenant.value?.name || session.tenant || '')
 export const role = computed<Role | null>(() => currentTenant.value?.role ?? null)
 
 export const displayName = computed(() => session.me?.display_name || session.me?.name || 'Unbekannt')

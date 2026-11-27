@@ -65,7 +65,7 @@ const save = () => void ed.save((f) => ({ name: strOrNull(f.name) ?? '', ref: st
     </div>
     <Pager v-model:page="pager.page" v-model:size="pager.size" :total="pager.total" label="Seiten der Kunden" />
   </section>
-  <EditorModal :open="ed.state.open" :title="ed.state.id ? 'Kunde bearbeiten' : 'Kunde erfassen'" :busy="ed.state.busy" :error="ed.state.error" @close="ed.close" @save="save">
+  <EditorModal :open="ed.state.open" :title="ed.state.id ? 'Kunde bearbeiten' : 'Kunde erfassen'" :busy="ed.state.busy" :error="ed.state.error" :dirty="ed.dirty" @close="ed.close" @save="save">
     <Field v-slot="f" label="Name" required :error="e.name"><input :id="f.id" v-model="ed.state.form.name" class="input" maxlength="150" :aria-invalid="f.invalid" :aria-describedby="f.describedby" /></Field>
     <Field v-slot="f" label="Referenz" hint="z. B. Kundennummer" :error="e.ref"><input :id="f.id" v-model="ed.state.form.ref" class="input" maxlength="50" :aria-describedby="f.describedby" /></Field>
     <Field v-slot="f" label="Notiz" span :error="e.note"><textarea :id="f.id" v-model="ed.state.form.note" class="textarea" maxlength="500"></textarea></Field>

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 // Tankvorgang im Web erfassen/bearbeiten, mit Belegen (Foto/PDF).
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import Field from '../../../components/Field.vue'
 import CorrectionReason from '../../../components/CorrectionReason.vue'
 import ReceiptPicker from '../../../components/ReceiptPicker.vue'
@@ -17,13 +17,18 @@ import { pricePerLiterWarning } from '../../../lib/readings'
 import type { PreparedReceipt } from '../../../lib/receipts'
 
 const { vid, tenant, current, warn } = useKmContext()
-const ed = useEditor('fuel', () => ({ vehicle_id: vid.value, date: isoDate(), km: current.value || '', liters: '', price_total: '', full_tank: true, station: '', note: '' }))
-const e = computed(() => ed.state.errors)
 const original = ref<FuelEntry | null>(null)
 const reason = ref('')
 const reasonError = ref<string | undefined>()
 const added = ref<PreparedReceipt[]>([])
 const removed = ref<string[]>([])
+const ed = useEditor(
+  'fuel',
+  () => ({ vehicle_id: vid.value, date: isoDate(), km: current.value || '', liters: '', price_total: '', full_tank: true, station: '', note: '' }),
+  { track: () => [reason.value, added.value.map((r) => r.id), removed.value] },
+)
+const e = computed(() => ed.state.errors)
+watch(reason, () => (reasonError.value = undefined))
 
 const existing = computed(() => (ed.state.id ? childrenOf('attachment', 'fuel_id', ed.state.id) : []))
 const needsReason = computed(() => correctionNeedsReason(vid.value, ed.state.form.date, ed.state.form.km, original.value))
@@ -80,7 +85,7 @@ function save() {
 </script>
 
 <template>
-  <EditorModal :open="ed.state.open" :title="ed.state.id ? 'Tankvorgang bearbeiten' : 'Tankvorgang erfassen'" :busy="ed.state.busy" :error="ed.state.error" @close="ed.close" @save="save">
+  <EditorModal :open="ed.state.open" :title="ed.state.id ? 'Tankvorgang bearbeiten' : 'Tankvorgang erfassen'" :busy="ed.state.busy" :error="ed.state.error" :dirty="ed.dirty" @close="ed.close" @save="save">
     <Field v-slot="f" label="Datum" required :error="e.date"><input :id="f.id" v-model="ed.state.form.date" type="date" class="input" :max="isoDate()" :aria-invalid="f.invalid" :aria-describedby="f.describedby" /></Field>
     <Field v-slot="f" label="Kilometerstand" required :error="e.km" :warning="kmHint">
       <input :id="f.id" v-model="ed.state.form.km" class="input" inputmode="numeric" autocomplete="off" :aria-invalid="f.invalid" :aria-describedby="f.describedby" />

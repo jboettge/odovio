@@ -1,7 +1,7 @@
 <script setup lang="ts">
 // Wartung im Web erfassen/bearbeiten: Kopfdaten, Checkliste, Material (aus dem Stamm oder frei, Menge änderbar)
 // und Belege – alles in einem Sync (Wartung zuerst, dann Positionen und Belege).
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import Field from '../../../components/Field.vue'
 import Icon from '../../../components/Icon.vue'
 import CorrectionReason from '../../../components/CorrectionReason.vue'
@@ -33,8 +33,6 @@ interface MaterialRow {
 }
 
 const { vid, tenant, warn } = useKmContext()
-const ed = useEditor('maintenance', () => ({ vehicle_id: vid.value, date: isoDate(), km: '', title: '', cost: '', note: '', next_due_km: '', next_due_date: '' }))
-const e = computed(() => ed.state.errors)
 const original = ref<Maintenance | null>(null)
 const reason = ref('')
 const reasonError = ref<string | undefined>()
@@ -43,6 +41,13 @@ const materials = ref<MaterialRow[]>([])
 const rowErrors = ref<Record<string, string>>({})
 const added = ref<PreparedReceipt[]>([])
 const removed = ref<string[]>([])
+const ed = useEditor(
+  'maintenance',
+  () => ({ vehicle_id: vid.value, date: isoDate(), km: '', title: '', cost: '', note: '', next_due_km: '', next_due_date: '' }),
+  { track: () => [reason.value, items.value, materials.value, added.value.map((r) => r.id), removed.value] },
+)
+const e = computed(() => ed.state.errors)
+watch(reason, () => (reasonError.value = undefined))
 const pick = ref('')
 let origItems = new Map<string, MaintenanceItem>()
 let origMaterials = new Map<string, MaintenanceMaterial>()
@@ -100,6 +105,25 @@ function materialData(mid: string, m: MaterialRow, i: number) {
   return { maintenance_id: mid, article_id: m.article_id, name: m.name.trim(), part_number: strOrNull(m.part_number), quantity: numOrNull(m.quantity), unit: m.unit.trim(), unit_price: numOrNull(m.unit_price), position: i }
 }
 
+const ROWS_INVALID = 'Bitte die markierten Positionen prüfen.'
+/** Werte der Positionen bei der letzten Prüfung (Zeilenfehler verschwinden, sobald das Feld geändert wird). */
+let rowsChecked = new Map<string, string>()
+const rowValue = (key: string): string | undefined => {
+  const [rid, f] = key.split('.') as [string, string]
+  const row = (items.value.find((x) => x.id === rid) ?? materials.value.find((x) => x.id === rid)) as Record<string, unknown> | undefined
+  return row ? String(row[f] ?? '') : undefined
+}
+watch(
+  () => Object.keys(rowErrors.value).map((k) => [k, rowValue(k)] as const),
+  (pairs) => {
+    const stale = pairs.filter(([k, v]) => v === undefined || v !== rowsChecked.get(k)).map(([k]) => k)
+    if (!stale.length) return
+    const next = { ...rowErrors.value }
+    for (const k of stale) delete next[k]
+    rowErrors.value = next
+    if (!Object.keys(next).length && ed.state.error === ROWS_INVALID) ed.state.error = null
+  },
+)
 /** Positionen prüfen (Zeilenfehler je Feld: `${id}.${feld}`). */
 function checkRows(): boolean {
   const errs: Record<string, string> = {}
@@ -109,6 +133,7 @@ function checkRows(): boolean {
   materials.value.forEach((m, i) => {
     for (const [f, msg] of Object.entries(validate('maintenance_material', materialData('x', m, i)))) if (f !== 'maintenance_id') errs[`${m.id}.${f}`] = msg
   })
+  rowsChecked = new Map(Object.keys(errs).map((k) => [k, rowValue(k) ?? '']))
   rowErrors.value = errs
   return !Object.keys(errs).length
 }
@@ -140,7 +165,7 @@ function save() {
   }
   reasonError.value = undefined
   if (!rowsOk) {
-    ed.state.error = 'Bitte die markierten Positionen prüfen.'
+    ed.state.error = ROWS_INVALID
     return
   }
   const receipts = added.value
@@ -168,7 +193,7 @@ const err = (id: string, f: string) => rowErrors.value[`${id}.${f}`]
 </script>
 
 <template>
-  <EditorModal :open="ed.state.open" :title="ed.state.id ? 'Wartung bearbeiten' : 'Wartung erfassen'" :busy="ed.state.busy" :error="ed.state.error" @close="ed.close" @save="save">
+  <EditorModal :open="ed.state.open" :title="ed.state.id ? 'Wartung bearbeiten' : 'Wartung erfassen'" :busy="ed.state.busy" :error="ed.state.error" :dirty="ed.dirty" @close="ed.close" @save="save">
     <Field v-slot="f" label="Bezeichnung" required span :error="e.title"><input :id="f.id" v-model="ed.state.form.title" class="input" maxlength="150" placeholder="z. B. Service 60 000 km, Pneuwechsel" :aria-invalid="f.invalid" :aria-describedby="f.describedby" /></Field>
     <Field v-slot="f" label="Datum" required :error="e.date"><input :id="f.id" v-model="ed.state.form.date" type="date" class="input" :aria-invalid="f.invalid" :aria-describedby="f.describedby" /></Field>
     <Field v-slot="f" label="Kilometerstand" :error="e.km" :warning="kmWarn"><input :id="f.id" v-model="ed.state.form.km" class="input" inputmode="numeric" autocomplete="off" :aria-invalid="f.invalid" :aria-describedby="f.describedby" /></Field>

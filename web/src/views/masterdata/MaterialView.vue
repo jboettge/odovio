@@ -78,7 +78,7 @@ function save() {
     </div>
     <Pager v-model:page="pager.page" v-model:size="pager.size" :total="pager.total" label="Seiten der Artikel" />
   </section>
-  <EditorModal :open="ed.state.open" :title="ed.state.id ? 'Artikel bearbeiten' : 'Artikel erfassen'" :busy="ed.state.busy" :error="ed.state.error" @close="ed.close" @save="save">
+  <EditorModal :open="ed.state.open" :title="ed.state.id ? 'Artikel bearbeiten' : 'Artikel erfassen'" :busy="ed.state.busy" :error="ed.state.error" :dirty="ed.dirty" @close="ed.close" @save="save">
     <Field v-slot="f" label="Bezeichnung" required :error="e.name"><input :id="f.id" v-model="ed.state.form.name" class="input" maxlength="150" :aria-invalid="f.invalid" :aria-describedby="f.describedby" /></Field>
     <Field v-slot="f" label="Artikelnummer" :error="e.part_number"><input :id="f.id" v-model="ed.state.form.part_number" class="input" maxlength="60" /></Field>
     <Field v-slot="f" label="Kategorie" :error="e.category">

@@ -38,7 +38,7 @@ test('Tankvorgang mit Beleg erfassen, Plausibilität, danach bearbeiten', async 
 
   const row = page.locator('tbody tr', { hasText: 'Migrol Testhausen' })
   await expect(row).toContainText('41.50 l')
-  await row.getByRole('button', { name: /1 Belege .* anzeigen/ }).click()
+  await row.getByRole('button', { name: /1 Beleg vom .* anzeigen/ }).click()
   const prev = page.getByRole('dialog', { name: /Belege vom/ })
   await expect(prev.locator('img')).toBeVisible()
   await page.keyboard.press('Escape')

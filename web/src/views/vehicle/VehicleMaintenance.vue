@@ -74,9 +74,9 @@ const total = computed(() => rows.value.reduce((a, m) => a + (m.deleted ? 0 : co
         <div class="actions">
           <span v-if="m.deleted" class="badge badge-danger">storniert</span>
           <strong>{{ chf(mCost) }}</strong>
-          <button type="button" class="btn btn-ghost btn-icon btn-sm" :aria-label="`Verlauf ${m.title}`" @click="history.show('maintenance', m.id, 'Verlauf der Wartung')"><Icon name="history" size="sm" /></button>
+          <button type="button" class="btn btn-ghost btn-icon btn-sm" :aria-label="`Verlauf ${m.title} vom ${date(m.date)}`" @click="history.show('maintenance', m.id, 'Verlauf der Wartung')"><Icon name="history" size="sm" /></button>
           <button v-if="writable && !m.deleted" type="button" class="btn btn-ghost btn-icon btn-sm" :aria-label="`${m.title} vom ${date(m.date)} bearbeiten`" @click="editor?.edit(m)"><Icon name="edit" size="sm" /></button>
-          <button v-if="writable && !m.deleted" type="button" class="btn btn-ghost btn-icon btn-sm" :aria-label="`${m.title} stornieren`" @click="storno.ask('maintenance', m, `${m.title} · ${date(m.date)}`)"><Icon name="ban" size="sm" /></button>
+          <button v-if="writable && !m.deleted" type="button" class="btn btn-ghost btn-icon btn-sm" :aria-label="`${m.title} vom ${date(m.date)} stornieren`" @click="storno.ask('maintenance', m, `${m.title} · ${date(m.date)}`)"><Icon name="ban" size="sm" /></button>
         </div>
       </div>
       <div class="row small">

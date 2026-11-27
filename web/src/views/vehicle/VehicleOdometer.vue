@@ -24,7 +24,7 @@ interface Reading {
   key: string
   date: string
   km: number
-  source: 'odometer' | 'fuel' | 'maintenance' | 'start'
+  source: 'odometer' | 'fuel' | 'maintenance'
   label: string
   rec?: OdometerReading
   entityId?: string
@@ -41,13 +41,16 @@ const readings = computed<Reading[]>(() => {
 // Zeitachse seitenweise (Abstand zum Vorgänger auch über Seitengrenzen korrekt)
 const pager = usePager(readings)
 const withDelta = computed(() => {
-  const all = readings.value
-  const offset = pager.from ? pager.from - 1 : 0
-  return pager.items.map((r, i) => ({ ...r, delta: offset + i + 1 < all.length ? r.km - all[offset + i + 1]!.km : null }))
+  const list = readings.value
+  const offset = Math.max(0, pager.from - 1)
+  return pager.items.map((r, i) => {
+    const prev = list[offset + i + 1]
+    return { ...r, delta: prev ? r.km - prev.km : null }
+  })
 })
 const chartPoints = computed(() => [...readings.value].reverse().map((r) => ({ label: date(r.date), value: r.km, detail: r.label })))
-const ICON = { odometer: 'gauge', fuel: 'fuel', maintenance: 'wrench', start: 'car' } as const
-const SOURCE = { odometer: 'Kilometerstand', fuel: 'Tankvorgang', maintenance: 'Wartung', start: 'Start' } as const
+const ICON = { odometer: 'gauge', fuel: 'fuel', maintenance: 'wrench' } as const
+const SOURCE = { odometer: 'Kilometerstand', fuel: 'Tankvorgang', maintenance: 'Wartung' } as const
 </script>
 
 <template>
@@ -65,9 +68,9 @@ const SOURCE = { odometer: 'Kilometerstand', fuel: 'Tankvorgang', maintenance: '
             <strong>{{ km(r.km) }}</strong>
             <span class="row">
               <span class="muted small">{{ date(r.date) }}</span>
-              <button v-if="r.entityId" type="button" class="btn btn-ghost btn-icon btn-sm" :aria-label="`Verlauf ${SOURCE[r.source]} ${date(r.date)}`" @click="history.show(r.source, r.entityId!)"><Icon name="history" size="sm" /></button>
-              <button v-if="writable && r.rec" type="button" class="btn btn-ghost btn-icon btn-sm" :aria-label="`Kilometerstand ${date(r.date)} bearbeiten`" @click="editor?.edit(r.rec!)"><Icon name="edit" size="sm" /></button>
-              <button v-if="writable && r.rec" type="button" class="btn btn-ghost btn-icon btn-sm" :aria-label="`Kilometerstand ${date(r.date)} stornieren`" @click="storno.ask('odometer', r.rec!, `${date(r.date)} · ${km(r.km)}`)"><Icon name="ban" size="sm" /></button>
+              <button v-if="r.entityId" type="button" class="btn btn-ghost btn-icon btn-sm" :aria-label="`Verlauf ${SOURCE[r.source]} ${date(r.date)} · ${km(r.km)}`" @click="history.show(r.source, r.entityId!)"><Icon name="history" size="sm" /></button>
+              <button v-if="writable && r.rec" type="button" class="btn btn-ghost btn-icon btn-sm" :aria-label="`Kilometerstand ${date(r.date)} · ${km(r.km)} bearbeiten`" @click="editor?.edit(r.rec!)"><Icon name="edit" size="sm" /></button>
+              <button v-if="writable && r.rec" type="button" class="btn btn-ghost btn-icon btn-sm" :aria-label="`Kilometerstand ${date(r.date)} · ${km(r.km)} stornieren`" @click="storno.ask('odometer', r.rec!, `${date(r.date)} · ${km(r.km)}`)"><Icon name="ban" size="sm" /></button>
             </span>
           </div>
           <div class="row small">

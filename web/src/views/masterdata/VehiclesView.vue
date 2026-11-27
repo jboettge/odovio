@@ -84,7 +84,7 @@ function save() {
     <Pager v-model:page="pager.page" v-model:size="pager.size" :total="pager.total" label="Seiten der Fahrzeuge" />
   </section>
 
-  <EditorModal :open="ed.state.open" :title="ed.state.id ? 'Fahrzeug bearbeiten' : 'Fahrzeug erfassen'" :busy="ed.state.busy" :error="ed.state.error" @close="ed.close" @save="save">
+  <EditorModal :open="ed.state.open" :title="ed.state.id ? 'Fahrzeug bearbeiten' : 'Fahrzeug erfassen'" :busy="ed.state.busy" :error="ed.state.error" :dirty="ed.dirty" @close="ed.close" @save="save">
     <Field v-slot="f" label="Name" required :error="e.name"><input :id="f.id" v-model="ed.state.form.name" class="input" maxlength="100" :aria-invalid="f.invalid" :aria-describedby="f.describedby" /></Field>
     <Field v-slot="f" label="Kennzeichen" :error="e.plate"><input :id="f.id" v-model="ed.state.form.plate" class="input" maxlength="30" placeholder="ZH 123 456" :aria-invalid="f.invalid" /></Field>
     <Field v-slot="f" label="VIN / Fahrgestellnummer" :hint="vinHint" :error="e.vin"><input :id="f.id" v-model="ed.state.form.vin" class="input mono" maxlength="40" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="z. B. WVWZZZ1KZ6W000001" :aria-invalid="f.invalid" :aria-describedby="f.describedby" @blur="onVinBlur" /></Field>

@@ -11,13 +11,14 @@ const props = withDefaults(
     open: boolean
     title: string
     confirmLabel?: string
+    cancelLabel?: string
     danger?: boolean
     reason?: 'none' | 'optional' | 'required'
     reasonHint?: string
     busy?: boolean
     error?: string | null
   }>(),
-  { confirmLabel: 'Bestätigen', danger: false, reason: 'none', reasonHint: undefined, busy: false, error: null },
+  { confirmLabel: 'Bestätigen', cancelLabel: 'Abbrechen', danger: false, reason: 'none', reasonHint: undefined, busy: false, error: null },
 )
 const emit = defineEmits<{ close: []; confirm: [reason: string] }>()
 // eindeutig je Instanz: mehrere ConfirmDialogs auf einer Seite (Submit-Knopf ist über form= verknüpft)
@@ -33,6 +34,10 @@ watch(
     }
   },
 )
+// Fehler verschwindet beim Korrigieren (nicht erst beim nächsten Bestätigen)
+watch(text, () => {
+  if (reasonError.value && !tooShort.value) reasonError.value = undefined
+})
 const tooShort = computed(() => props.reason === 'required' && text.value.trim().length < MIN_REASON)
 function submit() {
   if (tooShort.value) {
@@ -61,7 +66,7 @@ function submit() {
       <AlertBox v-if="error" kind="danger" live>{{ error }}</AlertBox>
     </form>
     <template #footer>
-      <button type="button" class="btn" @click="emit('close')">Abbrechen</button>
+      <button type="button" class="btn" @click="emit('close')">{{ cancelLabel }}</button>
       <button type="submit" :form="formId" :class="['btn', danger ? 'btn-danger' : 'btn-primary']" :disabled="busy">
         {{ busy ? 'Bitte warten …' : confirmLabel }}
       </button>

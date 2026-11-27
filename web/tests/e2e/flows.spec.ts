@@ -252,7 +252,7 @@ test('Belege-Vorschau als Blob-URL', async ({ page, problems: _p }) => {
   await login(page, 'anna')
   await page.getByRole('link', { name: 'Skoda Octavia öffnen' }).click()
   await page.getByRole('link', { name: 'Tankvorgänge' }).click()
-  await page.getByRole('button', { name: /Belege vom/ }).first().click()
+  await page.getByRole('button', { name: /Belege? vom .* anzeigen/ }).first().click()
   const img = page.getByRole('dialog').locator('img').first()
   await expect(img).toBeVisible()
   expect(await img.getAttribute('src')).toMatch(/^blob:/)

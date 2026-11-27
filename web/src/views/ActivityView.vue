@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { errorText } from '../store/toasts'
-import { computed, ref, shallowRef, watch } from 'vue'
+import { computed, onBeforeUnmount, ref, shallowRef, watch } from 'vue'
 import PageHeader from '../components/PageHeader.vue'
 import ActivityFeed from '../components/ActivityFeed.vue'
 import AlertBox from '../components/AlertBox.vue'
@@ -28,25 +28,50 @@ const vehicle = ref('')
 const q = ref('')
 const qDebounced = useDebounced(q)
 
+/*
+ * Nur die letzte Anfrage zählt: «Aktualisieren» oder ein Mandantenwechsel bricht ein laufendes «Ältere laden» ab
+ * (sonst hängt eine alte Seite an die neue Liste oder überschreibt sie).
+ */
+let seq = 0
+let ctrl: AbortController | null = null
+onBeforeUnmount(() => ctrl?.abort())
+
 async function fetchPage(reset: boolean) {
-  if (!session.tenant) return
+  const tenant = session.tenant
+  if (!tenant) return
+  if (!reset && loading.value) return
+  ctrl?.abort()
+  const my = ++seq
+  const c = (ctrl = new AbortController())
   loading.value = true
   error.value = null
   try {
-    const page = await endpoints.activity(session.tenant, PAGE, reset ? null : next.value)
+    const page = await endpoints.activity(tenant, PAGE, reset ? null : next.value, c.signal)
+    if (my !== seq) return
     const before = reset ? 0 : items.value.length
     items.value = reset ? page.items : [...items.value, ...page.items]
     // nach «Ältere laden» zur Seite mit den ersten neuen Einträgen
     if (!reset && page.items.length && filtered.value.length > before) pager.page = Math.floor(before / pager.size) + 1
     next.value = page.next_before_seq ?? null
   } catch (e) {
-    error.value = errorText(e)
+    if (my === seq && !c.signal.aborted) error.value = errorText(e)
   } finally {
-    loading.value = false
+    if (my === seq) {
+      loading.value = false
+      ctrl = null
+    }
   }
 }
 
-watch(() => session.tenant, () => fetchPage(true), { immediate: true })
+watch(
+  () => session.tenant,
+  () => {
+    items.value = []
+    next.value = null
+    void fetchPage(true)
+  },
+  { immediate: true },
+)
 
 const vehicles = computed(() => vehiclesByName())
 const filtered = computed(() => {

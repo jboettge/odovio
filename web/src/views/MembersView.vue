@@ -11,7 +11,7 @@ import ConfirmDialog from '../components/ConfirmDialog.vue'
 import { endpoints } from '../api/endpoints'
 import { ApiError } from '../api/client'
 import type { Member, MemberList, Role } from '../api/types'
-import { loadMe, role as myRole, session } from '../store/session'
+import { loadMe, role as myRole, session, tenantName } from '../store/session'
 import { notify, errorText } from '../store/toasts'
 import { isAdmin, lostRights, ROLE_DESCRIPTIONS, ROLE_LABELS } from '../lib/roles'
 import { relative } from '../lib/format'
@@ -58,11 +58,15 @@ const user = ref('')
 const role = ref<Role>('write')
 const inviteBusy = ref(false)
 const inviteError = ref<string | null>(null)
-const userError = computed(() => (user.value.trim().length > 254 ? 'höchstens 254 Zeichen' : undefined))
+const userMissing = ref(false)
+const userError = computed(() => (userMissing.value ? 'Benutzername oder E-Mail angeben' : user.value.trim().length > 254 ? 'höchstens 254 Zeichen' : undefined))
+watch(user, () => (userMissing.value = false))
+const userInput = ref<HTMLInputElement | null>(null)
 async function invite() {
   if (!session.tenant) return
   if (!user.value.trim()) {
-    inviteError.value = 'Benutzername oder E-Mail angeben.'
+    userMissing.value = true
+    userInput.value?.focus()
     return
   }
   inviteBusy.value = true
@@ -156,7 +160,7 @@ async function remove() {
 </script>
 
 <template>
-  <PageHeader title="Mitglieder" :subtitle="`Wer hat Zugriff auf das Fahrzeugbuch ${session.tenant ?? ''}?`" eyebrow="Verwaltung" />
+  <PageHeader title="Mitglieder" :subtitle="`Wer hat Zugriff auf das Fahrzeugbuch «${tenantName}»?`" eyebrow="Verwaltung" />
 
   <AlertBox v-if="notConfigured" kind="info" title="In Keycloak verwalten">
     <p>Die Mitgliederverwaltung ist auf diesem Server nicht eingerichtet. Mitglieder werden über die Keycloak-Gruppen <span class="mono">/fahrzeugbuch/{{ session.tenant }}</span> (Bearbeiten), <span class="mono">/fahrzeugbuch/{{ session.tenant }}/lesen</span> (Lesen) bzw. die Verwaltungsgruppe gepflegt.</p>
@@ -169,7 +173,7 @@ async function remove() {
       <h2 id="mem-invite" class="section-title">Person hinzufügen</h2>
       <form class="toolbar" @submit.prevent="invite">
         <Field v-slot="f" label="Benutzername oder E-Mail" class="grow" :error="userError" hint="Die Person muss in Keycloak existieren.">
-          <input :id="f.id" v-model="user" class="input" type="text" autocomplete="off" maxlength="254" :aria-invalid="f.invalid" :aria-describedby="f.describedby" />
+          <input :id="f.id" ref="userInput" v-model="user" class="input" type="text" autocomplete="off" maxlength="254" :aria-invalid="f.invalid" :aria-describedby="f.describedby" />
         </Field>
         <Field v-slot="f" label="Rolle">
           <select :id="f.id" v-model="role" class="select"><option v-for="r in ROLES" :key="r" :value="r">{{ ROLE_LABELS[r] }}</option></select>
@@ -224,15 +228,15 @@ async function remove() {
   <ConfirmDialog :open="removing !== null" :title="removing && isSelf(removing) ? 'Dich selbst entfernen' : 'Mitglied entfernen'" :confirm-label="removing && isSelf(removing) ? 'Mich entfernen' : 'Entfernen'" danger :busy="removeBusy" :error="removeError" @close="removing = null" @confirm="remove">
     <template v-if="removing && isSelf(removing)">
       <AlertBox kind="danger" title="Du entfernst dich selbst">
-        <p>Du verlierst damit sofort den Zugriff auf das Fahrzeugbuch «{{ session.tenant }}» und kannst das nicht selbst rückgängig machen. Erfasste Einträge bleiben erhalten.</p>
+        <p>Du verlierst damit sofort den Zugriff auf das Fahrzeugbuch «{{ tenantName }}» und kannst das nicht selbst rückgängig machen. Erfasste Einträge bleiben erhalten.</p>
       </AlertBox>
     </template>
-    <p v-else><strong>{{ removing ? label(removing) : '' }}</strong> verliert den Zugriff auf das Fahrzeugbuch «{{ session.tenant }}». Erfasste Einträge bleiben erhalten.</p>
+    <p v-else><strong>{{ removing ? label(removing) : '' }}</strong> verliert den Zugriff auf das Fahrzeugbuch «{{ tenantName }}». Erfasste Einträge bleiben erhalten.</p>
   </ConfirmDialog>
 
   <ConfirmDialog :open="selfChange !== null" title="Eigene Rolle ändern" confirm-label="Rolle trotzdem ändern" danger @close="selfChange = null" @confirm="confirmSelfChange">
     <template v-if="selfChange">
-      <p>Deine Rolle im Fahrzeugbuch «{{ session.tenant }}»: <strong>{{ selfChange.m.role ? ROLE_LABELS[selfChange.m.role] : '–' }}</strong> → <strong>{{ ROLE_LABELS[selfChange.to] }}</strong></p>
+      <p>Deine Rolle im Fahrzeugbuch «{{ tenantName }}»: <strong>{{ selfChange.m.role ? ROLE_LABELS[selfChange.m.role] : '–' }}</strong> → <strong>{{ ROLE_LABELS[selfChange.to] }}</strong></p>
       <AlertBox kind="danger" title="Du stufst dich selbst herab">
         <p>Du verlierst damit sofort {{ selfLoss }} und kannst das nicht selbst rückgängig machen.</p>
       </AlertBox>

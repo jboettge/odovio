@@ -79,7 +79,7 @@ function save() {
     <Pager v-model:page="pager.page" v-model:size="pager.size" :total="pager.total" label="Seiten der Orte" />
   </section>
 
-  <EditorModal :open="ed.state.open" :title="ed.state.id ? 'Ort bearbeiten' : 'Ort erfassen'" :busy="ed.state.busy" :error="ed.state.error" @close="ed.close" @save="save">
+  <EditorModal :open="ed.state.open" :title="ed.state.id ? 'Ort bearbeiten' : 'Ort erfassen'" :busy="ed.state.busy" :error="ed.state.error" :dirty="ed.dirty" @close="ed.close" @save="save">
     <Field v-slot="f" label="Name" required :error="e.name"><input :id="f.id" v-model="ed.state.form.name" class="input" maxlength="100" :aria-invalid="f.invalid" :aria-describedby="f.describedby" /></Field>
     <Field v-slot="f" label="Art" required :error="e.kind">
       <select :id="f.id" v-model="ed.state.form.kind" class="select"><option v-for="k in ORDER" :key="k" :value="k">{{ PLACE_KIND_LABELS[k] }}</option></select>

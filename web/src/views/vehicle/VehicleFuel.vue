@@ -82,16 +82,16 @@ const visibleRows = computed(() => visible.value.map((f) => ({ f, att: allAtt(f.
             <td><span :class="['badge', f.full_tank ? 'badge-ok' : 'badge-outline']">{{ f.full_tank ? 'voll' : 'teil' }}</span></td>
             <td>{{ f.station || '–' }}<span v-if="f.note" class="cell-sub">{{ f.note }}</span></td>
             <td>
-              <button v-if="att" type="button" class="btn btn-sm" :aria-label="`${att} Belege vom ${date(f.date)} anzeigen`" @click="preview = f">
+              <button v-if="att" type="button" class="btn btn-sm" :aria-label="`${att} ${att === 1 ? 'Beleg' : 'Belege'} vom ${date(f.date)} · ${chf(f.price_total)} anzeigen`" @click="preview = f">
                 <Icon name="image" size="sm" />{{ att }}
               </button>
               <span v-else class="muted">–</span>
             </td>
             <td>{{ f.created_by || '–' }}</td>
             <td class="actions">
-              <button type="button" class="btn btn-ghost btn-icon btn-sm" :aria-label="`Verlauf Tankvorgang ${date(f.date)}`" @click="history.show('fuel', f.id, 'Verlauf des Tankvorgangs')"><Icon name="history" size="sm" /></button>
+              <button type="button" class="btn btn-ghost btn-icon btn-sm" :aria-label="`Verlauf Tankvorgang ${date(f.date)} · ${chf(f.price_total)}`" @click="history.show('fuel', f.id, 'Verlauf des Tankvorgangs')"><Icon name="history" size="sm" /></button>
               <button v-if="writable && !f.deleted" type="button" class="btn btn-ghost btn-icon btn-sm" :aria-label="`Tankvorgang ${date(f.date)} · ${chf(f.price_total)} bearbeiten`" @click="editor?.edit(f)"><Icon name="edit" size="sm" /></button>
-              <button v-if="writable && !f.deleted" type="button" class="btn btn-ghost btn-icon btn-sm" :aria-label="`Tankvorgang ${date(f.date)} stornieren`" @click="storno.ask('fuel', f, `${date(f.date)} · ${liters(f.liters)} · ${chf(f.price_total)}`)"><Icon name="ban" size="sm" /></button>
+              <button v-if="writable && !f.deleted" type="button" class="btn btn-ghost btn-icon btn-sm" :aria-label="`Tankvorgang ${date(f.date)} · ${chf(f.price_total)} stornieren`" @click="storno.ask('fuel', f, `${date(f.date)} · ${liters(f.liters)} · ${chf(f.price_total)}`)"><Icon name="ban" size="sm" /></button>
             </td>
           </tr>
           <VPad :height="padBottom" :cols="10" />
@@ -103,7 +103,7 @@ const visibleRows = computed(() => visible.value.map((f) => ({ f, att: allAtt(f.
     </div>
   </section>
 
-  <Modal :open="preview !== null" :title="preview ? `Belege vom ${date(preview.date)}` : 'Belege'" wide @close="preview = null">
+  <Modal :open="preview !== null" :title="preview ? `Belege vom ${date(preview.date)} · ${chf(preview.price_total)}` : 'Belege'" wide @close="preview = null">
     <div v-if="preview" class="thumbs">
       <AttachmentThumb v-for="a in allAtt(preview.id)" :key="a.id" :tenant="tenant" :attachment="a" />
     </div>

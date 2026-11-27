@@ -313,33 +313,64 @@ a:hover {
     padding: 20px 20px 48px;
   }
 }
+/* Menü-Knopf nur auf schmalen Bildschirmen */
+.topbar .nav-toggle {
+  display: none;
+}
 @media (max-width: 760px) {
   .shell {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
     grid-template-rows: auto auto 1fr;
     grid-template-areas: 'header' 'nav' 'main';
   }
   .brand {
     display: none;
   }
+  /* Navigation als Ausklappmenü unter der Kopfzeile; Kopfzeile scrollt mit (nicht sticky) */
+  .topbar .nav-toggle {
+    display: inline-flex;
+  }
   .sidenav {
+    display: none;
     position: static;
     height: auto;
     border-right: 0;
     border-bottom: 1px solid var(--border);
-    padding: 8px 12px;
+    padding: 4px 12px 12px;
+  }
+  .sidenav.is-open {
+    display: block;
   }
   .sidenav ul {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 4px;
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(min(100%, 10.5rem), 1fr));
+    gap: 2px 8px;
   }
   .sidenav-section {
-    display: none;
+    margin: 12px 10px 4px;
   }
   .topbar {
-    padding: 0 16px;
+    position: static;
+    padding: 8px 16px;
+    gap: 8px 12px;
     flex-wrap: wrap;
+    min-height: var(--header-h);
+  }
+  .topbar .tenant-switch {
+    min-width: 0;
+  }
+  .topbar .tenant-switch .select {
+    max-width: 56vw;
+  }
+  /* Beschriftung «Fahrzeugbuch» und Name des Kontos nur für Screenreader (Konto ist auch im Menü) */
+  .topbar .tenant-switch > .muted,
+  .topbar-user .topbar-user-name {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
   }
   .main {
     padding: 16px 16px 40px;
@@ -401,6 +432,11 @@ a:hover {
   flex-wrap: wrap;
   gap: 8px;
   min-width: 0;
+}
+/* Auswahl in der Kopfzeile nur so breit wie nötig (sonst rutscht der Knopf daneben in eine neue Zeile) */
+.card-header .actions .select {
+  width: auto;
+  max-width: 100%;
 }
 .card-flush {
   padding: 0;
@@ -892,6 +928,10 @@ a:hover {
 }
 .form-grid .span-2 {
   grid-column: span 2;
+}
+/* Von/Bis in schmalen Karten: Datumsfelder nicht abschneiden, bei Platzmangel untereinander */
+.form-grid.date-range {
+  grid-template-columns: repeat(auto-fit, minmax(10.5rem, 1fr));
 }
 @media (max-width: 640px) {
   .form-grid {
@@ -1417,6 +1457,11 @@ details.data-table summary {
   text-align: center;
   padding: 8px;
   font-size: 0.85rem;
+}
+.thumb-error {
+  display: grid;
+  gap: 6px;
+  justify-items: center;
 }
 .thumb-cap {
   padding: 6px 8px;
