@@ -75,9 +75,10 @@ def test_legacy_database_is_stamped_and_upgraded():
         reset_db()
 
 
-def test_upgrade_0001_to_0002_keeps_data():
+def test_upgrade_0001_to_0002_keeps_data(monkeypatch):
     """Bestand mit alembic_version = 0001 (vor created_by/updated_by) → upgrade head ergänzt die Spalten."""
     from alembic import command
+    monkeypatch.setenv("ALLOW_UNSUPPORTED_DOWNGRADE", "1")
     reset_db()
     try:
         with engine.begin() as conn:
@@ -102,10 +103,11 @@ def test_upgrade_0001_to_0002_keeps_data():
         reset_db()
 
 
-def test_upgrade_0004_to_0005_adds_vin():
+def test_upgrade_0004_to_0005_adds_vin(monkeypatch):
     """Bestand auf 0004 (vor vehicles.vin) → upgrade head ergänzt die Spalte (NULL); Downgrade entfernt sie,
     erneutes Upgrade idempotent (auch wenn die Spalte schon besteht)."""
     from alembic import command
+    monkeypatch.setenv("ALLOW_UNSUPPORTED_DOWNGRADE", "1")
     reset_db()
     try:
         # Upgrade ohne äussere Transaktion (wie create_schema): 0003 braucht unter PostgreSQL einen autocommit-Block
@@ -131,6 +133,62 @@ def test_upgrade_0004_to_0005_adds_vin():
             conn.exec_driver_sql("ALTER TABLE vehicles ADD COLUMN vin VARCHAR(17)")     # Spalte schon vorhanden
             command.upgrade(alembic_config(conn), "0005")
         assert _version() == "0005" and _diff() == []
+    finally:
+        reset_db()
+
+
+def test_existing_version_never_runs_legacy_backfill(caplog):
+    """S5: Mit alembic_version läuft nur `upgrade head` – fehlende Tabellen legt die zuständige Migration an
+    (hier 0004 verify_checkpoints); eine Tabelle, die keine Migration mehr anlegt, bleibt fehlend (Log-Fehler),
+    statt per create_all künftigen Migrationen vorzugreifen."""
+    from alembic import command
+    reset_db()
+    try:
+        with engine.connect() as conn:
+            command.upgrade(alembic_config(conn), "0003")
+            conn.commit()
+        with engine.begin() as conn:
+            conn.exec_driver_sql("DROP TABLE blob_checks")
+            assert "verify_checkpoints" not in inspect(conn).get_table_names()
+        with caplog.at_level("ERROR", logger="fahrzeugbuch.migrate"):
+            create_schema(engine)
+        tables = set(inspect(engine).get_table_names())
+        assert _version() == _head()
+        assert "verify_checkpoints" in tables and "blob_checks" not in tables
+        assert any("blob_checks" in r.getMessage() for r in caplog.records)
+    finally:
+        reset_db()
+
+
+def test_downgrade_0005_not_supported_without_override(monkeypatch):
+    """S12: Downgrade 0005 ist ohne ALLOW_UNSUPPORTED_DOWNGRADE=1 gesperrt; erzwungen bricht er auch unter SQLite
+    mit foreign_keys=ON und Fahrten, die auf das Fahrzeug zeigen, nicht ab (kein Batch-Neuaufbau)."""
+    import pytest
+
+    from alembic import command
+    monkeypatch.delenv("ALLOW_UNSUPPORTED_DOWNGRADE", raising=False)
+    reset_db()
+    try:
+        create_schema(engine)
+        with engine.begin() as conn:
+            conn.exec_driver_sql("INSERT INTO tenants (id, slug, name, seq, head_hash) VALUES (1, 't', 't', 0, 'x')")
+            conn.exec_driver_sql("INSERT INTO vehicles (id, tenant_id, version, deleted, last_seq, name, fuel_type, "
+                                 "initial_km, vin) VALUES ('v1', 1, 1, false, 1, 'Golf', 'benzin', 0, "
+                                 "'WVWZZZ1KZAW000001')")
+            conn.exec_driver_sql("INSERT INTO trips (id, tenant_id, version, deleted, last_seq, vehicle_id, start_at, "
+                                 "category, status, source, private_mode) VALUES ('t1', 1, 1, false, 2, 'v1', "
+                                 "'2026-01-01T08:00:00+01:00', 'business', 'confirmed', 'manual', false)")
+        with engine.connect() as conn, pytest.raises(RuntimeError, match="nicht unterstützt"):
+            command.downgrade(alembic_config(conn), "0004")
+        assert _version() == "0005"
+        monkeypatch.setenv("ALLOW_UNSUPPORTED_DOWNGRADE", "1")
+        with engine.connect() as conn:
+            command.downgrade(alembic_config(conn), "0001")
+            conn.commit()
+        assert _version() == "0001"
+        with engine.connect() as conn:
+            assert conn.execute(text("SELECT count(*) FROM trips WHERE vehicle_id = 'v1'")).scalar() == 1
+            assert "vin" not in {c["name"] for c in inspect(conn).get_columns("vehicles")}
     finally:
         reset_db()
 

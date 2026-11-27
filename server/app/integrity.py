@@ -28,10 +28,16 @@ Vollprüfungszeitpunkt in der Zukunft → Vollprüfung. Ohne Schlüssel ist der 
 schreiben kann, könnte die Vollprüfung hinauszögern; ?full=1 prüft immer vollständig). Fortschreiben nur
 monoton, in eigener kurzer Transaktion unter Advisory-Lock je Mandant: Vollprüfung mit Stand ≥ letzter
 Vollprüfung, inkrementell nur auf derselben Vollprüfung mit grösserer Seq. Jeder Befund (Kette, Datenstand,
-Anker) entwertet den Prüfstand; erst eine fehlerfreie Vollprüfung auf einem neueren Stand setzt ihn wieder.
+Anker) entwertet den Prüfstand; erst eine fehlerfreie Vollprüfung auf einem neueren Stand setzt ihn wieder – oder
+auf demselben Stand, wenn sie nach dem Befund begonnen hat (behobener Befund ohne neue Schreibvorgänge).
 
 Schlüsselwechsel: ANCHOR_PUBLIC_KEYS = kommagetrennte alte Ed25519-Public-Keys (Base64, raw 32 Byte);
-Anker mit deren key_id bleiben gültig.
+Anker mit deren key_id bleiben gültig. Optional je Schlüssel eine Gültigkeitsgrenze (Review X8), damit ein
+abgelöster (ev. kompromittierter) Schlüssel keine NEUEN Anker/Prüfstände mehr bestätigt:
+  <key>@2026-11-30                  gültig für Anker/Prüfstände bis und mit diesem Tag (UTC)
+  <key>@2026-11-30T12:00:00+00:00   bis zu diesem Zeitpunkt (ISO-8601, ohne Zone = UTC)
+  <key>@1234                        bis und mit Seq 1234 (Seq je Mandant – nur bei einem Mandanten sinnvoll)
+Ohne «@…» unbegrenzt (bisheriges Format). Massgebend ist created_at des Ankers bzw. verified_at des Prüfstands.
 """
 import base64
 import binascii
@@ -89,24 +95,67 @@ def key_id(key: Ed25519PrivateKey | Ed25519PublicKey) -> str:
     return hashlib.sha256(_raw_public(pub)).hexdigest()[:16]
 
 
+@dataclass(frozen=True)
+class KeyLimit:
+    """Gültigkeitsgrenze eines alten Schlüssels: bis Seq (inkl.) bzw. bis Zeitpunkt (inkl., UTC)."""
+    until_seq: int | None = None
+    until: dt.datetime | None = None
+    text: str = ""
+
+    def problem(self, seq: int, at: str | None) -> str | None:
+        """None = innerhalb der Gültigkeit, sonst Grund."""
+        if self.until_seq is not None and seq > self.until_seq:
+            return f"Schlüssel nur gültig bis Seq {self.until_seq}"
+        if self.until is not None:
+            try:
+                when = _utc(dt.datetime.fromisoformat(at or ""))
+            except ValueError:
+                return f"Schlüssel nur gültig bis {self.text}, Zeitpunkt unlesbar"
+            if when > self.until:
+                return f"Schlüssel nur gültig bis {self.text}"
+        return None
+
+
+def _utc(t: dt.datetime) -> dt.datetime:
+    return t.replace(tzinfo=dt.UTC) if t.tzinfo is None else t.astimezone(dt.UTC)
+
+
+def _parse_limit(text: str) -> KeyLimit:
+    if text.isdigit():
+        return KeyLimit(until_seq=int(text), text=text)
+    if len(text) == 10:                                   # Datum: bis und mit diesem Tag (UTC)
+        day = dt.date.fromisoformat(text)
+        return KeyLimit(until=dt.datetime.combine(day, dt.time.max, dt.UTC), text=text)
+    return KeyLimit(until=_utc(dt.datetime.fromisoformat(text)), text=text)
+
+
 @lru_cache(maxsize=8)
-def _public_keys(spec: str) -> tuple[Ed25519PublicKey, ...]:
+def _public_keys(spec: str) -> tuple[tuple[Ed25519PublicKey, KeyLimit | None], ...]:
     out = []
     for item in filter(None, (x.strip() for x in spec.split(","))):
+        b64, _, limit = item.partition("@")
         try:
-            raw = base64.b64decode(item, validate=True)
-            out.append(Ed25519PublicKey.from_public_bytes(raw))
+            raw = base64.b64decode(b64.strip(), validate=True)
+            out.append((Ed25519PublicKey.from_public_bytes(raw), _parse_limit(limit.strip()) if limit else None))
         except (binascii.Error, ValueError):
-            log.error("ANCHOR_PUBLIC_KEYS: ungültiger Schlüssel (Base64, 32 Byte erwartet) – ignoriert")
+            log.error("ANCHOR_PUBLIC_KEYS: ungültiger Eintrag (Base64, 32 Byte, optional @Datum/@Seq) – ignoriert")
     return tuple(out)
 
 
 def verification_keys() -> dict[str, Ed25519PublicKey]:
     """key_id → Public Key: aktueller Signaturschlüssel + alte Schlüssel aus ANCHOR_PUBLIC_KEYS."""
-    keys = {key_id(k): k for k in _public_keys(os.environ.get("ANCHOR_PUBLIC_KEYS", ""))}
+    keys = {key_id(k): k for k, _ in _public_keys(os.environ.get("ANCHOR_PUBLIC_KEYS", ""))}
     if (key := signing_key()) is not None:
         keys[key_id(key)] = key.public_key()
     return keys
+
+
+def key_limits() -> dict[str, KeyLimit]:
+    """key_id → Gültigkeitsgrenze der alten Schlüssel (nur mit «@…»; der aktuelle Signaturschlüssel nie)."""
+    out = {key_id(k): lim for k, lim in _public_keys(os.environ.get("ANCHOR_PUBLIC_KEYS", "")) if lim}
+    if (key := signing_key()) is not None:
+        out.pop(key_id(key), None)
+    return out
 
 
 def anchor_message(slug: str, seq: int, head_hash: str, created_at: str) -> bytes:
@@ -199,6 +248,8 @@ def _signature_problem(slug: str, row: models.VerifyCheckpoint) -> str | None:
     pub = keys.get(row.key_id or "")
     if pub is None or not row.signature:
         return "Signatur fehlt oder unbekannter Schlüssel"
+    if (lim := key_limits().get(row.key_id or "")) and (why := lim.problem(row.seq, row.verified_at)):
+        return why
     if _verify_sig(pub, row.signature, checkpoint_message(slug, row)):
         return None
     if _verify_sig(pub, row.signature, checkpoint_message(slug, row, version=1)):
@@ -236,9 +287,19 @@ def load_checkpoint(db: Session, tenant: models.Tenant) -> Checkpoint | None:
     return Checkpoint(row.seq, row.head_hash, counts, row.full_seq, row.full_at)
 
 
+def _clears_failure(row: models.VerifyCheckpoint, new: Checkpoint) -> bool:
+    """Hebt die fehlerfreie Vollprüfung `new` den letzten Befund auf? Auf neuerem Stand immer; auf demselben Stand
+    (Befund behoben, ohne neue Schreibvorgänge – z. B. Belegdatei zurückgespielt), wenn sie nach dem Erfassen des
+    Befunds begonnen hat (`full_at` = Start > `verified_at` = Zeitpunkt des Befunds, Review S10): ihr Snapshot
+    ist dann jünger als der des Befunds. Sonst bliebe jede Prüfung bis zur nächsten Änderung eine Vollprüfung."""
+    if row.failed_seq is None or new.seq > row.failed_seq:
+        return True
+    return new.seq == row.failed_seq and row.verified_at is not None and new.full_at > row.verified_at
+
+
 def _advances(row: models.VerifyCheckpoint, new: Checkpoint, full: bool) -> bool:
     if full:      # Vollprüfung: nicht älter als die gespeicherte, nach einem Befund nur auf neuerem Stand
-        return new.seq >= row.full_seq and (row.failed_seq is None or new.seq > row.failed_seq)
+        return new.seq >= row.full_seq and _clears_failure(row, new)
     return (row.full_at == new.full_at and row.full_seq == new.full_seq and row.failed_seq is None
             and new.seq > row.seq)
 
@@ -255,11 +316,10 @@ def _persist_checkpoint(tenant: models.Tenant, new: Checkpoint | None, full: boo
                 row = models.VerifyCheckpoint(tenant_id=tenant.id, seq=0, head_hash=models.GENESIS, counts="{}",
                                               full_seq=0)
                 db.add(row)
-            if new is None:
-                if row.full_at is None and (row.failed_seq or 0) >= seq:
-                    return
+            if new is None:      # Befund: verified_at = Zeitpunkt des (letzten) Befunds (s. _clears_failure)
                 row.full_at = row.key_id = row.signature = None
                 row.failed_seq = max(row.failed_seq or 0, seq)
+                row.verified_at = _utcnow()
             else:
                 if not fresh and not _advances(row, new, full):
                     return
@@ -395,7 +455,7 @@ def verify_state_since(db: Session, tenant: models.Tenant, since: int,
 def verify_anchors(db: Session, tenant: models.Tenant, since: int | None = None) -> dict:
     """Signatur + Hash der Revision an der Anker-Seq; mit `since` nur Anker mit Seq > since (ältere sind über
     den bestätigten Kettenkopf abgedeckt). `anchors` zählt immer alle."""
-    keys = verification_keys()
+    keys, limits = verification_keys(), key_limits()
     q = select(models.Anchor).where(models.Anchor.tenant_id == tenant.id)
     if since is not None:
         q = q.where(models.Anchor.seq > since)
@@ -414,6 +474,9 @@ def verify_anchors(db: Session, tenant: models.Tenant, since: int | None = None)
         pub = keys.get(a.key_id)
         if pub is None:
             result["anchor_problems"].append(f"Anker Seq {a.seq}: unbekannter Schlüssel ({a.key_id})")
+            continue
+        if (lim := limits.get(a.key_id)) and (why := lim.problem(a.seq, a.created_at)):
+            result["anchor_problems"].append(f"Anker Seq {a.seq}: {why} ({a.key_id})")
             continue
         try:
             pub.verify(bytes.fromhex(a.signature), anchor_message(tenant.slug, a.seq, a.head_hash, a.created_at))

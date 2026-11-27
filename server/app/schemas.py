@@ -518,6 +518,8 @@ class AnchorList(BaseModel):
     key_id: str | None
     message_format: str
     anchors: list[AnchorOut]
+    total: int | None = None              # alle Anker des Mandanten (unabhängig vom Paging)
+    next_after_seq: int | None = None     # weitere Seite: ?after_seq=<Wert>&limit=…; None = vollständig
 
 
 # ---------- Statistik ----------

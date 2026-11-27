@@ -77,12 +77,27 @@ def tenant_usage(tenant_id: int) -> int:
         return 0
 
 
+HEIF_BRANDS = frozenset({b"heic", b"heix", b"heim", b"heis", b"hevc", b"hevx", b"mif1", b"msf1"})
+
+
+def _heif(body: bytes) -> bool:
+    """ISO-BMFF mit `ftyp`-Box an Offset 0 und HEIF-Brand (Major-Brand oder kompatible Brand) – andere ISO-BMFF
+    wie MP4/MOV (isom, mp42, qt …) nicht (Review X13)."""
+    if body[4:8] != b"ftyp":
+        return False
+    size = int.from_bytes(body[0:4], "big")
+    if size < 16 or size > len(body) or size % 4:
+        size = min(len(body), 16)          # unplausible Boxgrösse: nur Major-Brand werten
+    brands = [body[8:12]] + [body[i:i + 4] for i in range(16, size, 4)]
+    return any(b in HEIF_BRANDS for b in brands)
+
+
 def content_matches(mime: str, body: bytes) -> bool:
-    """Magic Bytes: JPEG FF D8 FF, HEIC/HEIF ISO-BMFF (`ftyp` an Offset 4), PDF `%PDF`."""
+    """Magic Bytes: JPEG FF D8 FF, HEIC/HEIF ISO-BMFF (`ftyp` an Offset 4 und HEIF-Brand), PDF `%PDF`."""
     if mime == "image/jpeg":
         return body[:3] == b"\xff\xd8\xff"
     if mime == "image/heic":
-        return body[4:8] == b"ftyp"
+        return _heif(body)
     if mime == "application/pdf":
         return body[:4] == b"%PDF"
     return False

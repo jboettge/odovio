@@ -86,7 +86,7 @@ def test_auth_missing_401(client):
     del client.headers["Authorization"]
     assert client.get("/api/intel/status").status_code == 401
     assert client.post(f"{T}/trips/suggest", json={"trip": TRIP}).status_code == 401
-    r = client.get("/api/geo/reverse?lat=47&lon=8", headers={"Authorization": "Bearer kaputt"})
+    r = client.post("/api/geo/reverse", json={"lat": 47, "lon": 8}, headers={"Authorization": "Bearer kaputt"})
     assert r.status_code == 401
 
 
@@ -102,7 +102,7 @@ def test_status(client, http, monkeypatch):
 
 
 def test_geo_requires_tenant(client, http):
-    r = client.get("/api/geo/reverse?lat=47&lon=8", headers=bearer_token(groups=[]))
+    r = client.post("/api/geo/reverse", json={"lat": 47, "lon": 8}, headers=bearer_token(groups=[]))
     assert r.status_code == 403
 
 
@@ -225,7 +225,7 @@ def _photon(props):
 def test_reverse_rounds_and_labels(client, http):
     http.on("/reverse", _photon({"osm_key": "building", "street": "Bahnhofstrasse", "housenumber": "1",
                                  "postcode": "8001", "city": "Zürich", "country": "Schweiz"}))
-    r = client.get("/api/geo/reverse?lat=47.3712345&lon=8.5398765")
+    r = client.post("/api/geo/reverse", json={"lat": 47.3712345, "lon": 8.5398765})
     assert r.status_code == 200
     assert r.json() == {"label": "Bahnhofstrasse 1, 8001 Zürich", "municipality": "Zürich", "country": "Schweiz"}
     q = _query(http.calls[0]["url"])
@@ -236,23 +236,25 @@ def test_reverse_rounds_and_labels(client, http):
 def test_reverse_name_and_village(client, http):
     http.on("/reverse", _photon({"osm_key": "place", "type": "village", "name": "Hütten",
                                  "postcode": "8825", "country": "Schweiz"}))
-    assert client.get("/api/geo/reverse?lat=47.17&lon=8.66").json() == \
+    assert client.post("/api/geo/reverse", json={"lat": 47.17, "lon": 8.66}).json() == \
         {"label": "8825 Hütten", "municipality": "Hütten", "country": "Schweiz"}
     http.on("/reverse", _photon({"osm_key": "amenity", "name": "Kantonsspital", "postcode": "6000",
                                  "city": "Luzern", "country": "Schweiz"}))
-    assert client.get("/api/geo/reverse?lat=47.05&lon=8.3").json()["label"] == "Kantonsspital, 6000 Luzern"
+    r = client.post("/api/geo/reverse", json={"lat": 47.05, "lon": 8.3})
+    assert r.json()["label"] == "Kantonsspital, 6000 Luzern"
     http.on("/reverse", lambda u, p: {"features": []})
-    assert client.get("/api/geo/reverse?lat=0&lon=0").json() == \
+    assert client.post("/api/geo/reverse", json={"lat": 0, "lon": 0}).json() == \
         {"label": None, "municipality": None, "country": None}
 
 
 def test_reverse_errors(client, http, monkeypatch):
-    assert client.get("/api/geo/reverse?lat=95&lon=8").status_code == 422
-    assert client.get("/api/geo/reverse?lat=nan&lon=8").status_code == 422
+    assert client.post("/api/geo/reverse", json={"lat": 95, "lon": 8}).status_code == 422
+    assert client.post("/api/geo/reverse", content=b'{"lat": NaN, "lon": 8}',
+                       headers={"Content-Type": "application/json"}).status_code == 422
     http.on("/reverse", lambda u, p: {"unexpected": 1})
-    assert client.get("/api/geo/reverse?lat=47&lon=8").status_code == 502
+    assert client.post("/api/geo/reverse", json={"lat": 47, "lon": 8}).status_code == 502
     monkeypatch.delenv("PHOTON_URL")
-    assert client.get("/api/geo/reverse?lat=47&lon=8").status_code == 503
+    assert client.post("/api/geo/reverse", json={"lat": 47, "lon": 8}).status_code == 503
 
 
 # ---------- suggest ----------
@@ -394,8 +396,8 @@ def test_rate_limit_429(client, http, monkeypatch):
     assert other.status_code == 200
     monkeypatch.setenv("INTEL_RATE_GEO", "1")
     http.on("/reverse", lambda u, p: {"features": []})
-    assert client.get("/api/geo/reverse?lat=47&lon=8").status_code == 200
-    assert client.get("/api/geo/reverse?lat=47&lon=8").status_code == 429
+    assert client.post("/api/geo/reverse", json={"lat": 47, "lon": 8}).status_code == 200
+    assert client.post("/api/geo/reverse", json={"lat": 47, "lon": 8}).status_code == 429
 
 
 # ---------- HTTP-Helfer ----------

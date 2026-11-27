@@ -44,6 +44,12 @@ database:
 secrets:
   values:
     ANCHOR_SIGNING_KEY: dGVzdA==
+networkPolicy:
+  egress:
+    database:
+      cidrs: [10.0.0.5/32]
+    oidc:
+      cidrs: [10.0.0.2/32]
 EOF
 
 echo "== helm lint / template / kubeconform =="
@@ -118,6 +124,8 @@ expect_fail "verweigert die API den Start" --set stateBackend=redis --set valkey
   --set storage.s3.accessKeyId=a --set storage.s3.secretAccessKey=s --set hpa.enabled=true --set hpa.maxReplicas=20
 expect_fail "webConcurrency=auto erfordert resources.limits.cpu" --set resources.limits.cpu=null
 expect_fail "STRICT_CONFIG=1 ohne ANCHOR_SIGNING_KEY" --set secrets.values.ANCHOR_SIGNING_KEY=
+expect_fail "networkPolicy.egress.database setzen" --set networkPolicy.egress.database.cidrs=null
+expect_fail "networkPolicy.egress.oidc setzen" --set networkPolicy.egress.oidc.cidrs=null
 expect_fail "config.OIDC_ISSUER fehlt" --set config.OIDC_ISSUER=
 expect_fail "database.host fehlt" --set database.host=
 expect_fail "preStopSleepSeconds" --set gracefulTimeoutSeconds=40

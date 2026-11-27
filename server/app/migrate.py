@@ -17,7 +17,7 @@ Schema-Versionen: Alembic (server/alembic, Baseline-Revision 0001 = Schema inkl.
   neue DB                      → alembic upgrade head
   Bestand ohne alembic_version → fehlende Spalten/Tabellen/Indizes nachrüsten, auf Baseline stempeln,
                                  dann upgrade head
-  Bestand mit alembic_version  → upgrade head
+  Bestand mit alembic_version  → upgrade head (kein Nachrüsten per create_all; fehlen danach Tabellen → Log-Fehler)
 
 Mehrere Worker/Replikas mit AUTO_MIGRATE=1: PostgreSQL-Advisory-Lock "migrate" → nacheinander, der zweite findet
 den Stand head vor. Empfohlen bleibt der eigene Lauf vor dem Start (Compose-Dienst migrate, Kubernetes-Job/
@@ -215,13 +215,14 @@ def _create_schema(engine: Engine) -> bool:
         if not tables & model_tables:
             if version is not None:                        # Tabellen entfernt, Versionsstand übrig
                 conn.execute(text("DELETE FROM alembic_version"))
-        elif version is None or model_tables - tables:
-            # Bestand ohne Alembic (bzw. unvollständig): nachrüsten, dann auf die Baseline stempeln
+        elif version is None:
+            # Bestand ohne Alembic: nachrüsten, dann auf die Baseline stempeln. Mit alembic_version nie –
+            # fehlende Tabellen legt dann die zuständige Migration an (create_all würde den Stand künftiger
+            # Migrationen vorwegnehmen, Review S5).
             add_missing_columns(conn)
             Base.metadata.create_all(conn)
             add_missing_indexes(conn)
-            if version is None:
-                command.stamp(alembic_config(conn), BASELINE)
+            command.stamp(alembic_config(conn), BASELINE)
     # Upgrade ohne äussere Transaktion: Alembic führt sie selbst; Revisionen mit autocommit-Block
     # (CREATE INDEX CONCURRENTLY, 0003) brauchen das.
     with engine.connect() as conn:
@@ -229,6 +230,10 @@ def _create_schema(engine: Engine) -> bool:
         conn.commit()
     with engine.begin() as conn:
         write_compat_comment(conn)
+        missing = model_tables - set(inspect(conn).get_table_names())
+    if missing:
+        log.error("Schema-Stand %s, aber Tabellen fehlen: %s – manuell prüfen (keine automatische Nachrüstung "
+                  "bei vorhandener alembic_version)", head_revision(), ", ".join(sorted(missing)))
     return True
 
 

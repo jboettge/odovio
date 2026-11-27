@@ -445,8 +445,12 @@ httpRoute:
     request: 60s
     backendRequest: 55s
 
+# Standardmässig an (Review X16): Ingress nur vom Ingress-Controller/Gateway (+ Prometheus), Egress nur DNS, DB,
+# Valkey/Redis, S3, Issuer und Extras. Pflicht: egress.database und egress.oidc (sonst bricht helm mit Meldung ab);
+# ingress.controller an den eigenen Controller anpassen (z. B. k3s/Traefik: Namespace kube-system). Braucht einen
+# NetworkPolicy-fähigen CNI (Calico, Cilium, kube-router …). Bewusst abschalten: enabled: false.
 networkPolicy:
-  enabled: false
+  enabled: true
   ingress:
     # Ingress-Controller/Gateway (Namespace-Label konfigurierbar)
     controller:

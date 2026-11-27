@@ -208,6 +208,8 @@ services:
       # Bildauswertung (Vision-Modell); URL leer → VLLM_URL, Modell leer → aus
       VLLM_VISION_URL: ${VLLM_VISION_URL:-}
       VLLM_VISION_MODEL: ${VLLM_VISION_MODEL:-}
+      # http an Hosts ausserhalb des eigenen Netzes → config_warning, ausser UPSTREAM_ALLOW_HTTP=1
+      UPSTREAM_ALLOW_HTTP: ${UPSTREAM_ALLOW_HTTP:-0}
       GEO_TIMEOUT_S: ${GEO_TIMEOUT_S:-5}
       LLM_TIMEOUT_S: ${LLM_TIMEOUT_S:-10}
       INTEL_RATE_SUGGEST: ${INTEL_RATE_SUGGEST:-60}
@@ -219,6 +221,7 @@ services:
       RATE_REPORTS: ${RATE_REPORTS:-20}
       RATE_VERIFY: ${RATE_VERIFY:-10}
       RATE_FULL_SYNC: ${RATE_FULL_SYNC:-10}
+      RATE_DEEP_SYNC: ${RATE_DEEP_SYNC:-60}
       RATE_ACTIVITY: ${RATE_ACTIVITY:-60}
       RATE_MEMBERS: ${RATE_MEMBERS:-30}
       N8N_WEBHOOK_URL: ${N8N_WEBHOOK_URL:-}

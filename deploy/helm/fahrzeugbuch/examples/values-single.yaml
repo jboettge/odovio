@@ -71,6 +71,21 @@ valkey:
     existingSecret: fahrzeugbuch-valkey
     existingSecretKey: valkey-password
 
+# NetworkPolicy (Standard an): Ingress nur vom ingress-nginx-Controller, Egress zu DB und Keycloak
+networkPolicy:
+  ingress:
+    prometheus:
+      enabled: false
+  egress:
+    database:
+      podSelector:
+        matchLabels:
+          cnpg.io/cluster: fahrzeugbuch-db
+      ports: [5432]
+    oidc:
+      cidrs: [203.0.113.10/32]       # Keycloak (id.example.org) – eigene Adresse eintragen
+      ports: [443]
+
 ingress:
   enabled: true
   className: nginx

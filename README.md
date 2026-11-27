@@ -222,7 +222,7 @@ POST /api/t/privat/sync
 
 ## Verbrauchsberechnung
 
-Voll-zu-voll: Liter aller Tankvorgänge nach einer Volltankung bis inkl. der nächsten Volltankung ÷ gefahrene km dazwischen. Teilbetankungen werden mitgezählt, ergeben aber keinen eigenen Wert. Die erste Volltankung ist der Startpunkt.
+Voll-zu-voll: Liter aller Tankvorgänge nach einer Volltankung bis inkl. der nächsten Volltankung ÷ gefahrene km dazwischen. Teilbetankungen werden mitgezählt, ergeben aber keinen eigenen Wert. Die erste Volltankung ist der Startpunkt. Eine weitere Volltankung beim gleichen km-Stand (nachgetankt) zählt zur vorigen Etappe. Der aktuelle km-Stand (Fälligkeiten) berücksichtigt auch km-Beginn/-Ende der Fahrten.
 
 ## Entwicklung
 

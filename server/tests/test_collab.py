@@ -215,6 +215,8 @@ class FakeKeycloak:
         self.token_requests = 0
         self.requests: list[tuple[str, str]] = []
         self.fail = False
+        self.fail_calls: set[tuple[str, int]] = set()   # (Methode, n-ter Aufruf der Admin-API) → einmal HTTP 500
+        self.calls: dict[str, int] = {}
         self.lock = threading.Lock()
 
     # Hilfen für Tests
@@ -266,6 +268,10 @@ class FakeKeycloak:
                 return 401, None, {}
             prefix = f"/admin/realms/{self.REALM}"
             assert url.path.startswith(prefix)
+            if method in ("PUT", "DELETE"):
+                self.calls[method] = n = self.calls.get(method, 0) + 1
+                if (method, n) in self.fail_calls:
+                    return 500, None, {}
             parts = [urllib.parse.unquote(p) for p in url.path[len(prefix):].strip("/").split("/")]
             return self.route(method, parts, q, json.loads(body) if body else None)
 
@@ -466,3 +472,40 @@ def test_keycloak_token_refresh_and_errors(client, kc, monkeypatch):
     r = client.post(f"{T}/members", json={"user": "treuhand", "role": "read"}, headers=h)
     assert r.status_code == 502 and r.json()["detail"] == "Keycloak verweigert die Mitgliederverwaltung"
     assert kc.paths_of("user-3") == []
+
+
+def _membership_acts(client) -> list[str]:
+    return [i["action"] for i in client.get(f"{T}/activity").json()["items"] if i["entity"] == "membership"]
+
+
+def test_member_change_compensated_when_keycloak_step_fails(client, kc):
+    """S13: Rolle ändern = Gruppe zuweisen + alte Gruppen entfernen; scheitert ein späterer Schritt, werden die
+    bereits ausgeführten zurückgenommen (Zustand wie vorher), nichts im Journal."""
+    kc.member("/fahrzeugbuch/privat/lesen", "user-2")          # doppelt zugeordnet: zwei DELETE nötig
+    before = kc.paths_of("user-2")
+    kc.fail_calls = {("DELETE", 2)}
+    r = client.patch(f"{T}/members/user-2", json={"role": "admin"}, headers=admin_web())
+    assert r.status_code == 502
+    assert kc.paths_of("user-2") == before
+    assert _membership_acts(client) == []
+
+
+def test_member_change_compensated_when_journal_commit_fails(client, kc, monkeypatch):
+    """S13: Keycloak geändert, Journal/Commit scheitert → Keycloak-Schritte zurückgenommen."""
+    from app import main
+
+    real, broken = main.maybe_anchor, [True]
+
+    def anchor(*args, **kwargs):
+        if broken[0]:
+            raise RuntimeError("DB weg")
+        return real(*args, **kwargs)
+    monkeypatch.setattr(main, "maybe_anchor", anchor)
+    with pytest.raises(RuntimeError):
+        client.post(f"{T}/members", json={"user": "treuhand", "role": "read"}, headers=admin_web())
+    assert kc.paths_of("user-3") == []
+    broken[0] = False
+    assert _membership_acts(client) == []
+    assert client.post(f"{T}/members", json={"user": "treuhand", "role": "read"}, headers=admin_web()).status_code \
+        == 201
+    assert _membership_acts(client) == ["create"]

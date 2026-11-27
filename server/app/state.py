@@ -11,8 +11,8 @@ Env:
 
 Alle Schlüssel tragen das Präfix und eine TTL (kein unbegrenztes Wachstum); Uhrzeit aus Redis (TIME), damit alle
 Worker dieselbe Zeitbasis haben. Mehrschrittige Änderungen laufen atomar als Lua-Skript (EVALSHA).
-Ausweichverhalten bei Ausfall (StateUnavailable, siehe Aufrufer): Rate-Limits fail-open, Brute-Force-Sperren und
-Circuit-Breaker lokal je Prozess weiter; /health meldet "degraded", /health/ready 503.
+Ausweichverhalten bei Ausfall (StateUnavailable, siehe Aufrufer): Rate-Limits lokal (Anteil je Prozess),
+Brute-Force-Sperren und Circuit-Breaker lokal je Prozess weiter; /health meldet "degraded", /health/ready 503.
 Valkey ist nur ein Cache flüchtiger Zustände: Persistenz aus (--save "" --appendonly no), maxmemory + allkeys-lru.
 """
 import asyncio

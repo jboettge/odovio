@@ -299,6 +299,27 @@ def test_full_parameter_always_full(client):
     assert _verify(client, full=True)["incremental_from"] is None
 
 
+def test_fixed_finding_without_new_writes_restores_incremental(client):
+    """S10: Befund behoben (Datensatz zurückgesetzt), keine neuen Schreibvorgänge → die nächste fehlerfreie
+    Vollprüfung, die nach dem Befund begann, setzt den Prüfstand wieder (statt dauerhaft Vollprüfung)."""
+    _seed(client)
+    _verify(client)
+    with engine.begin() as conn:
+        conn.execute(text("UPDATE odometer_readings SET km = 1 WHERE km = 10001"))
+    assert not _verify(client, full=True)["state_ok"]
+    cp = _cp()
+    assert cp.full_at is None and cp.failed_seq == 4 and cp.verified_at
+    with engine.begin() as conn:
+        conn.execute(text("UPDATE odometer_readings SET km = 10001 WHERE km = 1"))
+        # Befund «vor» dieser Prüfung erfasst (Sekundenauflösung; im Test sonst dieselbe Sekunde)
+        conn.execute(text("UPDATE verify_checkpoints SET verified_at = '2000-01-01T00:00:00+00:00'"))
+    v = _verify(client)
+    assert v["ok"] and v["incremental_from"] is None
+    cp = _cp()
+    assert cp.failed_seq is None and cp.full_at and cp.seq == 4
+    assert _verify(client)["incremental_from"] == 4
+
+
 # ---------- monotones Fortschreiben (mehrere Worker) ----------
 def _tenant():
     with SessionLocal() as db:

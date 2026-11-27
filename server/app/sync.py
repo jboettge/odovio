@@ -192,7 +192,8 @@ def frozen_names(db: Session, t) -> dict:
 
 def _trip_rules(ctx: OpContext, obj, data):
     """Monatsabschluss: abgeschlossene Fahrten sind nur noch mit Begründung stornierbar; neue Fahrten/
-    Änderungen in einem abgeschlossenen Monat nur mit Begründung (`note` oder `reason`) und sofort `locked`.
+    Änderungen in einem abgeschlossenen Monat nur mit Begründung (`reason` oder `note`, je mind. MIN_REASON
+    Zeichen) und sofort `locked`.
     Privatmodus: keine Orte, kein Zweck/Kunde/Track, Bezeichnungen nur kurz (Gemeinde).
     Fahrer (`driver_sub`/`driver_name`) setzt der Server beim Anlegen aus dem Token."""
     db, tenant = ctx.db, ctx.tenant
@@ -224,8 +225,9 @@ def _trip_rules(ctx: OpContext, obj, data):
         touched.add((obj.vehicle_id, local_month(obj.start_at)))
     periods = closed_periods(db, tenant.id, touched)
     if periods:
-        if not (data.note or "").strip() and ctx.reason is None:
-            raise Rejected("Monat abgeschlossen: Korrektur nur mit Begründung (note)")
+        if len((data.note or "").strip()) < MIN_REASON and ctx.reason is None:
+            raise Rejected(f"Monat abgeschlossen: Korrektur nur mit Begründung (reason oder note, mind. "
+                           f"{MIN_REASON} Zeichen)")
         if ctx.reason:
             ctx.meta["correction_reason"] = ctx.reason
         data = data.model_copy(update={"status": "locked"})

@@ -60,15 +60,13 @@ HINWEIS: Änderungen an existingSecret lösen keinen Rollout aus:
   kubectl -n {{ .Release.Namespace }} rollout restart deploy/{{ $full }}
 {{- end }}
 {{- if $v.networkPolicy.enabled }}
-{{- $e := $v.networkPolicy.egress }}
-{{- if not (or $e.oidc.cidrs $e.oidc.namespaceSelector $e.oidc.podSelector) }}
 
-WARNUNG: networkPolicy.egress.oidc ist leer – der Issuer (Discovery/JWKS) ist nicht erreichbar, Anmeldungen schlagen fehl.
-{{- end }}
-{{- if not (or $e.database.cidrs $e.database.namespaceSelector $e.database.podSelector) }}
+HINWEIS: NetworkPolicy aktiv – Zugriff nur vom Ingress-Controller laut networkPolicy.ingress.controller
+  ({{ $v.networkPolicy.ingress.controller.namespaceSelector | toJson }}); bei 502/Timeouts dort prüfen.
+  Weitere Dienste (OSRM, Photon, vLLM, n8n) unter networkPolicy.egress.extra freigeben.
+{{- else }}
 
-WARNUNG: networkPolicy.egress.database ist leer – die Datenbank ist nicht erreichbar.
-{{- end }}
+HINWEIS: networkPolicy.enabled=false – Pods sind im Cluster frei erreichbar und dürfen beliebig nach aussen.
 {{- end }}
 {{- if eq (toString $v.config.STRICT_CONFIG) "0" }}
 

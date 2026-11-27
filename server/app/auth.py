@@ -13,6 +13,10 @@ Mandanten (aus dem `groups`-Claim, Keycloak-Gruppen mit vollem Pfad):
                                          /fahrzeugbuch/<mandant>/lesen  = nur lesen ("read")
                                          /fahrzeugbuch/<mandant>/admin  = Verwalter ("admin", inkl. schreiben)
   Rangfolge admin > write > read (mehrere Gruppen → höchste Rolle).
+  Exakt wie die Mitgliederverwaltung (app.members, Review X9): Mandant klein geschrieben (TENANT_SLUG), Suffix
+  genau «lesen» bzw. «admin». Andere Gruppen unter dem Präfix (z. B. …/Privat, …/privat/read, zu tief) geben
+  keinen Zugriff und erzeugen config_warning (gedrosselt) – sonst entstünden Mitglieder, die die
+  Mitgliederverwaltung weder anzeigt noch entfernen kann.
   DEFAULT_TENANT      optional: Mandant, auf den jeder berechtigte Benutzer schreibend zugreift
 
 Härtung: Token ≤ 8 KiB; `iat` nicht in der Zukunft, `nbf` beachtet, Lebensdauer exp−iat ≤ MAX_TOKEN_LIFETIME_S
@@ -174,7 +178,7 @@ TENANT_SLUG = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 
 
 ROLE_RANK = {"read": 1, "write": 2, "admin": 3}
-READ_SUFFIXES = ("lesen", "read")
+READ_SUFFIX = "lesen"
 ADMIN_SUFFIX = "admin"
 
 
@@ -213,18 +217,20 @@ def tenants_from_claims(claims: dict) -> dict[str, str]:
         if not isinstance(group, str) or not group.startswith(prefix):
             continue
         parts = group[len(prefix):].strip("/").split("/")
-        slug = parts[0].lower()
-        if not TENANT_SLUG.match(slug):
-            continue
+        slug = parts[0]
         role = None
-        if len(parts) == 1:
-            role = "write"
-        elif len(parts) == 2 and parts[1].lower() in READ_SUFFIXES:
-            role = "read"
-        elif len(parts) == 2 and parts[1].lower() == ADMIN_SUFFIX:
-            role = "admin"
+        if TENANT_SLUG.match(slug):
+            if len(parts) == 1:
+                role = "write"
+            elif len(parts) == 2 and parts[1] == READ_SUFFIX:
+                role = "read"
+            elif len(parts) == 2 and parts[1] == ADMIN_SUFFIX:
+                role = "admin"
         if role:
             result[slug] = higher_role(result.get(slug), role)
+        else:
+            security.event("config_warning", reason=f"Keycloak-Gruppe {group[:120]} ignoriert (erwartet "
+                           f"{prefix}<mandant>[/{READ_SUFFIX}|/{ADMIN_SUFFIX}], Mandant klein)", throttle=3600)
     default = (os.environ.get("DEFAULT_TENANT") or "").lower()
     if default and TENANT_SLUG.match(default):
         result[default] = higher_role(result.get(default), "write")

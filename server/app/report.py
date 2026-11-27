@@ -12,7 +12,7 @@ from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, Tabl
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from . import models
+from . import models, timeutil
 from .attachments import fuel_with_receipt
 from .integrity import full_interval, verify_all
 from .stats import VehicleData, consumption_points, summarize
@@ -232,7 +232,7 @@ def build_report(
     maint_cost = sum(data.maintenance_cost(m) for m in maint)
 
     integrity, audit, _ = integrity_section(db, tenant)
-    created = dt.datetime.now().strftime("%d.%m.%Y %H:%M")
+    created = timeutil.now().strftime("%d.%m.%Y %H:%M")   # APP_TIMEZONE, nicht Server-Zone (S9)
 
     story = [
         Paragraph(escape(f"Fahrzeugbuch – {v.name}"), STYLES["Title"]),
