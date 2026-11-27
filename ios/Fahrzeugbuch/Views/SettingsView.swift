@@ -752,7 +752,7 @@ struct CrashReportsView: View {
                 }
                 ForEach(reports, id: \.self) { url in
                     ShareLink(item: url) {
-                        Label(url.deletingPathExtension().lastPathComponent, systemImage: "doc.text")
+                        Label(CrashReporter.title(of: url), systemImage: "doc.text")
                     }
                 }
             } footer: {

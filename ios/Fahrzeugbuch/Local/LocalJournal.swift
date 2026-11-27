@@ -110,6 +110,11 @@ struct LocalIntegrity: Equatable {
 /// Jede Änderung im Lokalmodus wird als Zeile angehängt (Schreib-Queue der Mandantendateien, Dateischutz
 /// „completeUnlessOpen“, **nicht** vom Backup ausgeschlossen). Kann die Datei nicht gelesen werden (Gerät
 /// gesperrt), werden neue Einträge zurückgestellt und nach dem Entsperren an die Kette angehängt.
+///
+/// Gesperrt nach dem Laden (Q8): Die Mandantendatei wird atomar neu geschrieben (neue Datei – erlaubt), das
+/// Journal liesse sich aber nicht öffnen. Nicht angehängte Zeilen sichert der Writer deshalb in einer
+/// Nebendatei `journal.overflow-<id>.jsonl`; beim nächsten Laden (bzw. Schreiben nach dem Entsperren)
+/// werden sie an die Kette angehängt und die Nebendatei entfernt – auch wenn die App inzwischen beendet wurde.
 @MainActor
 final class LocalJournal {
     let fileURL: URL
@@ -271,13 +276,13 @@ final class LocalJournal {
     // MARK: Intern
 
     private func load() {
-        guard FileManager.default.fileExists(atPath: fileURL.path) else {
-            isBlocked = false
-            return
-        }
-        guard let data = try? Data(contentsOf: fileURL) else {
-            isBlocked = true
-            return
+        var data = Data()
+        if FileManager.default.fileExists(atPath: fileURL.path) {
+            guard let d = try? Data(contentsOf: fileURL) else {
+                isBlocked = true
+                return
+            }
+            data = d
         }
         isBlocked = false
         var list: [JournalEntry] = []
@@ -291,6 +296,53 @@ final class LocalJournal {
         }
         entries = list
         loadProblems = problems
+        mergeOverflow()
+    }
+
+    /// Während einer Sperre gesicherte Zeilen (Nebendateien, Q8) an die Kette anhängen. Übernommen wird nur,
+    /// was die Kette lückenlos fortsetzt; bereits enthaltene Einträge werden übersprungen. Die Nebendateien
+    /// werden erst entfernt, wenn alles in der Hauptdatei steht.
+    private func mergeOverflow() {
+        let files = writer.overflowFiles()
+        guard !files.isEmpty else { return }
+        var candidates: [JournalEntry] = []
+        var unreadable = false
+        for file in files {
+            guard let data = try? Data(contentsOf: file) else { return }   // noch gesperrt → beim nächsten Laden
+            for line in Self.lines(data) {
+                if let node = try? JSONNode.parse(line), let e = JournalEntry(node: node) {
+                    candidates.append(e)
+                } else {
+                    unreadable = true
+                    loadProblems.append("Nebendatei \(file.lastPathComponent): Zeile nicht lesbar")
+                }
+            }
+        }
+        let merged = Self.continuation(of: entries, with: candidates)
+        loadProblems += merged.problems
+        entries += merged.added
+        let complete = merged.problems.isEmpty && !unreadable
+        writer.merge(merged.added.map { Data(($0.line + "\n").utf8) }, removing: complete ? files : [])
+    }
+
+    /// Einträge aus `candidates`, die die Kette `entries` lückenlos fortsetzen (nach `seq`); bereits enthaltene
+    /// (gleicher Hash) werden übersprungen, alle anderen als Problem gemeldet.
+    nonisolated static func continuation(of entries: [JournalEntry], with candidates: [JournalEntry])
+        -> (added: [JournalEntry], problems: [String]) {
+        var known = Set(entries.map(\.hash))
+        var added: [JournalEntry] = []
+        var problems: [String] = []
+        for e in candidates.sorted(by: { $0.seq < $1.seq }) where !known.contains(e.hash) {
+            let last = added.last ?? entries.last
+            guard e.seq == (last?.seq ?? 0) + 1, e.prevHash == (last?.hash ?? JournalEntry.genesisHash),
+                  e.computedHash == e.hash else {
+                problems.append("Eintrag \(e.seq) aus einer Nebendatei passt nicht an die Kette – nicht übernommen.")
+                continue
+            }
+            added.append(e)
+            known.insert(e.hash)
+        }
+        return (added, problems)
     }
 }
 
@@ -298,16 +350,64 @@ final class LocalJournal {
 /// zurückgestellt und werden beim nächsten Schreiben erneut versucht (Reihenfolge bleibt erhalten).
 final class JournalWriter: @unchecked Sendable {
     let url: URL
+    /// Nebendatei dieses Writers für Zeilen, die die Hauptdatei (gesperrt) nicht aufnahm (Q8)
+    let overflowURL: URL
     private let gate: StorageGate
     private let generation: Int
     private let lock = NSLock()
     private var pending: [Data] = []
     private var error: String?
+    /// Nebendatei geschrieben (nur auf `StoreFiles.queue`)
+    private var overflowWritten = false
 
     init(url: URL, gate: StorageGate, generation: Int) {
         self.url = url
+        self.overflowURL = url.deletingLastPathComponent()
+            .appendingPathComponent(Self.overflowPrefix(url) + UUID().uuidString + ".jsonl")
         self.gate = gate
         self.generation = generation
+        Self.liveOverflow.insert(overflowURL.lastPathComponent)
+    }
+
+    deinit {
+        Self.liveOverflow.remove(overflowURL.lastPathComponent)
+    }
+
+    /// Nebendateien lebender Writer dieses Prozesses: deren Zeilen stehen noch in `pending` und werden vom
+    /// Besitzer geschrieben – nie von einem anderen Store übernehmen (sonst doppelt in der Kette).
+    private static let liveOverflow = NameRegistry()
+
+    /// Namensanfang der Nebendateien, z. B. `journal.overflow-`.
+    static func overflowPrefix(_ url: URL) -> String {
+        url.deletingPathExtension().lastPathComponent + ".overflow-"
+    }
+
+    /// Nebendateien früherer Prozesse bzw. freigegebener Writer (ohne die eigene und die lebender Writer).
+    func overflowFiles() -> [URL] {
+        let prefix = Self.overflowPrefix(url)
+        let files = (try? FileManager.default.contentsOfDirectory(at: url.deletingLastPathComponent(),
+                                                                  includingPropertiesForKeys: nil)) ?? []
+        return files.filter {
+            $0.lastPathComponent.hasPrefix(prefix) && $0.pathExtension == "jsonl"
+                && !Self.liveOverflow.contains($0.lastPathComponent)
+        }.sorted { $0.lastPathComponent < $1.lastPathComponent }
+    }
+
+    /// Zeilen aus Nebendateien vor allen ausstehenden Zeilen anhängen; danach `files` entfernen, sofern alles
+    /// geschrieben ist.
+    func merge(_ lines: [Data], removing files: [URL]) {
+        StoreFiles.queue.sync {
+            guard gate.isCurrent(generation) else { return }
+            lock.lock()
+            pending.insert(contentsOf: lines, at: 0)
+            lock.unlock()
+            writePending()
+            lock.lock()
+            let written = pending.isEmpty
+            lock.unlock()
+            guard written else { return }
+            for file in files { try? FileManager.default.removeItem(at: file) }
+        }
     }
 
     var lastError: String? {
@@ -340,6 +440,9 @@ final class JournalWriter: @unchecked Sendable {
                 var data = Data()
                 for l in lines { data.append(l) }
                 try data.write(to: url, options: StoreFiles.writeOptions)
+                // Journal ersetzt → Nebendateien (auch die eigene) sind hinfällig
+                for file in overflowFiles() + [overflowURL] { try? FileManager.default.removeItem(at: file) }
+                overflowWritten = false
             } catch {
                 thrown = error
             }
@@ -358,22 +461,55 @@ final class JournalWriter: @unchecked Sendable {
         var data = Data()
         for l in lines { data.append(l) }
         do {
-            let fm = FileManager.default
-            if !fm.fileExists(atPath: url.path) {
-                try StoreFiles.ensureDirectory(url.deletingLastPathComponent(), excludeFromBackup: false)
-                try data.write(to: url, options: StoreFiles.writeOptions)
-            } else {
-                let handle = try FileHandle(forWritingTo: url)
-                defer { try? handle.close() }
-                try handle.seekToEnd()
-                try handle.write(contentsOf: data)
-            }
+            try Self.append(data, to: url)
             setError(nil)
+            if overflowWritten {
+                // Alles Zurückgestellte steht jetzt in der Hauptdatei
+                try? FileManager.default.removeItem(at: overflowURL)
+                overflowWritten = false
+            }
         } catch {
             lock.lock()
             pending.insert(contentsOf: lines, at: 0)
+            let unwritten = pending
             lock.unlock()
+            // Gesperrt (Q8): bestehende Datei nicht zu öffnen, neue Dateien aber möglich → Nebendatei sichern
+            var backup = Data()
+            for l in unwritten { backup.append(l) }
+            if (try? backup.write(to: overflowURL, options: StoreFiles.writeOptions)) != nil {
+                overflowWritten = true
+            }
             setError("Journal konnte nicht geschrieben werden: \(error.localizedDescription)")
+        }
+    }
+
+    /// Zeilen an `url` anhängen (Datei fehlt → neu anlegen). Q14: Schlägt das Schreiben mittendrin fehl, wird
+    /// auf die bisherige Länge zurückgeschnitten (keine halbe Zeile); endet die Datei ohne Zeilenumbruch
+    /// (Abbruch beim Schreiben), beginnt der neue Block auf einer eigenen Zeile.
+    static func append(_ data: Data, to url: URL) throws {
+        let fm = FileManager.default
+        if !fm.fileExists(atPath: url.path) {
+            try StoreFiles.ensureDirectory(url.deletingLastPathComponent(), excludeFromBackup: false)
+            try data.write(to: url, options: StoreFiles.writeOptions)
+            return
+        }
+        let handle = try FileHandle(forUpdating: url)
+        defer { try? handle.close() }
+        let end = try handle.seekToEnd()
+        var block = data
+        if end > 0 {
+            try handle.seek(toOffset: end - 1)
+            let last = try handle.read(upToCount: 1)
+            if let byte = last?.first, byte != UInt8(ascii: "\n") {
+                block = Data([UInt8(ascii: "\n")]) + data
+            }
+            try handle.seek(toOffset: end)
+        }
+        do {
+            try handle.write(contentsOf: block)
+        } catch {
+            try? handle.truncate(atOffset: end)
+            throw error
         }
     }
 
@@ -381,5 +517,29 @@ final class JournalWriter: @unchecked Sendable {
         lock.lock()
         error = e
         lock.unlock()
+    }
+}
+
+/// Thread-sichere Menge von Dateinamen.
+private final class NameRegistry: @unchecked Sendable {
+    private let lock = NSLock()
+    private var names = Set<String>()
+
+    func insert(_ name: String) {
+        lock.lock()
+        names.insert(name)
+        lock.unlock()
+    }
+
+    func remove(_ name: String) {
+        lock.lock()
+        names.remove(name)
+        lock.unlock()
+    }
+
+    func contains(_ name: String) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return names.contains(name)
     }
 }

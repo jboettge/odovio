@@ -26,7 +26,7 @@ enum LocalMigration {
             return report
         }
         guard server.canWrite else {
-            report.notes.append("Keine Schreibberechtigung für Mandant „\(server.tenant.slug)“ – nichts übertragen.")
+            report.notes.append("Keine Schreibberechtigung für Mandant «\(server.tenant.slug)» – nichts übertragen.")
             return report
         }
         local.flush()
@@ -41,7 +41,7 @@ enum LocalMigration {
         }
         let locked = (snap.trips ?? [:]).values.filter { !$0.deleted && $0.isLocked }.count
         if locked > 0 {
-            report.notes.append("\(locked) Fahrt(en) aus lokal abgeschlossenen Monaten als „bestätigt“ übertragen – "
+            report.notes.append("\(locked) Fahrt(en) aus lokal abgeschlossenen Monaten als «bestätigt» übertragen – "
                                 + "die Monate bitte auf dem Server erneut abschliessen.")
         }
         let closed = (snap.periods ?? [:]).values.filter(\.isClosed).count

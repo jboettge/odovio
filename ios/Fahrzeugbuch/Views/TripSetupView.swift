@@ -17,6 +17,7 @@ struct TripSetupView: View {
     @Environment(TripCoordinator.self) private var coordinator
     @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.dynamicTypeSize) private var typeSize
 
     /// Als Sheet: Titel des Abschlussknopfs (z. B. „Fahrt starten“) und Aktion danach
     var continueTitle: String?
@@ -196,8 +197,13 @@ struct TripSetupView: View {
                     .frame(minWidth: 24)
                     .accessibilityHidden(true)
                 VStack(alignment: .leading, spacing: 4) {
-                    HStack(spacing: 6) {
-                        Text(step.title).font(.headline)
+                    // Bei grossen Schriften (AX) Hinweis auf eigener Zeile statt abgeschnitten (U9)
+                    let titleLayout = typeSize.isAccessibilitySize
+                        ? AnyLayout(VStackLayout(alignment: .leading, spacing: 4)) : AnyLayout(HStackLayout(spacing: 6))
+                    titleLayout {
+                        Text(step.title)
+                            .font(.headline)
+                            .fixedSize(horizontal: false, vertical: true)
                         if needed(step) && state(step) != .done {
                             StatusTag(text: "für Automatik nötig", color: .orange)
                         }

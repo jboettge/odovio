@@ -259,6 +259,7 @@ struct PlaceFormView: View {
                 }
             }
             .navigationTitle(titleText)
+            .keyboardDoneToolbar()   // Zahlentastatur ohne Eingabetaste (U7)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -1089,6 +1090,7 @@ struct TaxParamFormView: View {
                 }
             }
             .navigationTitle(titleText)
+            .keyboardDoneToolbar()   // Zahlentastatur ohne Eingabetaste (U7)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {

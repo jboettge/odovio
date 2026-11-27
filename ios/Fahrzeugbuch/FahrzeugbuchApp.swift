@@ -54,7 +54,10 @@ struct FahrzeugbuchApp: App {
                 }
         }
         .onChange(of: scenePhase) { _, phase in
-            if phase == .active { Task { await settings.store?.sync() } }
+            if phase == .active {
+                settings.finishFirstUnlock()   // falls die Mitteilung zur Entsperrung verpasst wurde (Q6)
+                Task { await settings.store?.sync() }
+            }
         }
     }
 }
@@ -138,7 +141,11 @@ struct RootView: View {
     /// Betriebsart: nicht gewählt → Auswahl; lokal → direkt die Fahrzeugliste; Server → Einrichtung/Anmeldung.
     @ViewBuilder
     private var content: some View {
-        if settings.mode == nil {
+        if settings.awaitingFirstUnlock {
+            // Start vor der ersten Entsperrung (Q6): Einstellungen noch nicht gelesen – keine Betriebsart-Auswahl
+            ProgressView("Lade Einstellungen …")
+                .task { settings.finishFirstUnlock() }
+        } else if settings.mode == nil {
             ModeChoiceView()
         } else if settings.isLocal {
             localContent

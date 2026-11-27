@@ -190,7 +190,8 @@ enum GeoMath {
 enum TripTime {
     static func parse(_ s: String) -> Date? { ISODate.parse(s) }
 
-    /// "yyyy-MM" in lokaler Zeit (Monatsabschluss)
+    /// "yyyy-MM" eines Tagesdatums in Gerätezeit (Tanken, km-Stand, Wartung: Datum ohne Uhrzeit).
+    /// Fahrten (Zeitpunkte) immer über `LogbookRules.month` bzw. `Trip.monthKey` zuordnen (Q12).
     static func month(_ d: Date, calendar: Calendar = .current) -> String {
         let c = calendar.dateComponents([.year, .month], from: d)
         return String(format: "%04d-%02d", c.year ?? 0, c.month ?? 0)

@@ -40,7 +40,7 @@ final class TripCoordinator {
     /// (Standort „Beim Verwenden“ → „Immer“, Bewegung & Fitness, Mitteilungen).
     var autoDetectEnabled: Bool {
         didSet {
-            guard oldValue != autoDetectEnabled else { return }
+            guard !restoringDefaults, oldValue != autoDetectEnabled else { return }
             UserDefaults.standard.set(autoDetectEnabled, forKey: Keys.autoDetect)
             refreshDetector()
             if autoDetectEnabled && configured {
@@ -51,12 +51,14 @@ final class TripCoordinator {
 
     /// Automatisch erkannte Fahrten im Privatmodus aufzeichnen (Default aus)
     var autoPrivateMode: Bool {
-        didSet { UserDefaults.standard.set(autoPrivateMode, forKey: Keys.autoPrivate) }
+        didSet { if !restoringDefaults { UserDefaults.standard.set(autoPrivateMode, forKey: Keys.autoPrivate) } }
     }
 
     /// Privatmodus: Gemeinde als Start/Ziel speichern (Default an; aus = nur km + Zeit)
     var privateMunicipalityEnabled: Bool {
-        didSet { UserDefaults.standard.set(privateMunicipalityEnabled, forKey: Keys.privateMunicipality) }
+        didSet {
+            if !restoringDefaults { UserDefaults.standard.set(privateMunicipalityEnabled, forKey: Keys.privateMunicipality) }
+        }
     }
 
     var lastError: String? {
@@ -88,6 +90,8 @@ final class TripCoordinator {
         static let autoPrivate = "tripAutoPrivate"
         static let privateMunicipality = "tripPrivateMunicipality"
         static let askedAlways = "tripAskedAlwaysLocation"
+        /// Orte der Weck-Regionen (Q7): im Hintergrund ohne geöffneten Mandanten aus diesem Cache
+        static let monitoredPlaces = "tripMonitoredPlaces"
     }
 
     /// Auto-Fahrten unter dieser Distanz/Dauer gelten als Fehlalarm (Bus, Umparkieren)
@@ -120,6 +124,8 @@ final class TripCoordinator {
     @ObservationIgnored private var gapCheckRunning = false
     @ObservationIgnored private var finishingParked = false
     @ObservationIgnored private var disconnectStopTask: Task<Void, Never>?
+    /// Einstellungen werden nach der ersten Entsperrung nachgeladen (didSet schreibt nicht zurück, Q6)
+    @ObservationIgnored private var restoringDefaults = false
 
     private init() {
         let defaults = UserDefaults.standard
@@ -159,7 +165,7 @@ final class TripCoordinator {
             return
         }
         #endif
-        if !settings.auth.isLoggedIn && !settings.isLocal && !isRecording
+        if !settings.auth.isLoggedIn && !settings.isLocal && !isRecording && !settings.awaitingFirstUnlock
             && UIApplication.shared.isProtectedDataAvailable {
             tracks.deleteAll()   // keine Rohdaten ohne angemeldeten Benutzer
         }
@@ -170,6 +176,19 @@ final class TripCoordinator {
         housekeeping(force: true)
         refreshDetector()
         refreshReminders()
+    }
+
+    /// Start vor der ersten Entsperrung (Q6): Einstellungen (Automatik, Privatmodus) waren nicht lesbar und
+    /// galten als «aus». Nach der Entsperrung laden und das Fahrtenbuch neu einrichten.
+    func reloadAfterFirstUnlock(settings: AppSettings) {
+        let defaults = UserDefaults.standard
+        restoringDefaults = true
+        autoDetectEnabled = defaults.bool(forKey: Keys.autoDetect)
+        autoPrivateMode = defaults.bool(forKey: Keys.autoPrivate)
+        privateMunicipalityEnabled = defaults.object(forKey: Keys.privateMunicipality) as? Bool ?? true
+        restoringDefaults = false
+        CarConnectionMonitor.shared.reloadAfterFirstUnlock()
+        configure(settings: settings)
     }
 
     func start(vehicle: Vehicle, privateMode: Bool) async {
@@ -224,7 +243,7 @@ final class TripCoordinator {
         var llmBudget = 20   // Server/LLM nicht fluten
         for trip in allTrips(store) where trip.status == "draft" && !trip.deleted {
             if let d = TripTime.parse(trip.startAt),
-               store.isMonthClosed(vehicleId: trip.vehicleId, month: TripTime.month(d)) { continue }
+               store.isMonthClosed(vehicleId: trip.vehicleId, month: LogbookRules.month(d)) { continue }
             guard let s = await suggestion(for: trip, store: store, endPoint: tracks.meta(tripId: trip.id)?.end,
                                            allowLLM: llmBudget > 0) else { continue }
             if s.source == "llm" { llmBudget -= 1 }
@@ -447,6 +466,7 @@ final class TripCoordinator {
         tracks.deleteAll()
         lastHousekeeping = nil
         refreshDetector()
+        UserDefaults.standard.removeObject(forKey: Keys.monitoredPlaces)   // Orte des bisherigen Benutzers (Q7)
     }
 
     /// Für App-Intents: Fahrt mit dem Standardfahrzeug starten; Rückgabe = Text für Siri/Kurzbefehle.
@@ -830,11 +850,21 @@ final class TripCoordinator {
         }
     }
 
+    /// Orte für die Weck-Regionen. Ohne geöffneten (bzw. noch gesperrten) Mandanten – z. B. Start im
+    /// Hintergrund im Servermodus – die zuletzt bekannten Orte aus dem Cache, damit die Regionen nicht
+    /// entfernt werden (Q7).
     private func monitoredPlaces() -> [MonitoredPlace] {
-        (settings?.store?.placeList ?? []).compactMap { p in
+        let defaults = UserDefaults.standard
+        guard let store = settings?.store, !store.isPersistenceBlocked else {
+            return defaults.data(forKey: Keys.monitoredPlaces)
+                .flatMap { try? JSONDecoder().decode([MonitoredPlace].self, from: $0) } ?? []
+        }
+        let list: [MonitoredPlace] = store.placeList.compactMap { p in
             guard !p.deleted, let lat = p.lat, let lon = p.lon else { return nil }
             return MonitoredPlace(id: p.id, lat: lat, lon: lon, radius: Double(p.radiusM))
         }
+        defaults.set(try? JSONEncoder().encode(list), forKey: Keys.monitoredPlaces)
+        return list
     }
 
     // MARK: Entwurf erstellen
@@ -947,7 +977,7 @@ final class TripCoordinator {
         }
 
         var reason: String?
-        if let store, store.isMonthClosed(vehicleId: a.vehicleId, month: TripTime.month(track.startAt)) {
+        if let store, store.isMonthClosed(vehicleId: a.vehicleId, month: LogbookRules.month(track.startAt)) {
             trip.note = "Nachtrag nach Monatsabschluss"
             reason = Self.lateEntryReason
         }
@@ -967,7 +997,7 @@ final class TripCoordinator {
             tracks.save(track, tripId: trip.id, tenant: a.tenant, vehicleId: a.vehicleId,
                         confirmed: trip.status == "confirmed")
             if a.source == "auto", let saved = store.trip(id: trip.id) {
-                await TripNotifications.shared.notifyDetected(saved, tenant: a.tenant, route: store.routeText(saved))
+                await TripNotifications.shared.notifyDetected(saved, tenant: a.tenant)
             }
             refreshReminders()
             return trip
@@ -977,7 +1007,7 @@ final class TripCoordinator {
             tracks.addPending(trip, tenant: a.tenant)
             tracks.save(track, tripId: trip.id, tenant: a.tenant, vehicleId: a.vehicleId,
                         confirmed: trip.status == "confirmed")
-            lastError = "Fahrt gespeichert – erscheint beim Öffnen von Mandant „\(a.tenant)“."
+            lastError = "Fahrt gespeichert – erscheint beim Öffnen von Mandant «\(a.tenant)»."
             return trip
         }
         lastError = "Fahrt konnte nicht gespeichert werden (nicht angemeldet oder keine Schreibberechtigung)."

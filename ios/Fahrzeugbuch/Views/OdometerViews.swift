@@ -173,6 +173,7 @@ struct OdometerFormView: View {
                 }
             }
             .navigationTitle(reading == nil ? "Kilometerstand" : "Kilometerstand bearbeiten")
+            .keyboardDoneToolbar()   // Zahlentastatur ohne Eingabetaste (U7)
             .formToolbar(canSave: store.canWrite && km.asInt != nil
                             && (!reasonRequired || CorrectionReason.isValid(reason)),
                          hasChanges: hasChanges, save: save)

@@ -85,7 +85,7 @@ struct ServerQRScannerView: View {
                         Label("Kamera-Scan nicht verfügbar", systemImage: "qrcode.viewfinder")
                     } description: {
                         Text(checkedCamera
-                             ? "Wähle ein Foto oder einen Bildschirmfoto des QR-Codes aus der Mediathek."
+                             ? "Wähle ein Foto oder ein Bildschirmfoto des QR-Codes aus der Mediathek."
                              : "Kamera wird vorbereitet …")
                     }
                 }

@@ -204,6 +204,20 @@ final class CarConnectionMonitor {
         current = connectionNow()
     }
 
+    /// Start vor der ersten Entsperrung (Q6): Modus und gelernte Geräte waren nicht lesbar → jetzt laden
+    /// (ohne Ereignis; die Automatik prüft die Route beim nächsten Weck-Ereignis).
+    func reloadAfterFirstUnlock() {
+        let defaults = UserDefaults.standard
+        if let data = defaults.data(forKey: Keys.devices),
+           let list = try? JSONDecoder().decode([CarDevice].self, from: data) {
+            devices = list
+        }
+        let storedVehicle = defaults.string(forKey: Keys.carPlayVehicle)
+        if storedVehicle != carPlayVehicleId { carPlayVehicleId = storedVehicle }
+        mode = defaults.string(forKey: Keys.mode).flatMap(CarDetectionMode.init(rawValue:)) ?? .off
+        refresh(emit: false)
+    }
+
     // MARK: Abfrage
 
     /// Ausgänge der aktuellen Audio-Route.

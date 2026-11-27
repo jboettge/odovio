@@ -13,6 +13,7 @@ final class AppSettings {
     /// zusätzlich an den Server gebunden (`TokenBinding`). Lokale Daten entfernt `changeServer(to:)`.
     var serverURL: String {
         didSet {
+            guard persists else { return }   // Nachladen nach der ersten Entsperrung (Q6)
             UserDefaults.standard.set(serverURL, forKey: "serverURL")
             if TokenBinding.normalize(oldValue) != TokenBinding.normalize(serverURL) {
                 auth.clearSession()
@@ -25,12 +26,12 @@ final class AppSettings {
     /// Betriebsart; `nil` = noch nicht gewählt (UI zeigt die Auswahl). Bestehende Installationen mit
     /// Server-URL gelten als `.server`.
     var mode: AppMode? {
-        didSet { UserDefaults.standard.set(mode?.rawValue, forKey: Keys.mode) }
+        didSet { if persists { UserDefaults.standard.set(mode?.rawValue, forKey: Keys.mode) } }
     }
 
     /// Lokalmodus: Start/Ziel per Apple-Geocoding (nur Gemeinde/Strasse; Default aus)
     var useAppleGeocoding: Bool {
-        didSet { UserDefaults.standard.set(useAppleGeocoding, forKey: Keys.appleGeocoding) }
+        didSet { if persists { UserDefaults.standard.set(useAppleGeocoding, forKey: Keys.appleGeocoding) } }
     }
 
     /// Hinweis nach einem Moduswechsel (z. B. verworfene ausstehende Änderungen)
@@ -38,6 +39,16 @@ final class AppSettings {
 
     /// Anzeigename des angemeldeten Benutzers (aus /api/me, neuere Server)
     private(set) var displayName: String?
+
+    /// Start vor der ersten Entsperrung nach einem Neustart (Q6): Einstellungen und Anmeldung sind noch nicht
+    /// lesbar. Die UI wartet (keine Betriebsart-Auswahl), nichts wird gespeichert; `finishFirstUnlock()` lädt nach.
+    private(set) var awaitingFirstUnlock = false
+    /// Werte werden gerade aus den UserDefaults übernommen (didSet schreibt nicht zurück)
+    @ObservationIgnored private var restoring = false
+    @ObservationIgnored private var unlockObserver: NSObjectProtocol?
+
+    /// Änderungen speichern? Nicht während des Wartens auf die erste Entsperrung bzw. beim Nachladen.
+    private var persists: Bool { !restoring && !awaitingFirstUnlock }
 
     private enum Keys {
         static let mode = "appMode"
@@ -59,13 +70,16 @@ final class AppSettings {
     @ObservationIgnored private let monitor = NWPathMonitor()
 
     init() {
+        // Vor der ersten Entsperrung (Q6) liefern die UserDefaults nur Standardwerte → nichts ableiten/speichern
+        let locked = FirstUnlock.isActive
         let defaults = UserDefaults.standard
         let storedURL = defaults.string(forKey: "serverURL") ?? ""
         serverURL = storedURL
         let storedMode = defaults.string(forKey: Keys.mode).flatMap(AppMode.init(rawValue:))
         let initialMode: AppMode? = storedMode ?? (storedURL.isEmpty ? nil : .server)   // bestehende Installation → Server
         mode = initialMode
-        if storedMode == nil, let initialMode { defaults.set(initialMode.rawValue, forKey: Keys.mode) }
+        awaitingFirstUnlock = locked
+        if !locked, storedMode == nil, let initialMode { defaults.set(initialMode.rawValue, forKey: Keys.mode) }
         useAppleGeocoding = defaults.bool(forKey: Keys.appleGeocoding)
         displayName = defaults.string(forKey: Keys.displayName)
         if let data = UserDefaults.standard.data(forKey: "tenants"),
@@ -85,7 +99,47 @@ final class AppSettings {
             return
         }
         #endif
+        if locked {
+            observeFirstUnlock()
+            return
+        }
         if initialMode == .local { openLocalStore() }
+    }
+
+    // MARK: Erste Entsperrung (Q6)
+
+    private func observeFirstUnlock() {
+        unlockObserver = NotificationCenter.default.addObserver(
+            forName: UIApplication.protectedDataDidBecomeAvailableNotification, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.finishFirstUnlock() }
+        }
+    }
+
+    /// Nach der ersten Entsperrung: Einstellungen, Mandanten-Cache und Anmeldung laden, danach Lokalmodus bzw.
+    /// Fahrtenbuch (Automatik) neu einrichten. Ohne Wirkung, solange die Daten noch gesperrt sind.
+    func finishFirstUnlock() {
+        guard awaitingFirstUnlock, UIApplication.shared.isProtectedDataAvailable else { return }
+        if let unlockObserver { NotificationCenter.default.removeObserver(unlockObserver) }
+        unlockObserver = nil
+        let defaults = UserDefaults.standard
+        let storedURL = defaults.string(forKey: "serverURL") ?? ""
+        let storedMode = defaults.string(forKey: Keys.mode).flatMap(AppMode.init(rawValue:))
+        let initialMode: AppMode? = storedMode ?? (storedURL.isEmpty ? nil : .server)
+        restoring = true
+        serverURL = storedURL   // ohne Abmelden (didSet): gespeicherter Stand, keine Änderung
+        mode = initialMode
+        useAppleGeocoding = defaults.bool(forKey: Keys.appleGeocoding)
+        restoring = false
+        if storedMode == nil, let initialMode { defaults.set(initialMode.rawValue, forKey: Keys.mode) }
+        displayName = defaults.string(forKey: Keys.displayName)
+        if let data = defaults.data(forKey: "tenants"),
+           let cached = try? JSONDecoder().decode([TenantInfo].self, from: data) {
+            tenants = cached
+        }
+        auth.reloadAfterFirstUnlock()
+        awaitingFirstUnlock = false
+        if initialMode == .local { openLocalStore() }
+        TripCoordinator.shared.reloadAfterFirstUnlock(settings: self)
     }
 
     #if DEBUG
@@ -166,6 +220,7 @@ final class AppSettings {
     func selectTenant(_ t: TenantInfo) {
         if isLocal { return }   // Lokalmodus: nur das lokale Fahrzeugbuch
         if store?.tenant == t && store?.isLocal == false { return }
+        store?.flush()   // Mandantenwechsel: ausstehende Änderungen des bisherigen Mandanten sofort sichern (Q14)
         currentTenantSlug = t.slug
         let provider: @MainActor () -> APIClient = { [weak self] in
             self?.api ?? APIClient(baseURL: URL(string: "http://localhost")!) { _ in throw AuthError.notLoggedIn }
@@ -201,6 +256,7 @@ final class AppSettings {
     /// geplante/zugestellte Mitteilungen, URL-Cache und Cookies.
     func resetLocalData() {
         TripCoordinator.shared.resetLocalData()   // laufende Aufzeichnung verwerfen, Tracks löschen
+        CrashReporter.deleteAll()   // Absturzberichte gehören zum Gerätezustand des bisherigen Benutzers (I5)
         store = nil
         tenants = []
         tenantsLoaded = false
@@ -292,7 +348,7 @@ final class AppSettings {
     func migrateLocalToServer(target: TenantInfo) async throws -> MigrationReport {
         guard isConfigured, auth.isLoggedIn else { throw AuthError.notLoggedIn }
         guard target.canWrite else {
-            throw APIError(status: 403, message: "Keine Schreibberechtigung für Mandant „\(target.slug)“.")
+            throw APIError(status: 403, message: "Keine Schreibberechtigung für Mandant «\(target.slug)».")
         }
         guard TenantStore.hasLocalData() else {
             throw APIError(status: 404, message: "Keine lokalen Daten vorhanden.")
@@ -418,14 +474,24 @@ enum Keychain {
          kSecAttrAccount as String: key]
     }
 
-    static func set(_ value: String, for key: String) {
-        SecItemDelete(query(key) as CFDictionary)
-        guard !value.isEmpty else { return }
-        var add = query(key)
-        add[kSecValueData as String] = Data(value.utf8)
+    /// Wert setzen (leer = löschen). Rückgabe: gespeichert bzw. gelöscht (Q14). Ein bestehender Eintrag wird
+    /// aktualisiert statt zuerst gelöscht – schlägt das Schreiben fehl, bleibt der bisherige Wert erhalten.
+    @discardableResult
+    static func set(_ value: String, for key: String) -> Bool {
+        guard !value.isEmpty else {
+            let status = SecItemDelete(query(key) as CFDictionary)
+            return status == errSecSuccess || status == errSecItemNotFound
+        }
+        let data = Data(value.utf8)
         // Nur dieses Gerät: Token wandert nicht in Backups/auf andere Geräte
-        add[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-        SecItemAdd(add as CFDictionary, nil)
+        let attributes: [String: Any] = [kSecValueData as String: data,
+                                         kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly]
+        let updated = SecItemUpdate(query(key) as CFDictionary, attributes as CFDictionary)
+        if updated == errSecSuccess { return true }
+        guard updated == errSecItemNotFound else { return false }
+        var add = query(key)
+        for (k, v) in attributes { add[k] = v }
+        return SecItemAdd(add as CFDictionary, nil) == errSecSuccess
     }
 
     static func get(_ key: String) -> String? {
