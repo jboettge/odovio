@@ -15,7 +15,7 @@ Deutsch (Schweizer Schreibweise, `53’410 km`, `CHF 1’234.50`, `25.11.2026`).
 | `/aktivitaet` | Feed mit Filter und Nachladen, Verlauf je Eintrag (Seitenpanel) | Lesen |
 | `/integritaet` | Prüfung, Ergebnis, Anker, Grenzen | Lesen |
 | `/stammdaten/{fahrzeuge,orte,kunden,regeln,steuerparameter,material}` | ansehen (Lesen) bzw. erfassen/bearbeiten/stornieren (Bearbeiten) | Lesen |
-| `/verwaltung/mitglieder` | Mitglieder einladen, Rolle ändern, entfernen | Verwalten |
+| `/verwaltung/mitglieder` | Mitglieder einladen, Rolle ändern (Auswahl → «Übernehmen»; eigene Herabstufung/Entfernung mit zusätzlicher Bestätigung, eigene Zeile «(du)»), entfernen | Verwalten |
 | `/konto` | Name, Fahrzeugbücher/Rollen, Begriffe, Abmelden | angemeldet |
 
 Rollen: `admin` (Verwalten) ⊇ `write` (Bearbeiten) ⊇ `read` (Lesen). Router-Guards prüfen die Mindestrolle; nicht erlaubte
@@ -25,7 +25,10 @@ Login (Rücksprung über den OIDC-`state`), optional mit Fahrzeugbuch: `/verwalt
 
 Schreibaktionen laufen über `POST /api/t/{t}/sync` (eine Op je Aktion, Feldgrenzen wie die Server-Schemas, ganzes
 Objekt wird gesendet), danach wird inkrementell ab Cursor neu geladen. Stornos in abgeschlossenen Monaten verlangen
-eine Begründung (≥ 10 Zeichen).
+eine Begründung (≥ 10 Zeichen). Der Editor legt `id` (Neuanlage) und `op_id` beim Öffnen fest: ein erneutes «Speichern»
+nach einem Verbindungsfehler sendet dieselbe Op (Server dedupliziert über `op_id`, keine Doppelanlage); nach Erfolg oder
+geändertem Inhalt gibt es eine neue `op_id`. Der Fahrzeugbuch-Wechsler wechselt per Maus/Touch sofort, per Tastatur erst
+mit Enter bzw. «Wechseln» (Pfeiltasten wählen nur vor). Fehler-Toasts schliessen sich nicht automatisch.
 
 ## Entwicklung
 
@@ -60,7 +63,8 @@ Demo-Benutzer (Auswahl auf der Mock-Anmeldeseite):
 | `neu` Nora Neu | – (zum Einladen) |
 
 Teststeuerung: `POST /__mock/reset`, `POST /__mock/config` (`{"members501":true}`, `{"rate429":"verify"}`,
-`{"tokenTtl":30}`), `POST /__mock/expire-tokens`. Umgebungsvariablen: `MOCK_TOKEN_TTL`, `MOCK_PAGE_MAX`, `MOCK_SEED`.
+`{"tokenTtl":30}`, `{"dropResponseOnce":true}` = nächsten Sync anwenden, Antwort aber abbrechen), `POST /__mock/expire-tokens`.
+Mitglieds-IDs entsprechen wie beim Server der Keycloak-Benutzer-ID (`sub`). Umgebungsvariablen: `MOCK_TOKEN_TTL`, `MOCK_PAGE_MAX`, `MOCK_SEED`.
 `--seed large` (bzw. `npm run mock:large`) ersetzt «privat» durch einen Lasttest-Bestand (siehe Skalierung).
 
 ## Build, Tests
@@ -80,7 +84,9 @@ npm run preview       # dist/ über den Mock (http://127.0.0.1:4319)
   inkl. Fallback, virtuelles Scrollen mit ARIA, Seitenwahl, Entprellung, Diagramm-Verdichtung, Beleg-Cache,
   Vorkomprimierung und Budget-Skript).
 - `npm run e2e`: Playwright-Projekt `functional` gegen `mock/server.mjs --static dist` (Login mit PKCE, Deep-Links,
-  Rollen, Monatsabschluss, Stammdaten-Sync, Mitglieder, 401-Refresh, 429, Downloads, Belege, vorkomprimierte Assets)
+  Rollen, Monatsabschluss, Stammdaten-Sync inkl. verlorener Antwort, Mitglieder inkl. Übernehmen/Selbst-Herabstufung,
+  Fahrzeugbuch-Wechsler per Tastatur, Reflow 390 px ohne horizontales Scrollen, 401-Refresh, 429, Downloads, Belege,
+  vorkomprimierte Assets)
   und Projekt `perf` gegen `--seed large` (`tests/e2e/large-data.perf.spec.ts`). Jeder Test schlägt fehl, wenn die
   Konsole einen CSP-Verstoss oder einen Seitenfehler meldet.
 

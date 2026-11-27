@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, reactive, ref, watch } from 'vue'
+import { useRouter } from 'vue-router'
 import PageHeader from '../components/PageHeader.vue'
 import AlertBox from '../components/AlertBox.vue'
 import Field from '../components/Field.vue'
@@ -10,14 +11,17 @@ import ConfirmDialog from '../components/ConfirmDialog.vue'
 import { endpoints } from '../api/endpoints'
 import { ApiError } from '../api/client'
 import type { Member, MemberList, Role } from '../api/types'
-import { session } from '../store/session'
+import { loadMe, role as myRole, session } from '../store/session'
 import { notify, errorText } from '../store/toasts'
-import { ROLE_DESCRIPTIONS, ROLE_LABELS } from '../lib/roles'
+import { isAdmin, lostRights, ROLE_DESCRIPTIONS, ROLE_LABELS } from '../lib/roles'
 import { relative } from '../lib/format'
 
 const ROLES: Role[] = ['admin', 'write', 'read']
 const SOURCE_LABELS: Record<string, string> = { keycloak: 'Keycloak', activity: 'aus Aktivität', ldap: 'LDAP' }
 const label = (m: Member) => m.name || m.username || 'Unbekannt'
+/** eigene Zeile: Mitglieds-ID = Keycloak-Benutzer-ID = `sub` */
+const isSelf = (m: Member) => Boolean(session.me?.sub) && m.id === session.me?.sub
+const router = useRouter()
 const list = ref<MemberList | null>(null)
 const loading = ref(false)
 const error = ref<string | null>(null)
@@ -75,21 +79,57 @@ async function invite() {
   }
 }
 
-// Rolle ändern
+// Rolle ändern: Auswahl ist zuerst nur ein Entwurf (Pfeiltasten im Select ändern nichts), erst «Übernehmen» speichert.
+const drafts = reactive<Record<string, Role>>({})
 const rowBusy = ref<string | null>(null)
+function pick(m: Member, r: Role) {
+  if (r === m.role) delete drafts[m.id]
+  else drafts[m.id] = r
+}
+function discard(m: Member) {
+  delete drafts[m.id]
+}
+
+/** Eigene Herabstufung: zusätzliche Bestätigung. */
+const selfChange = ref<{ m: Member; to: Role } | null>(null)
+const selfLoss = computed(() => (selfChange.value ? lostRights(selfChange.value.m.role, selfChange.value.to) : null))
+function apply(m: Member) {
+  const r = drafts[m.id]
+  if (!r) return
+  if (isSelf(m) && lostRights(m.role, r)) {
+    selfChange.value = { m, to: r }
+    return
+  }
+  void changeRole(m, r)
+}
+
+/** Nach einer Änderung an der eigenen Mitgliedschaft: Rechte neu laden, Seite ggf. verlassen. */
+async function afterSelfChange() {
+  await loadMe(true).catch(() => undefined)
+  if (!isAdmin(myRole.value)) await router.push(session.tenant ? '/uebersicht' : '/')
+}
+
 async function changeRole(m: Member, r: Role) {
   if (!session.tenant || r === m.role) return
   rowBusy.value = m.id
   try {
     await endpoints.setMemberRole(session.tenant, m.id, r)
     notify(`Rolle von ${label(m)}: ${ROLE_LABELS[r]}`)
-    await load()
+    if (isSelf(m)) await afterSelfChange()
+    else await load()
   } catch (e) {
-    notify(handle(e), 'error', 8000)
+    notify(handle(e), 'error')
     await load()
   } finally {
+    // Auswahl zeigt danach wieder die tatsächliche Rolle
+    delete drafts[m.id]
     rowBusy.value = null
   }
+}
+async function confirmSelfChange() {
+  const c = selfChange.value
+  selfChange.value = null
+  if (c) await changeRole(c.m, c.to)
 }
 
 // Entfernen
@@ -101,10 +141,12 @@ async function remove() {
   removeBusy.value = true
   removeError.value = null
   try {
-    await endpoints.removeMember(session.tenant, removing.value.id)
-    notify(`${label(removing.value)} entfernt`)
+    const m = removing.value
+    await endpoints.removeMember(session.tenant, m.id)
+    notify(`${label(m)} entfernt`)
     removing.value = null
-    await load()
+    if (isSelf(m)) await afterSelfChange()
+    else await load()
   } catch (e) {
     removeError.value = handle(e)
   } finally {
@@ -149,23 +191,28 @@ async function remove() {
           <thead><tr><th scope="col">Name</th><th scope="col">Benutzername</th><th scope="col">E-Mail</th><th scope="col">Rolle</th><th scope="col">Quelle</th><th scope="col">Zuletzt aktiv</th><th scope="col"><span class="sr-only">Aktionen</span></th></tr></thead>
           <tbody>
             <tr v-for="m in list.members" :key="m.id">
-              <td><strong>{{ label(m) }}</strong></td>
+              <td><strong>{{ label(m) }}</strong><span v-if="isSelf(m)" class="muted"> (du)</span></td>
               <td class="mono">{{ m.username || '–' }}</td>
               <td>{{ m.email || '–' }}</td>
               <td>
-                <template v-if="manageable && m.role && m.source !== 'activity'">
-                  <label :for="`role-${m.id}`" class="sr-only">Rolle von {{ label(m) }}</label>
-                  <select :id="`role-${m.id}`" class="select" :value="m.role" :disabled="rowBusy === m.id" @change="changeRole(m, ($event.target as HTMLSelectElement).value as Role)">
+                <div v-if="manageable && m.role && m.source !== 'activity'" class="role-edit">
+                  <label :for="`role-${m.id}`" class="sr-only">Rolle von {{ label(m) }}{{ isSelf(m) ? ' (du)' : '' }}</label>
+                  <select :id="`role-${m.id}`" class="select" :value="drafts[m.id] ?? m.role" :disabled="rowBusy === m.id" @change="pick(m, ($event.target as HTMLSelectElement).value as Role)">
                     <option v-for="r in ROLES" :key="r" :value="r">{{ ROLE_LABELS[r] }}</option>
                   </select>
-                </template>
+                  <template v-if="drafts[m.id]">
+                    <button type="button" class="btn btn-primary btn-sm" :disabled="rowBusy === m.id" :aria-label="`Rolle von ${label(m)} übernehmen: ${ROLE_LABELS[m.role]} → ${ROLE_LABELS[drafts[m.id]!]}`" @click="apply(m)">Übernehmen</button>
+                    <button type="button" class="btn btn-ghost btn-sm" :disabled="rowBusy === m.id" :aria-label="`Rollenänderung von ${label(m)} verwerfen`" @click="discard(m)">Verwerfen</button>
+                    <span class="muted small">bisher {{ ROLE_LABELS[m.role] }}</span>
+                  </template>
+                </div>
                 <RoleBadge v-else-if="m.role" :role="m.role" />
                 <span v-else class="muted">–</span>
               </td>
               <td><span class="badge badge-outline">{{ SOURCE_LABELS[m.source] ?? m.source }}</span></td>
               <td>{{ m.last_activity_at ? relative(m.last_activity_at) : '–' }}</td>
               <td class="actions">
-                <button v-if="manageable && m.source !== 'activity'" type="button" class="btn btn-ghost btn-sm" :aria-label="`${label(m)} entfernen`" @click="removing = m; removeError = null"><Icon name="trash" size="sm" />Entfernen</button>
+                <button v-if="manageable && m.source !== 'activity'" type="button" class="btn btn-ghost btn-sm" :aria-label="`${label(m)} entfernen`" @click="removing = m; removeError = null"><Icon name="trash" size="sm" />{{ isSelf(m) ? 'Mich entfernen' : 'Entfernen' }}</button>
               </td>
             </tr>
           </tbody>
@@ -174,7 +221,21 @@ async function remove() {
     </section>
   </template>
 
-  <ConfirmDialog :open="removing !== null" title="Mitglied entfernen" confirm-label="Entfernen" danger :busy="removeBusy" :error="removeError" @close="removing = null" @confirm="remove">
-    <p><strong>{{ removing ? label(removing) : '' }}</strong> verliert den Zugriff auf das Fahrzeugbuch «{{ session.tenant }}». Erfasste Einträge bleiben erhalten.</p>
+  <ConfirmDialog :open="removing !== null" :title="removing && isSelf(removing) ? 'Dich selbst entfernen' : 'Mitglied entfernen'" :confirm-label="removing && isSelf(removing) ? 'Mich entfernen' : 'Entfernen'" danger :busy="removeBusy" :error="removeError" @close="removing = null" @confirm="remove">
+    <template v-if="removing && isSelf(removing)">
+      <AlertBox kind="danger" title="Du entfernst dich selbst">
+        <p>Du verlierst damit sofort den Zugriff auf das Fahrzeugbuch «{{ session.tenant }}» und kannst das nicht selbst rückgängig machen. Erfasste Einträge bleiben erhalten.</p>
+      </AlertBox>
+    </template>
+    <p v-else><strong>{{ removing ? label(removing) : '' }}</strong> verliert den Zugriff auf das Fahrzeugbuch «{{ session.tenant }}». Erfasste Einträge bleiben erhalten.</p>
+  </ConfirmDialog>
+
+  <ConfirmDialog :open="selfChange !== null" title="Eigene Rolle ändern" confirm-label="Rolle trotzdem ändern" danger @close="selfChange = null" @confirm="confirmSelfChange">
+    <template v-if="selfChange">
+      <p>Deine Rolle im Fahrzeugbuch «{{ session.tenant }}»: <strong>{{ selfChange.m.role ? ROLE_LABELS[selfChange.m.role] : '–' }}</strong> → <strong>{{ ROLE_LABELS[selfChange.to] }}</strong></p>
+      <AlertBox kind="danger" title="Du stufst dich selbst herab">
+        <p>Du verlierst damit sofort {{ selfLoss }} und kannst das nicht selbst rückgängig machen.</p>
+      </AlertBox>
+    </template>
   </ConfirmDialog>
 </template>

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 // Bestätigung (z. B. Stornieren) mit optionaler/erforderlicher Begründung.
-import { computed, ref, watch } from 'vue'
+import { computed, ref, useId, watch } from 'vue'
 import Modal from './Modal.vue'
 import Field from './Field.vue'
 import AlertBox from './AlertBox.vue'
@@ -20,15 +20,20 @@ const props = withDefaults(
   { confirmLabel: 'Bestätigen', danger: false, reason: 'none', reasonHint: undefined, busy: false, error: null },
 )
 const emit = defineEmits<{ close: []; confirm: [reason: string] }>()
+// eindeutig je Instanz: mehrere ConfirmDialogs auf einer Seite (Submit-Knopf ist über form= verknüpft)
+const formId = `confirm-${useId()}`
 const text = ref('')
+const reasonError = ref<string | undefined>()
 watch(
   () => props.open,
   (o) => {
-    if (o) text.value = ''
+    if (o) {
+      text.value = ''
+      reasonError.value = undefined
+    }
   },
 )
 const tooShort = computed(() => props.reason === 'required' && text.value.trim().length < MIN_REASON)
-const reasonError = ref<string | undefined>()
 function submit() {
   if (tooShort.value) {
     reasonError.value = `Begründung mit mindestens ${MIN_REASON} Zeichen erforderlich`
@@ -41,7 +46,7 @@ function submit() {
 
 <template>
   <Modal :open="open" :title="title" @close="emit('close')">
-    <form id="confirm-form" class="stack" @submit.prevent="submit">
+    <form :id="formId" class="stack" @submit.prevent="submit">
       <slot />
       <Field
         v-if="reason !== 'none'"
@@ -57,7 +62,7 @@ function submit() {
     </form>
     <template #footer>
       <button type="button" class="btn" @click="emit('close')">Abbrechen</button>
-      <button type="submit" form="confirm-form" :class="['btn', danger ? 'btn-danger' : 'btn-primary']" :disabled="busy">
+      <button type="submit" :form="formId" :class="['btn', danger ? 'btn-danger' : 'btn-primary']" :disabled="busy">
         {{ busy ? 'Bitte warten …' : confirmLabel }}
       </button>
     </template>

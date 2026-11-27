@@ -431,9 +431,9 @@ export function buildDemo(now = new Date()) {
     }
 
     t.members = [
-      { id: 'm-jakob', username: 'jakob', name: jakob.name, email: jakob.email, role: 'admin', source: 'keycloak', last_activity_at: new Date(now.getTime() - 3_600_000).toISOString() },
-      { id: 'm-anna', username: 'anna', name: anna.name, email: anna.email, role: 'write', source: 'keycloak', last_activity_at: addDays(today, -2).toISOString() },
-      { id: 'm-treuhand', username: 'treuhand', name: USERS.treuhand.name, email: USERS.treuhand.email, role: 'read', source: 'keycloak', last_activity_at: addDays(today, -21).toISOString() },
+      { id: 'u-jakob', username: 'jakob', name: jakob.name, email: jakob.email, role: 'admin', source: 'keycloak', last_activity_at: new Date(now.getTime() - 3_600_000).toISOString() },
+      { id: 'u-anna', username: 'anna', name: anna.name, email: anna.email, role: 'write', source: 'keycloak', last_activity_at: addDays(today, -2).toISOString() },
+      { id: 'u-treuhand', username: 'treuhand', name: USERS.treuhand.name, email: USERS.treuhand.email, role: 'read', source: 'keycloak', last_activity_at: addDays(today, -21).toISOString() },
     ]
   }
 
@@ -458,9 +458,9 @@ export function buildDemo(now = new Date()) {
     for (const e of sim.events.sort((a, b) => a.when - b.when)) t.record(e.kind, e.row, 'create', lea.name, e.when)
     t.record('maintenance', { id: did(11), vehicle_id: caddy.id, date: isoDate(addDays(today, -60)), km: 18230 - 2300, title: 'Service', cost: 512.4, note: null, next_due_km: 18230 + 12000, next_due_date: null }, 'create', actor, addDays(today, -60))
     t.members = [
-      { id: 'm-jakob', username: 'jakob', name: jakob.name, email: jakob.email, role: 'admin', source: 'keycloak', last_activity_at: new Date(now.getTime() - 7_200_000).toISOString() },
-      { id: 'm-lea', username: 'lea', name: lea.name, email: lea.email, role: 'write', source: 'keycloak', last_activity_at: addDays(today, -1).toISOString() },
-      { id: 'm-treuhand', username: 'treuhand', name: USERS.treuhand.name, email: USERS.treuhand.email, role: 'read', source: 'keycloak', last_activity_at: null },
+      { id: 'u-jakob', username: 'jakob', name: jakob.name, email: jakob.email, role: 'admin', source: 'keycloak', last_activity_at: new Date(now.getTime() - 7_200_000).toISOString() },
+      { id: 'u-lea', username: 'lea', name: lea.name, email: lea.email, role: 'write', source: 'keycloak', last_activity_at: addDays(today, -1).toISOString() },
+      { id: 'u-treuhand', username: 'treuhand', name: USERS.treuhand.name, email: USERS.treuhand.email, role: 'read', source: 'keycloak', last_activity_at: null },
     ]
   }
 

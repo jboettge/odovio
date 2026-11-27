@@ -381,15 +381,24 @@ export class ApiClient {
 
   private async once<T>(method: string, url: string, opts: RequestOptions, signal?: AbortSignal): Promise<T> {
     const res = await this.fetchChecked(method, url, opts, signal)
+    // Verbindungsabbruch mitten in der Antwort = wie keine Antwort (nicht «unerwarteter Fehler»)
+    const body = async <B>(read: () => Promise<B>): Promise<B> => {
+      try {
+        return await read()
+      } catch (e) {
+        if (isAbort(e) || signal?.aborted) throw abortError()
+        throw new ApiError(0, errorMessage(0, null, null))
+      }
+    }
     if (opts.blob) {
       return {
-        blob: await res.blob(),
+        blob: await body(() => res.blob()),
         filename: filenameFromDisposition(res.headers.get('Content-Disposition')),
         contentType: res.headers.get('Content-Type') ?? 'application/octet-stream',
       } as T
     }
     if (res.status === 204) return undefined as T
-    const text = await res.text()
+    const text = await body(() => res.text())
     return (text ? JSON.parse(text) : undefined) as T
   }
 

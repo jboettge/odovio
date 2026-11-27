@@ -2,11 +2,12 @@
 import { computed, reactive, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import type { EntityMap, EntityName, FuelEntry, Maintenance, OdometerReading, Trip } from './api/types'
+import { ApiError } from './api/client'
 import { all, byId, ofVehicle, sync, SyncRejected } from './store/data'
 import { role, session } from './store/session'
 import { notify, errorText } from './store/toasts'
 import { canWrite } from './lib/roles'
-import { deleteOp, upsertOp, validate, type FieldErrors } from './lib/schema'
+import { deleteOp, upsertOp, uuid, validate, type FieldErrors } from './lib/schema'
 import { stornoNeedsReason } from './lib/trips'
 import { ENTITY_LABELS } from './lib/labels'
 
@@ -92,11 +93,21 @@ export function useEditor<E extends EntityName>(entity: E, defaults: () => Recor
     error: null as string | null,
   })
 
+  /*
+   * Idempotenz: id (bei Neuanlage) und op_id werden beim Öffnen festgelegt. Ein erneutes «Speichern» nach einem
+   * Fehler ohne Antwort (Verbindung weg, Antwort verloren) sendet dieselbe Op – hatte der Server sie schon
+   * angewendet, meldet er «duplicate» statt einen zweiten Datensatz anzulegen. Wurde der Inhalt seither geändert,
+   * gibt es eine neue op_id (sonst würde der Server die Änderung als Duplikat verwerfen), aber dieselbe id.
+   */
+  let attempt = { id: '', opId: '', sent: null as string | null }
+
   function create(extra: Record<string, unknown> = {}) {
+    attempt = { id: uuid(), opId: uuid(), sent: null }
     Object.assign(state, { open: true, id: null, version: null, form: { ...defaults(), ...extra }, errors: {}, error: null })
   }
 
   function edit(rec: EntityMap[E]) {
+    attempt = { id: rec.id, opId: uuid(), sent: null }
     Object.assign(state, { open: true, id: rec.id, version: rec.version, form: { ...rec }, errors: {}, error: null })
   }
 
@@ -108,15 +119,28 @@ export function useEditor<E extends EntityName>(entity: E, defaults: () => Recor
       state.error = 'Bitte die markierten Felder prüfen.'
       return false
     }
+    if (state.busy) return false
     state.busy = true
     state.error = null
+    if (!attempt.id) attempt = { id: state.id ?? uuid(), opId: uuid(), sent: null }
+    const op = upsertOp(entity, attempt.id, data, state.version, undefined, attempt.opId)
+    const fingerprint = JSON.stringify([op.base_version, op.data])
+    if (attempt.sent !== null && attempt.sent !== fingerprint) op.op_id = attempt.opId = uuid()
+    attempt.sent = fingerprint
     try {
-      const res = await sync(session.tenant, [upsertOp(entity, state.id, data, state.version)])
+      const res = await sync(session.tenant, [op])
+      attempt = { id: attempt.id, opId: uuid(), sent: null }
       notify(res.conflicts ? 'Gespeichert – gleichzeitige Änderung überschrieben (im Verlauf sichtbar)' : 'Gespeichert', res.conflicts ? 'info' : 'ok')
       state.open = false
       return true
     } catch (e) {
-      state.error = e instanceof SyncRejected ? `Vom Server abgelehnt: ${e.message}` : errorText(e)
+      const unclear = e instanceof ApiError && (e.status === 0 || e.status >= 500)
+      state.error =
+        e instanceof SyncRejected
+          ? `Vom Server abgelehnt: ${e.message}`
+          : unclear
+            ? `${errorText(e)} Erneutes Speichern legt nichts doppelt an.`
+            : errorText(e)
       return false
     } finally {
       state.busy = false

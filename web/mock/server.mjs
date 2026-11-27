@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // Mock-Server für Entwicklung und E2E-Tests: OIDC-Issuer (Code + PKCE), Fahrzeugbuch-API, statische SPA mit CSP.
 //   node mock/server.mjs [--port 8787] [--static dist] [--seed large]
-// Teststeuerung: POST /__mock/reset, POST /__mock/config {members501, rate429, tokenTtl}, POST /__mock/expire-tokens
+// Teststeuerung: POST /__mock/reset, POST /__mock/config {members501, rate429, tokenTtl, dropResponseOnce}, POST /__mock/expire-tokens
+// dropResponseOnce: nächsten POST /sync anwenden, aber die Verbindung ohne Antwort schliessen (verlorene Antwort)
 // --seed large: Lasttest-Bestand (Mandant «privat»: 3 Fahrzeuge × 30k Fahrten, 5k Tankvorgänge, > 90k Journal-Einträge).
 // --static: liefert vorkomprimierte Varianten (<datei>.br/.gz aus scripts/compress.mjs) bei passendem Accept-Encoding.
 import { createServer } from 'node:http'
@@ -30,7 +31,7 @@ const APP_CLIENT = 'fahrzeugbuch-ios'
 // ---------- Zustand ----------
 let tenants = build()
 // Seitengrösse /changes: Demo klein (Paging wird getestet), grosser Bestand wie der Server (CHANGES_MAX 5000)
-let cfg = { members501: false, rate429: null, tokenTtl: Number(process.env.MOCK_TOKEN_TTL ?? 300), pageMax: Number(process.env.MOCK_PAGE_MAX ?? (SEED === 'large' ? 5000 : 400)) }
+let cfg = { members501: false, rate429: null, dropResponseOnce: false, tokenTtl: Number(process.env.MOCK_TOKEN_TTL ?? 300), pageMax: Number(process.env.MOCK_PAGE_MAX ?? (SEED === 'large' ? 5000 : 400)) }
 const codes = new Map() // code -> {user, client_id, challenge, redirect_uri, nonce}
 const tokens = new Map() // access -> {user, azp, exp}
 const refreshTokens = new Map() // refresh -> {user, azp}
@@ -38,7 +39,7 @@ const refreshTokens = new Map() // refresh -> {user, azp}
 function reset() {
   // grosser Bestand: nur Steuerung zurücksetzen (Neuaufbau dauert Sekunden; Perf-Tests schreiben nicht)
   if (SEED !== 'large') tenants = build()
-  cfg = { ...cfg, members501: false, rate429: null }
+  cfg = { ...cfg, members501: false, rate429: null, dropResponseOnce: false }
   for (const u of Object.values(USERS)) u.tenants = { ...ORIGINAL_TENANTS[u.username] }
 }
 const ORIGINAL_TENANTS = Object.fromEntries(Object.values(USERS).map((u) => [u.username, { ...u.tenants }]))
@@ -482,6 +483,14 @@ async function api(req, res, url) {
     if (rateLimited('sync')) return
     const body = await readBody(req)
     const results = (body.ops ?? []).map((op) => applyOp(t, user, tok.azp, op))
+    if (cfg.dropResponseOnce) {
+      // angewendet, aber die Antwort bricht nach den Headern ab: der Client sieht nur einen Netzwerkfehler.
+      // (Ein Abbruch ganz ohne Antwort würde Chromium auf einer Keep-alive-Verbindung still wiederholen lassen.)
+      cfg.dropResponseOnce = false
+      res.writeHead(200, { 'Content-Type': 'application/json', 'Content-Length': '4096' })
+      res.write('{"results":[', () => res.socket?.destroy())
+      return
+    }
     return json(res, 200, { results, cursor: t.seq })
   }
   if (rest[0] === 'vehicles' && rest[1]) {
@@ -585,7 +594,7 @@ async function api(req, res, url) {
       if (!u) return fail(res, 404, 'Benutzer in Keycloak nicht gefunden')
       if (!['admin', 'write', 'read'].includes(body.role)) return fail(res, 422, 'Rolle ungültig')
       if (t.members.some((m) => m.username === u.username)) return fail(res, 409, 'Bereits Mitglied')
-      const m = { id: `m-${u.username}`, username: u.username, name: u.name, email: u.email, role: body.role, source: 'keycloak', last_activity_at: null }
+      const m = { id: u.sub, username: u.username, name: u.name, email: u.email, role: body.role, source: 'keycloak', last_activity_at: null }
       t.members.push(m)
       u.tenants[slug] = body.role
       return json(res, 201, m)

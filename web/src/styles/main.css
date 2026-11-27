@@ -398,7 +398,9 @@ a:hover {
 .card-header .actions {
   margin-left: auto;
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
+  min-width: 0;
 }
 .card-flush {
   padding: 0;
@@ -430,10 +432,10 @@ a:hover {
   grid-template-columns: repeat(4, minmax(0, 1fr));
 }
 .grid-tiles {
-  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(320px, 100%), 1fr));
 }
 .grid-kpi {
-  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(180px, 100%), 1fr));
 }
 @media (max-width: 1100px) {
   .grid-4 {
@@ -447,7 +449,8 @@ a:hover {
   .grid-2,
   .grid-3,
   .grid-4 {
-    grid-template-columns: 1fr;
+    /* minmax(0, …): breite Inhalte (Tabellen, lange Werte) dürfen die Spalte nicht über 390 px aufweiten */
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 .stack {
@@ -476,6 +479,11 @@ a:hover {
 .mono {
   font-family: var(--mono);
   font-size: 0.85em;
+  /* lange Schlüssel/Hashes umbrechen statt die Seite zu verbreitern (in Tabellen scrollt der Container) */
+  overflow-wrap: anywhere;
+}
+.table .mono {
+  overflow-wrap: normal;
 }
 .nowrap {
   white-space: nowrap;
@@ -574,7 +582,7 @@ a:hover {
 }
 .dl {
   display: grid;
-  grid-template-columns: minmax(140px, max-content) 1fr;
+  grid-template-columns: minmax(min(140px, 40%), max-content) minmax(0, 1fr);
   gap: 8px 20px;
   margin: 0;
 }
@@ -583,6 +591,8 @@ a:hover {
 }
 .dl dd {
   margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .plate {
@@ -919,6 +929,8 @@ a:hover {
 
 /* ---------- Tabellen ---------- */
 .table-wrap {
+  /* position: hält absolut positionierte .sr-only-Labels im scrollenden Container (sonst Seitenbreite > 390 px) */
+  position: relative;
   overflow-x: auto;
   border: 1px solid var(--border);
   border-radius: var(--radius);
@@ -973,6 +985,15 @@ table.table {
 .table td.actions {
   white-space: nowrap;
   text-align: right;
+}
+.role-edit {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.role-edit .select {
+  width: auto;
 }
 .table tfoot td {
   font-weight: 650;

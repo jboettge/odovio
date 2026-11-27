@@ -33,6 +33,19 @@ export function isAdmin(role: Role | null | undefined): boolean {
   return hasRole(role, 'admin')
 }
 
+/**
+ * Welche Rechte gehen bei einem Rollenwechsel verloren? `null` = keine (gleich oder höher).
+ * Text für Bestätigungen («Du verlierst damit … sofort»).
+ */
+export function lostRights(from: Role | null | undefined, to: Role | null): string | null {
+  if (!from || !isRole(from)) return null
+  if (to === null) return 'den Zugriff auf das Fahrzeugbuch'
+  const lost: string[] = []
+  if (hasRole(from, 'admin') && !hasRole(to, 'admin')) lost.push('die Mitgliederverwaltung')
+  if (hasRole(from, 'write') && !hasRole(to, 'write')) lost.push('das Erfassen von Einträgen')
+  return lost.length ? lost.join(' und ') : null
+}
+
 export interface GateMeta {
   /** Seite ohne Anmeldung erreichbar (Start, Callback). */
   public?: boolean

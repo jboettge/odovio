@@ -265,9 +265,11 @@ export function upsertOp<E extends EntityName>(
   data: Record<string, unknown>,
   baseVersion: number | null,
   reason?: string,
+  /** feste op_id (Wiederholung desselben Speicherns nach verlorener Antwort → Server dedupliziert) */
+  opId?: string,
 ): SyncOp {
   const op: SyncOp = {
-    op_id: uuid(),
+    op_id: opId ?? uuid(),
     entity,
     id: id ?? uuid(),
     action: 'upsert',
