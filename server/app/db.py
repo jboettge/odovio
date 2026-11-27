@@ -8,6 +8,8 @@ PostgreSQL-Pool je Worker (Env, Defaults in Klammern):
                                              ohne max_prepared_statements)
 Verbindungsbedarf: WEB_CONCURRENCY × REPLICAS_HINT × (POOL + OVERFLOW) + Reserve ≤ PG_MAX_CONNECTIONS
 (Startprüfung in app.runtime).
+SQL-Parameter erscheinen nie in Fehlermeldungen/Logs (hide_parameters); Constraint-Fehler werden nur mit
+SQLSTATE/Constraint-Namen protokolliert (PostgreSQL-DETAIL enthielte die Zeilenwerte).
 """
 import os
 from contextlib import contextmanager
@@ -32,7 +34,7 @@ def engine_args(url: str) -> dict:
         db_path = url.split("///", 1)[-1]
         if db_path and db_path != ":memory:":
             Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-        return {"connect_args": {"check_same_thread": False}, "pool_pre_ping": True}
+        return {"connect_args": {"check_same_thread": False}, "pool_pre_ping": True, "hide_parameters": True}
     options = []
     if (st := env_int("DB_STATEMENT_TIMEOUT_MS", 30000)) > 0:
         options.append(f"-c statement_timeout={st}")
@@ -43,7 +45,8 @@ def engine_args(url: str) -> dict:
         connect_args["options"] = " ".join(options)
     if os.environ.get("DB_DISABLE_PREPARED") == "1" and url.startswith("postgresql+psycopg"):
         connect_args["prepare_threshold"] = None
-    return {"connect_args": connect_args, "pool_pre_ping": True, **pool_settings()}
+    # hide_parameters: Fehlermeldungen/Logs ohne SQL-Parameter (Zweck, Orte, Notizen)
+    return {"connect_args": connect_args, "pool_pre_ping": True, "hide_parameters": True, **pool_settings()}
 
 
 engine = create_engine(DATABASE_URL, **engine_args(DATABASE_URL))
@@ -89,3 +92,14 @@ def snapshot_session():
     bleiben lesbar (kein Expire)."""
     with SnapshotLocal() as session:
         yield session
+
+
+def db_error_code(e: Exception) -> str:
+    """Datenbankfehler fürs Log ohne Werte: Typ, SQLSTATE und Constraint-Name (keine Meldung/DETAIL)."""
+    orig = getattr(e, "orig", None)
+    parts = [type(orig or e).__name__]
+    if sqlstate := getattr(orig, "sqlstate", None):
+        parts.append(str(sqlstate))
+    if constraint := getattr(getattr(orig, "diag", None), "constraint_name", None):
+        parts.append(str(constraint))
+    return " ".join(parts)

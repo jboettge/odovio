@@ -63,6 +63,27 @@ def test_transient_db_error_aborts_whole_sync_with_503(client, monkeypatch):
     assert client.get(f"{T}/audit/verify").json()["ok"]
 
 
+def test_db_errors_logged_without_values(client, monkeypatch, caplog):
+    """X10/S14: weder SQL-Parameter noch PostgreSQL-DETAIL (Zeilenwerte) im Log."""
+    from sqlalchemy import text
+
+    from app.db import engine
+    assert engine.hide_parameters
+    with pytest.raises(IntegrityError) as e, engine.begin() as conn:
+        conn.execute(text("INSERT INTO tenants (id, slug, name, seq, head_hash) VALUES (:a, :b, :b, 0, 'x')"),
+                     [{"a": 900001, "b": "geheimer-zweck"}, {"a": 900001, "b": "geheimer-zweck"}])
+    assert "geheimer-zweck" not in str(e.value) and "hidden" in str(e.value)
+
+    def boom(db, tenant, user, o):
+        raise IntegrityError("INSERT INTO trips …", {"purpose": "Arzt Dr. Geheim"},
+                             Exception('Failing row contains (Arzt Dr. Geheim, Bahnhofstrasse 1)'))
+    monkeypatch.setattr(sync_module, "_apply", boom)
+    caplog.set_level("INFO")
+    res = sync(client, op("customer", uid(), {"name": "x"}))
+    assert res["results"][0]["error"] == "Datenbankfehler"
+    assert "Sync-Op" in caplog.text and "Geheim" not in caplog.text and "Bahnhofstrasse" not in caplog.text
+
+
 @pytest.mark.parametrize("path", ["/api/me", f"{T}/changes", "/api/checklist-templates"])
 def test_api_responses_not_cacheable(client, path):
     r = client.get(path)

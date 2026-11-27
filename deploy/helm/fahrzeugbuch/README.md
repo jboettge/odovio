@@ -48,7 +48,10 @@ Owner-Rolle; die App-Pods erhalten nur die App-Rolle `fahrzeugbuch_app` (`AUTO_M
 Job, Hook-Secret und Hook-ServiceAccount; ein Fehler bricht `helm upgrade` ab, die alten Pods laufen weiter
 (`kubectl logs job/<release>-fahrzeugbuch-migrate`). Argo CD führt die Hooks als PreSync aus.
 Mit PgBouncer: `database.migrationHost` direkt auf die Primary (`<cluster>-rw`).
-`/health/ready` meldet 503, solange das Schema nicht dem Stand des Images entspricht.
+`/health/ready` meldet 503, solange das Schema älter als der Stand des Images ist (`migration_pending`) oder
+neuer und nicht als kompatibel markiert (`schema_newer`); ein Valkey-Ausfall macht Pods nicht unbereit
+(200, `"degraded": true` – Rate-Limits dann fail-open, Sperren je Pod). Der Migrationslauf eines älteren Images
+ändert einen neueren Stand nie: kompatibel → Exit 0 ohne Änderung, sonst Abbruch.
 
 ## Skalieren
 
@@ -83,10 +86,27 @@ helm upgrade fahrzeugbuch … -f values.yaml          # Migration → Rollout
 helm history fahrzeugbuch -n $NS; helm rollback fahrzeugbuch <rev> -n $NS
 ```
 
-Rollback setzt nur Kubernetes-Ressourcen zurück, **nicht das DB-Schema** (keine Downgrade-Migration). Ist das
-ältere Image mit dem neuen Schema nicht verträglich, `/health/ready` bleibt 503 → DB aus dem Backup vor dem Upgrade
-zurückspielen. Deshalb vor jedem Upgrade sichern. Das Beleg-PVC bleibt bei `helm uninstall` erhalten
-(`storage.fs.persistence.retain`).
+Ablauf `helm upgrade`: Hook-Job migriert (pre-upgrade) → Rolling Update (`maxUnavailable 0`). Während des
+Rollouts laufen alte Pods schon auf dem neuen Schema. Sie bleiben bereit, wenn der neue Stand für sie
+**kompatibel** ist:
+
+| Neue Migration | alte Pods während Rollout / nach `helm rollback` |
+|---|---|
+| `compatible_with_previous = True` (rein additiv, z. B. neue Tabelle/Index, nullable Spalte ausserhalb der Snapshots) | bereit: der Migrationslauf vermerkt die kompatiblen älteren Stände am Tabellenkommentar von `alembic_version`, das alte Image liest ihn (`database: compatible_newer`, `degraded: true`) |
+| `False` (z. B. 0005 `vehicles.vin`: altes Image kennt `vin` nicht) | `/health/ready` 503 `schema_newer` → kurzer Ausfall bis die neuen Pods bereit sind; Rollback siehe unten |
+
+`helm rollback` setzt nur Kubernetes-Ressourcen zurück, **nicht das DB-Schema** (keine Downgrade-Migration; der
+Migrations-Hook läuft bei `rollback` nicht). Danach:
+
+1. Ist der neue Stand als kompatibel vermerkt → nichts zu tun, die alten Pods werden bereit.
+2. Sonst, wenn das ältere Image auf dem neuen Schema trotzdem laufen darf (Fachentscheid; Release-Notes der Migration
+   prüfen): `helm upgrade <release> <chart-version des Rollbacks> --reuse-values
+   --set-string config.SCHEMA_COMPATIBLE_NEWER=<neue Revision>` (bzw. `"*"`); Readiness → 200, `helm upgrade` mit dem
+   älteren Chart bricht im Migrations-Job dann nicht ab. Nach dem nächsten Upgrade wieder leeren.
+3. Sonst DB aus dem Backup vor dem Upgrade zurückspielen. Deshalb vor jedem Upgrade sichern.
+
+Neue Migrationen: `compatible_with_previous` im Revisionsmodul bewusst setzen (Vorlage `alembic/script.py.mako`,
+Default `False`). Das Beleg-PVC bleibt bei `helm uninstall` erhalten (`storage.fs.persistence.retain`).
 
 ## Backup
 

@@ -481,7 +481,7 @@ class RevisionOut(BaseModel):
 
 
 class AuditResult(BaseModel):
-    ok: bool                # Kette + Datenstand + Anker
+    ok: bool                # Kette + Datenstand + Anker + Belegdateien, Vollprüfung nicht überfällig
     chain_ok: bool
     state_ok: bool
     count: int
@@ -492,7 +492,9 @@ class AuditResult(BaseModel):
     signed: bool            # Anker-Signaturschlüssel konfiguriert
     anchors: int
     blobs_checked: int = 0  # Belegdateien mit geprüfter SHA-256
-    blobs_missing: int = 0  # Belege ohne (hochgeladene) Datei – kein Fehler
+    blobs_missing: int = 0  # Belege ohne je hochgeladene Datei – kein Fehler (fehlt eine vorhanden gewesene: Befund)
+    # fällige Vollprüfung seit > 2 × VERIFY_FULL_INTERVAL_S nicht ausgeführt (Lock belegt) → ok=false
+    full_overdue: bool = False
     # Inkrementell: Kette, geänderte Datensätze und Anker ab dieser Seq geprüft (davor bestätigt); None = voll
     incremental_from: int | None = None
     full_seq: int | None = None           # Stand (Revisionen) der letzten Vollprüfung

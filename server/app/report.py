@@ -159,12 +159,18 @@ def integrity_section(db: Session, tenant: models.Tenant) -> tuple[list, dict, m
     scope, note = checked_scope(audit)
     anchor = db.scalar(select(models.Anchor).where(models.Anchor.tenant_id == tenant.id)
                        .order_by(models.Anchor.seq.desc()).limit(1))
+    findings = [p for p in audit["problems"] if not (audit.get("full_overdue") and p.startswith("Vollprüfung"))]
     if audit["ok"]:
         status = "OK"
     elif not audit["chain_ok"]:
         status = f"FEHLER ab Seq {audit['broken_at']}: {audit['reason']}"
+    elif findings:
+        status = "FEHLER: " + "; ".join(findings[:3])
     else:
-        status = "FEHLER: " + "; ".join(audit["problems"][:3])
+        status = "NICHT BESTÄTIGT – Vollprüfung überfällig"
+    if audit.get("full_overdue"):
+        status += (f" (letzte Vollprüfung am {_when(audit.get('full_at'))}, fällig alle {full_interval() / 3600:g} h,"
+                   " nicht ausgeführt)")
     story = [
         Paragraph("Integrität", H2),
         _p(f"Geprüft: {scope} – {status}. Revisionen: {audit['count']}."),

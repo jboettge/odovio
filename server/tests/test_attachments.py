@@ -268,6 +268,32 @@ def test_upload_webhook(client, monkeypatch):
 
 
 # ---------- Integrität ----------
+def test_verify_detects_deleted_file(client, blob_dir):
+    """X3: Datei war vorhanden (Upload bzw. frühere Prüfung) und fehlt jetzt → Befund, inkrementell und voll;
+    nur nie hochgeladene Belege bleiben «ausstehend» (blobs_missing, kein Fehler)."""
+    vid = new_vehicle(client)
+    fid = fuel(client, vid)
+    early, late = new_attachment(client, meta(fuel_id=fid)), new_attachment(client, meta(fuel_id=fid))
+    pending = new_attachment(client, meta(b"nie hochgeladen", fuel_id=fid))
+    assert put(client, early).status_code == 201
+    v = client.get(f"{T}/audit/verify").json()                       # bestätigt early (blob_checks)
+    assert v["ok"] and v["blobs_checked"] == 1 and v["blobs_missing"] == 2
+    assert put(client, late).status_code == 201                      # noch nie geprüft, nur hochgeladen
+    (blob_dir / str(tenant_id()) / early).unlink()
+    (blob_dir / str(tenant_id()) / late).unlink()
+    for url in (f"{T}/audit/verify", f"{T}/audit/verify?full=1"):
+        v = client.get(url).json()
+        assert v["ok"] is False and v["chain_ok"] and v["state_ok"], url
+        assert {f"Beleg {early}: Datei fehlt (war vorhanden)", f"Beleg {late}: Datei fehlt (war vorhanden)"} \
+            <= set(v["problems"]), url
+        assert v["blobs_missing"] == 1 and not any(pending in p for p in v["problems"])
+    pdf = client.get(f"{T}/vehicles/{vid}/report.pdf?from=2026-01-01&to=2026-12-31")
+    assert pdf.status_code == 200 and "Datei fehlt" in pdf_text(pdf.content)
+    # Wiederherstellung aus dem Backup (gleicher Inhalt) → wieder ok
+    assert put(client, early).status_code == 201 and put(client, late).status_code == 201
+    assert client.get(f"{T}/audit/verify").json()["ok"] is True
+
+
 def test_verify_detects_changed_file_and_counts_missing(client, blob_dir):
     vid = new_vehicle(client)
     fid = fuel(client, vid)

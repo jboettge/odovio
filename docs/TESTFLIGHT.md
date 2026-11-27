@@ -4,7 +4,8 @@
 
 - Workflow: `.github/workflows/ios-testflight.yml`
 - Start: Tag `ios-vX.Y.Z` pushen (Version = Tag) **oder** Actions → *ios-testflight* → *Run workflow* (optional Eingabe «version»).
-- Schritte: Secrets prüfen → Xcode 26 → Zertifikat in temporären Schlüsselbund, App-Store-Profil installieren → `xcodegen generate` → Archive (Release, **manuell** signiert mit Apple Distribution) → IPA direkt aus dem Archiv → Signaturprüfung → Upload per `xcrun altool` (API-Key).
+- Schritte: Secrets prüfen → Xcode 26 → XcodeGen (gepinntes Release-Zip, Version + SHA-256) + `xcodegen generate` → **erst dann** API-Key ablegen, Zertifikat in temporären Schlüsselbund, App-Store-Profil installieren → Archive (Release, **manuell** signiert mit Apple Distribution) → IPA direkt aus dem Archiv → Signaturprüfung → Upload per `xcrun altool` (API-Key).
+- Härtung (Review 27.11.2026, X11): Job im Environment `testflight` (Freigabe, s. unten); Checkout mit `persist-credentials: false`; XcodeGen nicht per `brew` (ungepinnt), sondern `xcodegen.zip` von GitHub-Release `2.46.0` (Tag-Commit `8445e778451c7e44237b90281bde622d764b0084`) mit geprüfter SHA-256 – und vor dem Import der Schlüssel ausgeführt; `security import` nur mit `-T /usr/bin/codesign` (ohne `-T /usr/bin/security`, sonst könnte jeder Prozess des Runners den privaten Schlüssel per `security export` auslesen). XcodeGen-Update: Version und SHA-256 im Workflow anpassen (`shasum -a 256 xcodegen.zip`, Release mindestens zwei Wochen alt).
 - Build-Nummer: `run_number*10 + run_attempt`. Version: aus dem Tag (`ios-v1.0.0` → 1.0.0); Rückfall `MARKETING_VERSION` in `ios/project.yml`.
 - Nach dem Upload ist der Build nach 5–30 min in App Store Connect → TestFlight sichtbar.
 
@@ -68,11 +69,30 @@ Mit Mac alternativ: Schlüsselbundverwaltung → Zertifikatsassistent → «Zert
   2. App-Store-Profil neu erzeugen → Secret `ASC_PROFILE` ersetzen.
   3. In `ios/project.yml` `CODE_SIGN_ENTITLEMENTS` von `configs.Debug` nach `base` verschieben.
 
+## Environment `testflight` und Tag-Schutz (in GitHub einzurichten)
+
+Der Workflow läuft im Environment `testflight`. Solange es in GitHub nicht eingerichtet ist, legt GitHub es beim
+ersten Lauf **ohne Schutz** an – die Härtung greift erst mit diesen Einstellungen:
+
+1. Repo → *Settings* → *Environments* → `testflight` (anlegen bzw. öffnen):
+   - **Required reviewers**: sich selbst (bzw. eine zweite Person) eintragen; *Prevent self-review* nur, wenn eine
+     zweite Person freigibt.
+   - **Deployment branches and tags** → *Selected branches and tags* → Regel **Tag** `ios-v*` (für manuelle
+     Starts zusätzlich **Branch** `main`).
+   - **Environment secrets**: `ASC_ISSUER_ID`, `ASC_KEY_ID`, `ASC_PRIVATE_KEY`, `TEAM_ID`, `DIST_CERT_P12`,
+     `DIST_CERT_PASSWORD`, `ASC_PROFILE` hierher verschieben und die gleichnamigen **Repository-Secrets löschen**
+     (sonst sind sie weiterhin jedem Workflow zugänglich).
+2. Repo → *Settings* → *Rules* → *Rulesets* → *New tag ruleset*: Ziel `ios-v*`, Regeln *Restrict creations*,
+   *Restrict updates*, *Restrict deletions*; Bypass nur für Repository-Admins. So kann niemand sonst einen
+   Release-Tag setzen oder umhängen.
+3. Danach einen Lauf starten: der Job wartet auf «Review deployments» → freigeben.
+
 ## Checkliste Nutzer
 
 - [x] Gerät registriert (für Tests auf dem iPhone; für TestFlight nicht mehr nötig).
 - [x] API-Key (Rolle Admin) als Secrets.
 - [ ] **Distribution-Zertifikat + App-Store-Profil** erstellen und als Secrets hinterlegen (Abschnitt unten). Jährlich erneuern.
+- [ ] Environment `testflight` (Required Reviewers, nur Tag `ios-v*`/`main`, Environment-Secrets) und Tag-Ruleset `ios-v*` einrichten (Abschnitt oben).
 - [ ] Ersten Lauf starten und Ergebnis prüfen.
 - [ ] App Store Connect → App → **App-Datenschutz** ausfüllen, passend zum Manifest: Genauer Standort, Fotos oder Videos, Sonstige Nutzerinhalte, Benutzer-ID, Name, E-Mail-Adresse – jeweils «mit Identität verknüpft», «nicht für Tracking», Zweck «App-Funktionalität». Datenschutzerklärung-URL (z. B. https://www.odovio.ch/datenschutz) nötig.
 - [ ] TestFlight → **Testinformationen**: Beta-Beschreibung, Feedback-E-Mail, Kontakt.

@@ -32,7 +32,7 @@ def run_migrations_online() -> None:
         _run(connection)
         return
     url = os.environ.get("MIGRATION_DATABASE_URL") or os.environ["DATABASE_URL"]
-    engine = create_engine(url, poolclass=pool.NullPool)
+    engine = create_engine(url, poolclass=pool.NullPool, hide_parameters=True)
     with engine.connect() as conn:
         _run(conn)
 

@@ -19,6 +19,9 @@ revision: str = '0005'
 down_revision: str | None = '0004'
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
+# Läuft der Code der Vorgängerrevision unverändert auf diesem Stand? (Code von 0004 kennt vin nicht: Bearbeiten setzt keine VIN in die Revision, die Integritätsprüfung meldete Fahrzeuge mit VIN als abweichend)
+# → app.migrate: Readiness/Rollback eines älteren Images
+compatible_with_previous = False
 
 TABLE, COLUMN = 'vehicles', 'vin'
 

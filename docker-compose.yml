@@ -1,6 +1,7 @@
 # Portainer: Stacks → Add stack → Repository
 #   Compose path: docker-compose.yml
-#   Env: siehe .env.example (DB_PASSWORD, APP_DB_PASSWORD, OIDC_ISSUER, ANCHOR_SIGNING_KEY, API_BIND …)
+#   Env: siehe .env.example (Pflicht: DB_PASSWORD, APP_DB_PASSWORD, OIDC_ISSUER, ANCHOR_SIGNING_KEY,
+#   VALKEY_PASSWORD; dazu API_BIND, FORWARDED_ALLOW_IPS …). STRICT_CONFIG=1: unsichere Konfiguration → kein Start.
 # Valkey (gemeinsamer Zustand) läuft standardmässig mit (STATE_BACKEND=redis, VALKEY_PASSWORD Pflicht).
 # Vertikal skalieren (ein Host, mehrere Worker): WEB_CONCURRENCY=auto|N (+ Ressourcen, PG-Tuning)
 x-api: &api
@@ -87,6 +88,7 @@ services:
       MIGRATION_DATABASE_URL: postgresql+psycopg://fahrzeugbuch:${DB_PASSWORD}@db:5432/fahrzeugbuch
       DATABASE_URL: postgresql+psycopg://fahrzeugbuch_app:${APP_DB_PASSWORD:?APP_DB_PASSWORD fehlt}@db:5432/fahrzeugbuch
       APP_DB_PASSWORD: ${APP_DB_PASSWORD}
+      SCHEMA_COMPATIBLE_NEWER: ${SCHEMA_COMPATIBLE_NEWER:-}
     depends_on:
       db:
         condition: service_healthy
@@ -113,7 +115,8 @@ services:
       KC_ADMIN_CLIENT_ID: ${KC_ADMIN_CLIENT_ID:-}
       KC_ADMIN_CLIENT_SECRET: ${KC_ADMIN_CLIENT_SECRET:-}
       KC_ADMIN_TIMEOUT_S: ${KC_ADMIN_TIMEOUT_S:-5}
-      ANCHOR_SIGNING_KEY: ${ANCHOR_SIGNING_KEY:-}
+      # Pflicht (Revisionssicherheit: signierte Anker + Prüfstand); erzeugen: openssl rand -base64 32
+      ANCHOR_SIGNING_KEY: ${ANCHOR_SIGNING_KEY:?ANCHOR_SIGNING_KEY fehlt (openssl rand -base64 32)}
       # alte Public Keys nach Schlüsselwechsel (Base64, kommagetrennt) – alte Anker bleiben prüfbar
       ANCHOR_PUBLIC_KEYS: ${ANCHOR_PUBLIC_KEYS:-}
       ANCHOR_INTERVAL_MIN: ${ANCHOR_INTERVAL_MIN:-60}
@@ -124,6 +127,9 @@ services:
       FILES_DIR: /data/attachments
       MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES:-8388608}
       ATTACHMENT_QUOTA_MB: ${ATTACHMENT_QUOTA_MB:-2048}
+      # IP des Reverse Proxys, wie der Container sie sieht (Caddy auf dem Docker-Host: meist das Gateway des
+      # Docker-Netzes, z. B. 172.18.0.1 – nicht 127.0.0.1). Passt es nicht → Sicherheits-Log config_warning
+      # «X-Forwarded-For von nicht vertrautem Peer …» und alle Clients teilen die Proxy-IP.
       FORWARDED_ALLOW_IPS: ${FORWARDED_ALLOW_IPS:-127.0.0.1}
       DOCS_ENABLED: ${DOCS_ENABLED:-0}
       # ---------- Härtung (app/security.py) ----------
@@ -145,8 +151,9 @@ services:
       MAX_TOKEN_LIFETIME_S: ${MAX_TOKEN_LIFETIME_S:-3600}
       JSON_MAX_DEPTH: ${JSON_MAX_DEPTH:-32}
       JSON_MAX_ITEMS: ${JSON_MAX_ITEMS:-100000}
-      # 1 → unsichere Konfiguration (siehe Sicherheits-Log config_warning) verhindert den Start
-      STRICT_CONFIG: ${STRICT_CONFIG:-0}
+      # 1 (Standard) → unsichere Konfiguration (siehe Sicherheits-Log config_warning) verhindert den Start;
+      # 0 nur vorübergehend zur Fehlersuche
+      STRICT_CONFIG: ${STRICT_CONFIG:-1}
       # ---------- Skalierung (app/serve.py, app/state.py, app/db.py) ----------
       # Worker je Container: 1 | N | auto (= min(2 × cpus-Limit, 16)); > 1 nur mit STATE_BACKEND=redis
       WEB_CONCURRENCY: ${WEB_CONCURRENCY:-1}
@@ -155,6 +162,12 @@ services:
       GRACEFUL_TIMEOUT_S: ${GRACEFUL_TIMEOUT_S:-25}
       THREADPOOL_SIZE: ${THREADPOOL_SIZE:-40}
       PDF_CONCURRENCY: ${PDF_CONCURRENCY:-2}
+      # weitere PDF-Anfragen warten höchstens PDF_WAIT_S (≤ 1 s) und nur bis PDF_QUEUE wartende, sonst 503
+      PDF_WAIT_S: ${PDF_WAIT_S:-1}
+      PDF_QUEUE: ${PDF_QUEUE:-4}
+      # Rollback auf ein älteres Image nach einer Migration: neuere Revision(en) als kompatibel zulassen
+      # (kommagetrennt, "*" = jede unbekannte neuere); sonst /health/ready 503 und migrate bricht ab
+      SCHEMA_COMPATIBLE_NEWER: ${SCHEMA_COMPATIBLE_NEWER:-}
       # redis (Valkey, Standard) | memory (Einzelbetrieb ohne Valkey, nur 1 Worker)
       STATE_BACKEND: ${STATE_BACKEND:-redis}
       REDIS_URL: ${REDIS_URL:-redis://valkey:6379/0}
@@ -240,6 +253,10 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     networks: [internal, default]
+    # fail2ban (deploy/fail2ban, Variante A): Log-Treiber journald, damit der Jail nur diesen Container liest
+    # logging:
+    #   driver: journald
+    #   options: {tag: fahrzeugbuch-api}
 
   # Gemeinsamer, flüchtiger Zustand (Rate-Limits, Brute-Force-Sperren, Circuit-Breaker, Metrik-Schnappschüsse)
   # für alle Worker – standardmässig aktiv: VALKEY_PASSWORD (openssl rand -hex 32) setzen.

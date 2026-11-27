@@ -31,6 +31,7 @@ from . import models, privacy, schemas, security
 from .attachments import storage
 from .audit import append_revision
 from .auth import User
+from .db import db_error_code
 from .timeutil import local_month
 
 # Verweis auf ein anderes Objekt desselben Mandanten: (Feld, Modell, Pflicht).
@@ -368,10 +369,11 @@ def apply_ops(db: Session, tenant: models.Tenant, user: User, ops: list[schemas.
             sp.rollback()
             results.append({"op_id": op.op_id, "entity": op.entity, "id": op.id, "status": "rejected",
                             "error": str(e)})
-        except (IntegrityError, DataError):
-            # Wertebereich/Constraint: nur diese Op verwerfen, nicht den ganzen Batch
+        except (IntegrityError, DataError) as e:
+            # Wertebereich/Constraint: nur diese Op verwerfen, nicht den ganzen Batch. Log ohne Meldungstext
+            # (PostgreSQL-DETAIL «Failing row contains …» enthielte Zweck/Orte), nur SQLSTATE + Constraint
             sp.rollback()
-            log.exception("Sync-Op %s verworfen", op.op_id)
+            log.warning("Sync-Op %s verworfen (%s)", op.op_id, db_error_code(e))
             results.append({"op_id": op.op_id, "entity": op.entity, "id": op.id, "status": "rejected",
                             "error": "Datenbankfehler"})
     return results

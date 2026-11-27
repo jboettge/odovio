@@ -11,6 +11,7 @@ import threading
 import time
 import unicodedata
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass
 from typing import Annotated
@@ -27,13 +28,13 @@ from starlette.middleware.gzip import DEFAULT_EXCLUDED_CONTENT_TYPES, GZipMiddle
 
 from . import config, geo, intel, logfilter, members, metrics, models, privacy, runtime, schemas, security, state, web
 from .activity import ACTIVITY_LIMIT, ACTIVITY_MAX, activity
-from .attachments import EXTENSIONS, StorageError, content_matches, max_upload, quota_bytes, storage
+from .attachments import EXTENSIONS, StorageError, content_matches, mark_uploaded, max_upload, quota_bytes, storage
 from .auth import TENANT_SLUG, User, can_write, get_config, require_user
 from .db import engine, get_session, snapshot_session
 from .geo import UpstreamError
 from .integrity import VerifyBusy, key_id, maybe_anchor, public_key_b64, signing_key, verify_tenant
 from .logbook import build_logbook, build_year_report, iter_trips_csv
-from .migrate import create_schema, head_revision
+from .migrate import create_schema, head_revision, known_revisions, schema_state
 from .report import build_report
 from .schemas import is_month
 from .stats import VehicleData, current_km_by_vehicle, load_vehicle, vehicle_stats
@@ -426,19 +427,38 @@ def content_disposition(filename: str, disposition: str = "attachment") -> str:
 _pdf_lock = threading.Lock()
 _pdf_slots: threading.BoundedSemaphore | None = None
 _pdf_busy = 0
+_pdf_waiting = 0
+PDF_WAIT_MAX_S = 1.0
+
+
+def _pdf_busy_error() -> HTTPException:
+    return HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Berichtserzeugung ausgelastet – bitte erneut",
+                         headers={"Retry-After": "5"})
 
 
 @contextmanager
 def pdf_slot():
-    """PDF_CONCURRENCY (2) gleichzeitige PDF-Erzeugungen je Worker (Speicherspitzen); weitere warten bis
-    PDF_WAIT_S (20 s), dann 503 mit Retry-After."""
-    global _pdf_slots, _pdf_busy
+    """PDF_CONCURRENCY (2) gleichzeitige PDF-Erzeugungen je Worker (Speicherspitzen). Weitere warten höchstens
+    PDF_WAIT_S (Default 1 s, max. 1 s) und nur, solange höchstens PDF_QUEUE (Default 2 × PDF_CONCURRENCY)
+    Anfragen warten – sonst sofort 503 mit Retry-After. So blockieren wartende PDF-Anfragen nie den Threadpool
+    der übrigen sync-Endpunkte (/sync, /changes …)."""
+    global _pdf_slots, _pdf_busy, _pdf_waiting
+    concurrency = config.env_int("PDF_CONCURRENCY", 2, minimum=1)
     with _pdf_lock:
         if _pdf_slots is None:
-            _pdf_slots = threading.BoundedSemaphore(config.env_int("PDF_CONCURRENCY", 2, minimum=1))
-    if not _pdf_slots.acquire(timeout=config.env_float("PDF_WAIT_S", 20.0)):
-        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Berichtserzeugung ausgelastet – bitte erneut",
-                            headers={"Retry-After": "5"})
+            _pdf_slots = threading.BoundedSemaphore(concurrency)
+    if not _pdf_slots.acquire(blocking=False):
+        with _pdf_lock:
+            if _pdf_waiting >= config.env_int("PDF_QUEUE", 2 * concurrency, minimum=0):
+                raise _pdf_busy_error()
+            _pdf_waiting += 1
+        try:
+            got = _pdf_slots.acquire(timeout=min(config.env_float("PDF_WAIT_S", PDF_WAIT_MAX_S), PDF_WAIT_MAX_S))
+        finally:
+            with _pdf_lock:
+                _pdf_waiting -= 1
+        if not got:
+            raise _pdf_busy_error()
     with _pdf_lock:
         _pdf_busy += 1
     try:
@@ -469,6 +489,7 @@ def _gauges() -> list[tuple[str, str, dict, float]]:
         out.append(("fzb_threadpool_busy", "belegte Threads", {}, float(_thread_limiter.borrowed_tokens)))
         out.append(("fzb_threadpool_size", "Threadpool-Grösse", {}, float(_thread_limiter.total_tokens)))
     out.append(("fzb_pdf_in_progress", "laufende PDF-Erzeugungen", {}, float(_pdf_busy)))
+    out.append(("fzb_pdf_waiting", "auf einen PDF-Platz wartende Anfragen", {}, float(_pdf_waiting)))
     return out
 
 
@@ -476,53 +497,68 @@ metrics.register_gauge(_gauges)
 
 
 # ---------- öffentlich ----------
+# Health-Endpunkte sind async: sie laufen in der Event-Loop und hängen nie vom (evtl. ausgelasteten) Threadpool
+# der sync-Endpunkte ab. Die DB-Prüfung der Readiness läuft in einem eigenen Mini-Pool mit Zeitlimit.
+_health_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="fzb-health")
+
+
 @app.get("/health")
-def health():
+async def health():
     """Leichtgewichtig (keine DB/Netz): "degraded", wenn der gemeinsame Zustand zuletzt nicht erreichbar war."""
     shared = state.shared()
     return {"status": "degraded" if shared is not None and shared.degraded() else "ok"}
 
 
 @app.get("/health/live", include_in_schema=False)
-def health_live():
+async def health_live():
     """Liveness: Prozess antwortet (keine Abhängigkeiten)."""
     return {"status": "ok"}
 
 
 _head: str | None = None
+_known: frozenset[str] | None = None
 
 
-def _schema_ok() -> bool:
-    global _head
+def _schema_state() -> str:
+    """ok | compatible_newer | migration_pending | schema_newer (app.migrate.schema_state)."""
+    global _head, _known
     if _head is None:
-        _head = head_revision()
+        _head, _known = head_revision(), known_revisions()
     with engine.connect() as conn:
         try:
             current = conn.execute(text("SELECT version_num FROM alembic_version")).scalar()
         except SQLAlchemyError:
-            return False
-    return current == _head
+            return "migration_pending"
+        return schema_state(conn, current, _head, _known)
 
 
 @app.get("/health/ready", include_in_schema=False)
-def health_ready():
-    """Readiness: DB erreichbar und Schema = Alembic head, gemeinsamer Zustand erreichbar, kein SIGTERM."""
+async def health_ready():
+    """Readiness: DB erreichbar, Schema = Alembic head oder ein neuerer, als kompatibel markierter Stand
+    (Rolling Update/Rollback, app.migrate), kein SIGTERM. Valkey-Ausfall macht NICHT unbereit (alle Pods teilen
+    Valkey – sonst Totalausfall bei dessen Neustart): 200 mit "degraded": true; Rate-Limits laufen dann
+    fail-open, Sperren lokal (app.security)."""
     checks = {"shutdown": "ok" if not SHUTTING_DOWN.is_set() else "shutting_down"}
+    loop = asyncio.get_running_loop()
     try:
-        checks["database"] = "ok" if _schema_ok() else "migration_pending"
-    except SQLAlchemyError:
+        checks["database"] = await asyncio.wait_for(loop.run_in_executor(_health_pool, _schema_state),
+                                                    timeout=config.env_float("HEALTH_DB_TIMEOUT_S", 2.0))
+    except (SQLAlchemyError, TimeoutError):
         checks["database"] = "unavailable"
     shared = state.shared()
     if shared is None:
         checks["state"] = "memory"
     else:
         try:
-            shared.ping()
+            await shared.aping()
             checks["state"] = "ok"
         except state.StateUnavailable:
             checks["state"] = "unavailable"
-    ready = all(v in ("ok", "memory") for v in checks.values())
-    return JSONResponse({"status": "ready" if ready else "not_ready", **checks}, status_code=200 if ready else 503)
+    ready = checks["shutdown"] == "ok" and checks["database"] in ("ok", "compatible_newer")
+    body = {"status": "ready" if ready else "not_ready", **checks}
+    if checks["state"] == "unavailable" or checks["database"] == "compatible_newer":
+        body["degraded"] = True
+    return JSONResponse(body, status_code=200 if ready else 503)
 
 
 def _metrics_allowed(request: Request) -> bool:
@@ -771,8 +807,9 @@ def _storage_unavailable() -> HTTPException:
                          headers={"Retry-After": "30"})
 
 
-def _existing_blob(st, access: Access, att: models.Attachment):
+def _existing_blob(st, db: Session, access: Access, att: models.Attachment):
     if st.sha256(access.tenant.id, att.id) == att.sha256:
+        mark_uploaded(db, access.tenant.id, att.id, att.sha256)
         return JSONResponse({"stored": True, "existing": True}, status_code=status.HTTP_200_OK)
     log.error("Beleg %s: gespeicherte Datei weicht von der Prüfsumme ab – nicht überschrieben", att.id)
     raise _upload_rejected(status.HTTP_409_CONFLICT, "Datei existiert bereits mit anderem Inhalt", "exists")
@@ -811,7 +848,7 @@ def put_attachment_blob(aid: AttachmentId, request: Request, background: Backgro
     try:
         st = storage()
         if st.exists(access.tenant.id, att.id):
-            return _existing_blob(st, access, att)
+            return _existing_blob(st, db, access, att)
         if att.deleted:
             raise _upload_rejected(status.HTTP_409_CONFLICT, "Beleg storniert", "deleted")
         quota = quota_bytes()
@@ -820,12 +857,13 @@ def put_attachment_blob(aid: AttachmentId, request: Request, background: Backgro
                                    f"Speicherkontingent für Belege erschöpft (max. {quota // (1024 * 1024)} MB je "
                                    "Mandant)", "quota")
         if not st.put(access.tenant.id, att.id, body, att.mime, att.sha256):   # parallel gespeichert
-            return _existing_blob(st, access, att)
+            return _existing_blob(st, db, access, att)
     except StorageError as e:
         raise _storage_unavailable() from e
     except OSError as e:
         log.error("Beleg %s: Speichern fehlgeschlagen (%s)", att.id, type(e).__name__)
         raise HTTPException(status.HTTP_507_INSUFFICIENT_STORAGE, "Datei konnte nicht gespeichert werden") from e
+    mark_uploaded(db, access.tenant.id, att.id, att.sha256)    # Existenz belegt → späteres Fehlen ist ein Befund
     if url := webhook_url():
         background.add_task(send_webhook, url, {
             "event": "attachment.uploaded", "tenant": access.tenant.slug, "attachment_id": att.id,
@@ -878,6 +916,19 @@ def get_history(entity: str, eid: str, access: TenantAccess, db: DB):
     return out
 
 
+# ?full=1 → 409 in Folge je Mandant (je Worker); ab VERIFY_BUSY_ALERT als Warnung im Sicherheits-Log: eine
+# Vollprüfung, die nie zustande kommt, kann auf einen festgehaltenen Advisory-Lock hindeuten (s. integrity)
+VERIFY_BUSY_ALERT = 3
+_verify_busy: dict[int, int] = {}
+_verify_busy_lock = threading.Lock()
+
+
+def _verify_busy_count(tenant_id: int, busy: bool) -> int:
+    with _verify_busy_lock:
+        n = _verify_busy[tenant_id] = _verify_busy.get(tenant_id, 0) + 1 if busy else 0
+        return n
+
+
 @app.get("/api/t/{tenant}/audit/verify", response_model=schemas.AuditResult)
 def audit_verify(access: TenantAccess, db: DB, full: Annotated[bool, Query()] = False):
     """Integritätsprüfung in einem konsistenten Snapshot; inkrementell ab dem zuletzt bestätigten Stand,
@@ -885,10 +936,16 @@ def audit_verify(access: TenantAccess, db: DB, full: Annotated[bool, Query()] = 
     _rate(access, "verify", "RATE_VERIFY", 10)
     _release(db)
     try:
-        return verify_tenant(access.tenant.id, full)
+        result = verify_tenant(access.tenant.id, full)
     except VerifyBusy:
+        n = _verify_busy_count(access.tenant.id, True)
+        security.event("verify_full_busy", status=409, reason=f"Vollprüfung läuft bereits ({n}× in Folge)",
+                       count=n, warn=n >= VERIFY_BUSY_ALERT)
         raise HTTPException(status.HTTP_409_CONFLICT, "Vollprüfung dieses Mandanten läuft bereits",
                             headers={"Retry-After": "30"}) from None
+    if full:
+        _verify_busy_count(access.tenant.id, False)
+    return result
 
 
 @app.get("/api/t/{tenant}/audit/anchors", response_model=schemas.AnchorList)

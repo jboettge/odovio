@@ -14,6 +14,9 @@
 #   DIST_CERT_P12        Apple-Distribution-Zertifikat inkl. privatem Schlüssel (.p12), base64-kodiert
 #   DIST_CERT_PASSWORD   Passwort der .p12
 #   ASC_PROFILE          App-Store-Provisioning-Profil für ch.odovio (.mobileprovision), base64-kodiert
+# Schutz (docs/TESTFLIGHT.md): Job im Environment «testflight» (Required Reviewers, nur Tags ios-v*), Secrets als
+# Environment-Secrets; Tag-Schutzregel für ios-v*. Fremdwerkzeug (XcodeGen) gepinnt per Version + SHA-256 und
+# VOR dem Ablegen von API-Key/Zertifikat ausgeführt; Checkout ohne gespeichertes GITHUB_TOKEN.
 # Build-Nummer: run_number*10 + run_attempt (monoton, Rerun-sicher).
 # Version: aus Tag ios-vX.Y[.Z]; bei manuellem Start Eingabe «version» oder MARKETING_VERSION aus ios/project.yml.
 name: ios-testflight
@@ -40,6 +43,8 @@ jobs:
   testflight:
     # App-Store-Uploads verlangen das iOS-26-SDK (Xcode 26).
     runs-on: macos-26
+    # Freigabe durch Required Reviewers + Deployment-Branch/Tag-Regel (in GitHub einzurichten, s. docs/TESTFLIGHT.md)
+    environment: testflight
     timeout-minutes: 60
     defaults:
       run:
@@ -51,6 +56,8 @@ jobs:
       BUNDLE_ID: ch.odovio
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Secrets prüfen
         env:
@@ -71,6 +78,21 @@ jobs:
           [ -n "$X" ] || { echo "::error::Kein Xcode 26 auf dem Runner"; ls -d /Applications/Xcode*; exit 1; }
           sudo xcode-select -s "$X/Contents/Developer"
           xcodebuild -version
+
+      # Vor allen Schlüsseln: XcodeGen als gepinntes Release-Zip (Version + SHA-256, Tag 2.46.0 =
+      # 8445e778451c7e44237b90281bde622d764b0084) statt `brew install` (ungepinnt, nach dem Schlüsselimport)
+      - name: XcodeGen installieren (gepinnt) und Projekt erzeugen
+        env:
+          XCODEGEN_VERSION: "2.46.0"
+          XCODEGEN_SHA256: 4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806
+        run: |
+          Z="$RUNNER_TEMP/xcodegen.zip"
+          curl -fsSL --retry 3 -o "$Z" "https://github.com/yonaskolb/XcodeGen/releases/download/${XCODEGEN_VERSION}/xcodegen.zip"
+          echo "${XCODEGEN_SHA256}  $Z" | shasum -a 256 -c -
+          rm -rf "$RUNNER_TEMP/xcodegen-dist" && unzip -q "$Z" -d "$RUNNER_TEMP/xcodegen-dist"
+          XG="$RUNNER_TEMP/xcodegen-dist/xcodegen/bin/xcodegen"
+          "$XG" --version
+          "$XG" generate
 
       - name: API-Key ablegen
         env:
@@ -95,7 +117,9 @@ jobs:
           security create-keychain -p "$KCPW" "$KC"
           security set-keychain-settings -lut 3600 "$KC"
           security unlock-keychain -p "$KCPW" "$KC"
-          security import "$P12" -k "$KC" -P "$DIST_CERT_PASSWORD" -f pkcs12 -T /usr/bin/codesign -T /usr/bin/security
+          # nur codesign darf den Schlüssel ohne Rückfrage nutzen (kein -T /usr/bin/security: sonst könnte jeder
+          # Prozess per `security` den privaten Schlüssel exportieren)
+          security import "$P12" -k "$KC" -P "$DIST_CERT_PASSWORD" -f pkcs12 -T /usr/bin/codesign
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KCPW" "$KC" >/dev/null
           security list-keychains -d user -s "$KC" $(security list-keychains -d user | tr -d '"')
           rm -f "$P12"
@@ -127,9 +151,6 @@ jobs:
             mkdir -p "$d" && cp "$P" "$d/$UUID.mobileprovision"
           done
           echo "PROFILE_UUID=$UUID" >> "$GITHUB_ENV"
-
-      - run: brew install xcodegen
-      - run: xcodegen generate
 
       - name: Version + Build-Nummer
         env:
