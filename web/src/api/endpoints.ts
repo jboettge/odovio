@@ -48,6 +48,8 @@ export const endpoints = {
   anchors: (tenant: string) => api.get<AnchorList>(`${t(tenant)}/audit/anchors`),
   attachmentBlob: (tenant: string, id: string, signal?: AbortSignal): Promise<BlobResult> =>
     api.blob(`${t(tenant)}/attachments/${encodeURIComponent(id)}/blob`, undefined, signal),
+  uploadAttachment: (tenant: string, id: string, data: Blob, mime: string) =>
+    api.putFile<{ stored: boolean; existing: boolean }>(`${t(tenant)}/attachments/${encodeURIComponent(id)}/blob`, data, mime),
   activity: (tenant: string, limit: number, beforeSeq?: number | null) =>
     api.get<ActivityPage>(`${t(tenant)}/activity`, { limit, before_seq: beforeSeq ?? undefined }),
   members: (tenant: string) => api.get<MemberList>(`${t(tenant)}/members`),

@@ -1,14 +1,14 @@
 // Gemeinsame Logik der Fahrzeug- und Stammdaten-Ansichten.
 import { computed, reactive, ref } from 'vue'
 import { useRoute } from 'vue-router'
-import type { EntityMap, EntityName, FuelEntry, Maintenance, OdometerReading, Trip } from './api/types'
+import type { EntityMap, EntityName, FuelEntry, Maintenance, OdometerReading, SyncOp, Trip } from './api/types'
 import { ApiError } from './api/client'
-import { all, byId, ofVehicle, sync, SyncRejected } from './store/data'
+import { all, byId, ofVehicle, sync, SyncRejected, type SyncOutcome } from './store/data'
 import { role, session } from './store/session'
 import { notify, errorText } from './store/toasts'
 import { canWrite } from './lib/roles'
 import { deleteOp, upsertOp, uuid, validate, type FieldErrors } from './lib/schema'
-import { stornoNeedsReason } from './lib/trips'
+import { closedPeriod, stornoNeedsReason } from './lib/trips'
 import { ENTITY_LABELS } from './lib/labels'
 
 export function useVehicle() {
@@ -99,19 +99,29 @@ export function useEditor<E extends EntityName>(entity: E, defaults: () => Recor
    * angewendet, meldet er «duplicate» statt einen zweiten Datensatz anzulegen. Wurde der Inhalt seither geändert,
    * gibt es eine neue op_id (sonst würde der Server die Änderung als Duplikat verwerfen), aber dieselbe id.
    */
-  let attempt = { id: '', opId: '', sent: null as string | null }
+  let attempt = { id: '', opId: '', sent: null as string | null, extra: [] as SyncOp[] }
 
   function create(extra: Record<string, unknown> = {}) {
-    attempt = { id: uuid(), opId: uuid(), sent: null }
+    attempt = { id: uuid(), opId: uuid(), sent: null, extra: [] }
     Object.assign(state, { open: true, id: null, version: null, form: { ...defaults(), ...extra }, errors: {}, error: null })
   }
 
-  function edit(rec: EntityMap[E]) {
-    attempt = { id: rec.id, opId: uuid(), sent: null }
-    Object.assign(state, { open: true, id: rec.id, version: rec.version, form: { ...rec }, errors: {}, error: null })
+  function edit(rec: EntityMap[E], extra: Record<string, unknown> = {}) {
+    attempt = { id: rec.id, opId: uuid(), sent: null, extra: [] }
+    Object.assign(state, { open: true, id: rec.id, version: rec.version, form: { ...rec, ...extra }, errors: {}, error: null })
   }
 
-  async function save(transform?: (f: Record<string, unknown>) => Record<string, unknown>): Promise<boolean> {
+  /** Feste ID des Datensatzes (auch vor dem ersten Speichern, z. B. für Kind-Datensätze und Belege). */
+  const recordId = () => (attempt.id ||= state.id ?? uuid())
+
+  /**
+   * Speichern. `opts.reason`: Begründung (Änderung im abgeschlossenen Monat). `opts.extra`: weitere Ops im selben
+   * Sync (Checkliste, Material, Belege) – nach der Haupt-Op. `opts.after`: nach erfolgreichem Sync (z. B. Upload).
+   */
+  async function save(
+    transform?: (f: Record<string, unknown>) => Record<string, unknown>,
+    opts: { reason?: string; extra?: (id: string) => SyncOp[]; after?: (id: string, res: SyncOutcome) => Promise<void> | void } = {},
+  ): Promise<boolean> {
     if (!session.tenant) return false
     const data = transform ? transform({ ...state.form }) : { ...state.form }
     state.errors = validate(entity, data)
@@ -122,19 +132,30 @@ export function useEditor<E extends EntityName>(entity: E, defaults: () => Recor
     if (state.busy) return false
     state.busy = true
     state.error = null
-    if (!attempt.id) attempt = { id: state.id ?? uuid(), opId: uuid(), sent: null }
-    const op = upsertOp(entity, attempt.id, data, state.version, undefined, attempt.opId)
-    const fingerprint = JSON.stringify([op.base_version, op.data])
+    const id = recordId()
+    if (!attempt.opId) attempt.opId = uuid()
+    const op = upsertOp(entity, id, data, state.version, opts.reason, attempt.opId)
+    let extra = opts.extra?.(id) ?? []
+    const fingerprint = JSON.stringify([op.base_version, op.data, op.reason ?? null, extra.map((x) => [x.entity, x.id, x.action, x.base_version, x.data, x.reason ?? null])])
     if (attempt.sent !== null && attempt.sent !== fingerprint) op.op_id = attempt.opId = uuid()
+    else if (attempt.sent === fingerprint) extra = attempt.extra // gleiche Wiederholung → gleiche op_ids (Server dedupliziert)
     attempt.sent = fingerprint
+    attempt.extra = extra
     try {
-      const res = await sync(session.tenant, [op])
-      attempt = { id: attempt.id, opId: uuid(), sent: null }
+      const res = await sync(session.tenant, [op, ...extra])
+      attempt = { id, opId: uuid(), sent: null, extra: [] }
+      await opts.after?.(id, res)
       notify(res.conflicts ? 'Gespeichert – gleichzeitige Änderung überschrieben (im Verlauf sichtbar)' : 'Gespeichert', res.conflicts ? 'info' : 'ok')
       state.open = false
       return true
     } catch (e) {
       const unclear = e instanceof ApiError && (e.status === 0 || e.status >= 500)
+      if (e instanceof SyncRejected) {
+        // Teilweise angewendet? Dann weiter als Bearbeitung mit aktueller Version (nächstes Speichern = Korrektur)
+        const saved = byId(entity, id) as { version: number } | undefined
+        if (saved) Object.assign(state, { id, version: saved.version })
+        attempt = { id, opId: uuid(), sent: null, extra: [] }
+      }
       state.error =
         e instanceof SyncRejected
           ? `Vom Server abgelehnt: ${e.message}`
@@ -147,7 +168,18 @@ export function useEditor<E extends EntityName>(entity: E, defaults: () => Recor
     }
   }
 
-  return { state, create, edit, save, close: () => (state.open = false) }
+  return { state, create, edit, save, recordId, close: () => (state.open = false) }
+}
+
+/**
+ * Erfassen/Ändern im abgeschlossenen Monat braucht eine Begründung (wie der Server: nur Einträge mit km-Stand).
+ * Geprüft werden neuer und bisheriger Monat.
+ */
+export function correctionNeedsReason(vehicleId: string, day: unknown, kmValue: unknown, original?: { date: string; km: number | null } | null): boolean {
+  const periods = all('trip_period')
+  const hit = (d: unknown, k: unknown) =>
+    k !== null && k !== undefined && k !== '' && typeof d === 'string' && /^\d{4}-\d{2}/.test(d) && Boolean(closedPeriod(periods, vehicleId, d.slice(0, 7)))
+  return hit(day, kmValue) || Boolean(original && hit(original.date, original.km))
 }
 
 /** Zahl aus Eingabefeld (leer → null). */

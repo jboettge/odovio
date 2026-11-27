@@ -180,7 +180,7 @@ function stornoTrip(t: Trip) {
       </table>
     </div>
   </section>
-  <p class="muted small mt-1">Fahrten werden in der App erfasst und bestätigt. Im Web: ansehen, Verlauf prüfen und stornieren. <span class="badge badge-warn">ca.</span> = geschätzter Kilometerstand.</p>
+  <p class="muted small mt-1">Fahrten werden in der App erfasst und bestätigt. Im Web: ansehen, Verlauf prüfen und stornieren. Tanken, Wartungen und Kilometerstände lassen sich auch im Web erfassen. <span class="badge badge-warn">ca.</span> = geschätzter Kilometerstand.</p>
 
   <HistoryPanel :tenant="tenant" :entity="history.sel.value?.entity ?? null" :id="history.sel.value?.id ?? null" :title="history.sel.value?.title" @close="history.close" />
   <ConfirmDialog

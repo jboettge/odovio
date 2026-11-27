@@ -1,12 +1,14 @@
 <script setup lang="ts">
 // Zeitachse aller Kilometerstände: abgelesen, beim Tanken, bei Wartungen (aktueller Stand = Maximum).
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import Icon from '../../components/Icon.vue'
 import HistoryPanel from '../../components/HistoryPanel.vue'
 import ConfirmDialog from '../../components/ConfirmDialog.vue'
 import EmptyState from '../../components/EmptyState.vue'
 import LineChart from '../../components/LineChart.vue'
 import Pager from '../../components/Pager.vue'
+import OdometerEditor from './editors/OdometerEditor.vue'
+import { useOpenOnQuery } from '../../use/openOnQuery'
 import { useHistory, useStorno, useVehicle } from '../../composables'
 import { usePager } from '../../use/pager'
 import type { OdometerReading } from '../../api/types'
@@ -15,6 +17,8 @@ import { date, km, num, byCode } from '../../lib/format'
 const { vehicle, odometer, fuel, maintenance, tenant, writable } = useVehicle()
 const history = useHistory()
 const storno = useStorno()
+const editor = ref<InstanceType<typeof OdometerEditor> | null>(null)
+useOpenOnQuery(() => editor.value?.create(), () => writable.value)
 
 interface Reading {
   key: string
@@ -49,7 +53,10 @@ const SOURCE = { odometer: 'Kilometerstand', fuel: 'Tankvorgang', maintenance: '
 <template>
   <div class="grid grid-2">
     <section class="card" aria-labelledby="odo-h">
-      <div class="card-header"><h2 id="odo-h">Zeitachse</h2><span class="muted small">Start-km {{ km(vehicle?.initial_km) }}</span></div>
+      <div class="card-header">
+        <h2 id="odo-h">Zeitachse</h2><span class="muted small">Start-km {{ km(vehicle?.initial_km) }}</span>
+        <div class="actions"><button v-if="writable" type="button" class="btn btn-primary btn-sm" @click="editor?.create()"><Icon name="plus" size="sm" />Kilometerstand erfassen</button></div>
+      </div>
       <EmptyState v-if="!readings.length" title="Keine Kilometerstände" icon="gauge" />
       <ol v-else class="timeline">
         <li v-for="r in withDelta" :key="r.key">
@@ -59,6 +66,7 @@ const SOURCE = { odometer: 'Kilometerstand', fuel: 'Tankvorgang', maintenance: '
             <span class="row">
               <span class="muted small">{{ date(r.date) }}</span>
               <button v-if="r.entityId" type="button" class="btn btn-ghost btn-icon btn-sm" :aria-label="`Verlauf ${SOURCE[r.source]} ${date(r.date)}`" @click="history.show(r.source, r.entityId!)"><Icon name="history" size="sm" /></button>
+              <button v-if="writable && r.rec" type="button" class="btn btn-ghost btn-icon btn-sm" :aria-label="`Kilometerstand ${date(r.date)} bearbeiten`" @click="editor?.edit(r.rec!)"><Icon name="edit" size="sm" /></button>
               <button v-if="writable && r.rec" type="button" class="btn btn-ghost btn-icon btn-sm" :aria-label="`Kilometerstand ${date(r.date)} stornieren`" @click="storno.ask('odometer', r.rec!, `${date(r.date)} · ${km(r.km)}`)"><Icon name="ban" size="sm" /></button>
             </span>
           </div>
@@ -77,6 +85,7 @@ const SOURCE = { odometer: 'Kilometerstand', fuel: 'Tankvorgang', maintenance: '
       <p class="muted small mt-2">Der aktuelle Kilometerstand ist das Maximum aus abgelesenen Ständen, Tankvorgängen und Wartungen. Ein negativer Abstand deutet auf einen Erfassungsfehler hin.</p>
     </section>
   </div>
+  <OdometerEditor ref="editor" />
   <HistoryPanel :tenant="tenant" :entity="history.sel.value?.entity ?? null" :id="history.sel.value?.id ?? null" @close="history.close" />
   <ConfirmDialog :open="storno.state.open" title="Kilometerstand stornieren" confirm-label="Stornieren" danger :reason="storno.state.reason" :busy="storno.state.busy" :error="storno.state.error" @close="storno.close" @confirm="storno.confirm">
     <p><strong>{{ storno.state.label }}</strong></p>

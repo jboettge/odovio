@@ -16,7 +16,7 @@ import { analytics } from '../../lib/analyticsClient'
 import type { HealthResult } from '../../lib/slim'
 import { useAsync } from '../../use/async'
 
-const { vid, vehicle, fuel, maintenance, tenant } = useVehicle()
+const { vid, vehicle, fuel, maintenance, tenant, writable } = useVehicle()
 const s = ref<Stats | null>(null)
 const error = ref<string | null>(null)
 
@@ -79,6 +79,11 @@ const monthlyTotal = computed(() => monthly.value.reduce((a, d) => a + d.values[
   <AlertBox v-if="error" kind="danger" live>{{ error }}</AlertBox>
   <Loading v-else-if="!s" text="Kennzahlen werden geladen …" />
   <div v-else class="stack">
+    <div v-if="writable && !vehicle?.deleted" class="row" role="group" aria-label="Erfassen">
+      <RouterLink :to="{ path: `/fahrzeuge/${vid}/tanken`, query: { neu: '1' } }" class="btn btn-sm"><Icon name="fuel" size="sm" />Tanken erfassen</RouterLink>
+      <RouterLink :to="{ path: `/fahrzeuge/${vid}/wartungen`, query: { neu: '1' } }" class="btn btn-sm"><Icon name="wrench" size="sm" />Wartung erfassen</RouterLink>
+      <RouterLink :to="{ path: `/fahrzeuge/${vid}/kilometerstaende`, query: { neu: '1' } }" class="btn btn-sm"><Icon name="gauge" size="sm" />Kilometerstand erfassen</RouterLink>
+    </div>
     <div class="grid grid-kpi">
       <Kpi label="Aktueller Kilometerstand" :value="km(s.current_km)" :sub="`${km(s.driven_km)} seit Erfassung`" />
       <Kpi label="Ø Verbrauch" :value="consumption(s.avg_consumption)" :sub="s.avg_liters_per_km !== null ? `${num(s.avg_liters_per_km, 3)} l pro km` : 'mind. zwei Volltankungen nötig'" />

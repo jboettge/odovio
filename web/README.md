@@ -10,7 +10,7 @@ Deutsch (Schweizer Schreibweise, `53’410 km`, `CHF 1’234.50`, `25.11.2026`).
 |---|---|---|
 | `/` | Anmelden, Fahrzeugbuch wählen (Rolle sichtbar) | – |
 | `/uebersicht` | Fahrzeug-Kacheln (km, Ø Verbrauch, Kosten, Fälligkeiten), offene Bestätigungen/Lücken, letzte Aktivität | Lesen |
-| `/fahrzeuge/:id` (+ `/fahrten`, `/tanken`, `/wartungen`, `/kilometerstaende`, `/berichte`) | Kennzahlen, Diagramme, Tabellen, Belege, Berichte/Downloads, Jahresbericht | Lesen |
+| `/fahrzeuge/:id` (+ `/fahrten`, `/tanken`, `/wartungen`, `/kilometerstaende`, `/berichte`) | Kennzahlen, Diagramme, Tabellen, Belege, Berichte/Downloads, Jahresbericht; Tanken, Wartungen (Checkliste, Material aus dem Stamm, Belege) und km-Stände erfassen/bearbeiten (Bearbeiten, Schnellaktionen in der Übersicht, `?neu=1`) | Lesen |
 | `/fahrzeuge/:id/monatsabschluss` | Prüfung + Abschluss mit Bestätigung | Bearbeiten |
 | `/aktivitaet` | Feed mit Filter und Nachladen, Verlauf je Eintrag (Seitenpanel) | Lesen |
 | `/integritaet` | Prüfung, Ergebnis, Anker, Grenzen | Lesen |
@@ -63,7 +63,7 @@ Demo-Benutzer (Auswahl auf der Mock-Anmeldeseite):
 | `neu` Nora Neu | – (zum Einladen) |
 
 Teststeuerung: `POST /__mock/reset`, `POST /__mock/config` (`{"members501":true}`, `{"rate429":"verify"}`,
-`{"tokenTtl":30}`, `{"dropResponseOnce":true}` = nächsten Sync anwenden, Antwort aber abbrechen), `POST /__mock/expire-tokens`.
+`{"tokenTtl":30}`, `{"dropResponseOnce":true}` = nächsten Sync anwenden, Antwort aber abbrechen; `{"failUploadOnce":true}` = nächster Beleg-Upload 503), `POST /__mock/expire-tokens`.
 Mitglieds-IDs entsprechen wie beim Server der Keycloak-Benutzer-ID (`sub`). Umgebungsvariablen: `MOCK_TOKEN_TTL`, `MOCK_PAGE_MAX`, `MOCK_SEED`.
 `--seed large` (bzw. `npm run mock:large`) ersetzt «privat» durch einen Lasttest-Bestand (siehe Skalierung).
 

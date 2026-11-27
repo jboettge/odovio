@@ -49,7 +49,7 @@ Auf echtem Gerät zu testen: Hintergrund-Aufzeichnung, Automatik, Wecken nach Be
 
 ## Web-Frontend
 
-Ansicht und Verwaltung je Rolle: Übersicht, Fahrzeuge (Fahrten, Tanken, Wartungen, km-Stände, Berichte), Monatsabschluss, Aktivität, Integrität, Stammdaten; Mitglieder nur für *Verwalten*. Keycloak-Client `fahrzeugbuch-web` (public, PKCE) legt `setup-client.sh` mit `WEB_URL=https://www.odovio.ch` an. Tokens nur in `sessionStorage`, Abmeldung nach 30 min Inaktivität. Entwicklung, Mock-Server und Tests: [web/README.md](web/README.md), Screenshots: `docs/screenshots/web/`.
+Ansicht und Verwaltung je Rolle: Übersicht, Fahrzeuge (Fahrten, Tanken, Wartungen, km-Stände, Berichte – Tanken, Wartungen inkl. Material/Checkliste/Belege und km-Stände auch im Web erfassbar), Monatsabschluss, Aktivität, Integrität, Stammdaten; Mitglieder nur für *Verwalten*. Keycloak-Client `fahrzeugbuch-web` (public, PKCE) legt `setup-client.sh` mit `WEB_URL=https://www.odovio.ch` an. Tokens nur in `sessionStorage`, Abmeldung nach 30 min Inaktivität. Entwicklung, Mock-Server und Tests: [web/README.md](web/README.md), Screenshots: `docs/screenshots/web/`.
 
 ## Sicherheit
 
