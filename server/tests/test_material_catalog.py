@@ -238,8 +238,11 @@ def test_retrofit_article_id_sqlite(tmp_path):
 
 
 def test_retrofit_article_id_test_db():
-    """Gleiche Nachrüstung auf der Test-DB (PostgreSQL, wenn FZB_TEST_DATABASE_URL gesetzt)."""
+    """Gleiche Nachrüstung auf der Test-DB (PostgreSQL, wenn FZB_TEST_DATABASE_URL gesetzt). Altbestand = ohne
+    alembic_version (mit Versionsstand rüstet create_schema nichts per create_all nach, Review S5)."""
     Base.metadata.drop_all(engine)
+    with engine.begin() as conn:
+        conn.exec_driver_sql("DROP TABLE IF EXISTS alembic_version")
     try:
         _check_retrofit(engine)
     finally:

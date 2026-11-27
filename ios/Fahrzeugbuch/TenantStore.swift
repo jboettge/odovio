@@ -36,7 +36,7 @@ final class TenantStore {
     /// Materialstamm (mandantenweit)
     private(set) var articles: [String: MaterialArticle] = [:]
     /// Fahrtenbuch
-    private(set) var trips: [String: Trip] = [:] { didSet { tripCache.invalidate() } }
+    private(set) var trips: [String: Trip] = [:] { didSet { tripCache.invalidate(); statsCache.removeAll() } }
     private(set) var places: [String: Place] = [:]
     private(set) var customers: [String: Customer] = [:]
     private(set) var rules: [String: PurposeRule] = [:]
@@ -558,10 +558,10 @@ final class TenantStore {
     }
 
     /// Statistik je Fahrzeug, gecacht (invalidiert bei Änderungen an Fahrzeugen, km-Ständen, Tankungen,
-    /// Wartungen, Material sowie beim Tageswechsel).
+    /// Wartungen, Material, Fahrten sowie beim Tageswechsel).
     func stats(for v: Vehicle) -> VehicleStats {
         // Zugriffe registrieren, damit Ansichten auch bei Cache-Treffern aktualisiert werden
-        _ = (vehicles.count, odometer.count, fuel.count, maintenance.count, materials.count)
+        _ = (vehicles.count, odometer.count, fuel.count, maintenance.count, materials.count, trips.count)
         let today = Calendar.current.startOfDay(for: Date())
         if statsDay != today {
             statsCache.removeAll()
@@ -572,7 +572,7 @@ final class TenantStore {
         let ids = Set(list.map(\.id))
         let mats = materials.values.filter { !$0.deleted && ids.contains($0.maintenanceId) }
         let s = StatsCalculator.stats(vehicle: v, odometer: odometer(for: v.id), fuel: fuel(for: v.id),
-                                      maintenance: list, materials: mats)
+                                      maintenance: list, materials: mats, trips: chain(for: v.id))
         statsCache[v] = s
         return s
     }

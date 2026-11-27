@@ -13,7 +13,11 @@ Env (alle optional; ohne Client-ID/Secret: nur Anzeige der Akteure aus dem Journ
 Client-Credentials-Token wird bis kurz vor Ablauf zwischengespeichert. urllib ohne Weiterleitungen, Antwort-
 grösse begrenzt; Gleichzeitigkeit/Circuit-Breaker über geo.Upstream("keycloak").
 Änderungen erst in Keycloak, dann als Revision (entity "membership") ins Journal; wirksam werden sie in
-den Tokens der Betroffenen nach deren nächster Token-Erneuerung.
+den Tokens der Betroffenen nach deren nächster Token-Erneuerung. Jeder Keycloak-Schritt merkt sich seine
+Gegenaktion (`Change.undo`): scheitert ein späterer Schritt, das Journal oder der Commit, werden die bereits
+ausgeführten Schritte in umgekehrter Reihenfolge zurückgenommen (Kompensation, Review S13). Die Journal-Einträge
+(`Change.entries`) schreibt der Aufrufer erst danach unter der Mandantensperre – die Keycloak-Aufrufe laufen so
+nicht unter der Sperre der Mandantenzeile (sie würde jeden Sync des Mandanten blockieren).
 """
 import json
 import logging
@@ -24,7 +28,8 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, field
 
 from fastapi import HTTPException, status
 from sqlalchemy import func, select
@@ -362,24 +367,56 @@ def _check_last_admin(members: dict[str, Membership], target: str, requester: st
         raise HTTPException(status.HTTP_409_CONFLICT, "Mindestens ein anderer Verwalter muss bestehen bleiben")
 
 
-def set_role(kc: KeycloakAdmin, gids: dict[str, str], m: Membership | None, uid: str, role: str) -> None:
+@dataclass
+class Change:
+    """Eine Mitgliederänderung: ausgeführte Keycloak-Schritte mit Gegenaktion und die Journal-Einträge, die der
+    Aufrufer unter der Mandantensperre schreibt (Funktion erhält die gesperrte Mandantenzeile)."""
+    undo: list[Callable[[], None]] = field(default_factory=list)
+    entries: list[Callable[[models.Tenant], object]] = field(default_factory=list)
+
+    def join(self, kc: KeycloakAdmin, uid: str, gid: str) -> None:
+        kc.join(uid, gid)
+        self.undo.append(lambda: kc.leave(uid, gid))
+
+    def leave(self, kc: KeycloakAdmin, uid: str, gid: str) -> None:
+        kc.leave(uid, gid)
+        self.undo.append(lambda: kc.join(uid, gid))
+
+    def compensate(self) -> bool:
+        """Ausgeführte Keycloak-Schritte zurücknehmen (neueste zuerst). False = nicht vollständig möglich."""
+        ok = True
+        while self.undo:
+            step = self.undo.pop()
+            try:
+                step()
+            except (UpstreamError, KeycloakDenied) as e:
+                ok = False
+                log.error("Keycloak-Kompensation fehlgeschlagen (%s) – Gruppen des Mandanten manuell prüfen", e)
+        if not ok:
+            security.event("member_compensation_failed", reason="keycloak")
+        return ok
+
+
+def set_role(kc: KeycloakAdmin, gids: dict[str, str], m: Membership | None, uid: str, role: str,
+             change: Change) -> None:
     """Genau EINE der drei Gruppen: Zielgruppe zuweisen, übrige entfernen."""
     if m is None or role not in m.groups:
-        kc.join(uid, gids[role])
+        change.join(kc, uid, gids[role])
     for r, gid in (m.groups if m else {}).items():
         if r != role:
-            kc.leave(uid, gid)
+            change.leave(kc, uid, gid)
 
 
-def add_member(db, tenant, user: User, kc: KeycloakAdmin, query: str, role: str, is_admin: bool) -> dict:
+def add_member(db, tenant, user: User, kc: KeycloakAdmin, query: str, role: str, is_admin: bool,
+               change: Change) -> dict:
     target = kc.find_user(query)
     if target is None or not MEMBER_ID.match(str(target.get("id", ""))):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Benutzer nicht gefunden")
     gids, members = keycloak_members(kc, tenant.slug, create=True)
     if target["id"] in members:
         raise HTTPException(status.HTTP_409_CONFLICT, "Bereits Mitglied")
-    set_role(kc, gids, None, target["id"], role)
-    journal(db, tenant, user, target["id"], "create", target.get("username"), role)
+    set_role(kc, gids, None, target["id"], role, change)
+    change.entries.append(lambda t: journal(db, t, user, target["id"], "create", target.get("username"), role))
     m = Membership(target, role, {role: gids[role]})
     return member_out(m, last_activity(db, tenant.id), is_admin)
 
@@ -392,23 +429,26 @@ def _member_or_404(members: dict[str, Membership], uid: str) -> Membership:
     return m
 
 
-def change_role(db, tenant, user: User, kc: KeycloakAdmin, uid: str, role: str, is_admin: bool) -> dict:
+def change_role(db, tenant, user: User, kc: KeycloakAdmin, uid: str, role: str, is_admin: bool,
+                change: Change) -> dict:
     gids, members = keycloak_members(kc, tenant.slug, create=True)
     m = _member_or_404(members, uid)
     previous = m.role
     if previous != role or len(m.groups) > 1:
         _check_last_admin(members, uid, user.sub, role)
-        set_role(kc, gids, m, uid, role)
+        set_role(kc, gids, m, uid, role, change)
         m.role, m.groups = role, {role: gids[role]}
         if previous != role:
-            journal(db, tenant, user, uid, "update", m.user.get("username"), role, previous)
+            name = m.user.get("username")
+            change.entries.append(lambda t: journal(db, t, user, uid, "update", name, role, previous))
     return member_out(m, last_activity(db, tenant.id), is_admin)
 
 
-def remove_member(db, tenant, user: User, kc: KeycloakAdmin, uid: str) -> None:
+def remove_member(db, tenant, user: User, kc: KeycloakAdmin, uid: str, change: Change) -> None:
     _, members = keycloak_members(kc, tenant.slug)
     m = _member_or_404(members, uid)
     _check_last_admin(members, uid, user.sub, None)
     for gid in m.groups.values():
-        kc.leave(uid, gid)
-    journal(db, tenant, user, uid, "delete", m.user.get("username"), m.role)
+        change.leave(kc, uid, gid)
+    name, role = m.user.get("username"), m.role
+    change.entries.append(lambda t: journal(db, t, user, uid, "delete", name, role))

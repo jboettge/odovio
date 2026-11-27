@@ -40,9 +40,10 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    # Natives DROP COLUMN (SQLite ≥ 3.35) statt Batch-Neuaufbau: dieser bricht unter PRAGMA foreign_keys=ON ab,
+    # sobald andere Tabellen auf die neu aufgebaute verweisen (Review S12).
     for table in SYNCED_TABLES:
         present = _present(table)
-        with op.batch_alter_table(table) as batch:
-            for col in COLUMNS:
-                if col in present:
-                    batch.drop_column(col)
+        for col in COLUMNS:
+            if col in present:
+                op.execute(f'ALTER TABLE {table} DROP COLUMN "{col}"')

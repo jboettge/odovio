@@ -1,6 +1,7 @@
 """Gemeinsamer Zustand gegen echten Valkey/Redis (FZB_TEST_REDIS_URL): Token-Bucket, gleitendes Fenster,
 Brute-Force (Sperre, Backoff, auth_ok je sub, Probing), Circuit-Breaker, TTL aller Schlüssel, Metrik-Schnappschüsse,
-Ausfall (fail-open, Sperren lokal, Health degraded/ready 503). Zwei RedisState-Instanzen = zwei Worker."""
+Ausfall (Rate-Limits mit lokalem Budget, Sperren lokal, Health degraded/ready 503). Zwei RedisState-Instanzen =
+zwei Worker."""
 import json
 import time
 
@@ -170,16 +171,21 @@ def broken_state(monkeypatch):
     state.configure(None)
 
 
-def test_outage_fail_open_but_local_blocks(client, broken_state, monkeypatch, events):  # noqa: F811
-    monkeypatch.setenv("RATE_IP_PER_MIN", "1")
-    monkeypatch.setenv("RATE_IP_BURST", "1")
-    monkeypatch.setenv("RATE_ACTIVITY", "1")
+def test_outage_local_budget_and_local_blocks(client, broken_state, monkeypatch, events):  # noqa: F811
+    # X5: Ausfall → Rate-Limits lokal mit dem Anteil dieses Prozesses (4 ÷ 2 Worker = 2, Aktivität 2 ÷ 2 = 1)
+    monkeypatch.setenv("WEB_CONCURRENCY", "2")
+    monkeypatch.setenv("RATE_IP_PER_MIN", "4")
+    monkeypatch.setenv("RATE_IP_BURST", "4")
+    monkeypatch.setenv("RATE_ACTIVITY", "2")
     monkeypatch.setenv("BRUTE_401_THRESHOLD", "2")
     c = other("203.0.113.90")
-    assert [c.get("/api/me").status_code for _ in range(3)] == [200, 200, 200]      # fail-open
-    assert [client.get(f"{T}/activity").status_code for _ in range(2)] == [200, 200]
+    assert [c.get("/api/me").status_code for _ in range(3)] == [200, 200, 429]
+    assert [client.get(f"{T}/activity").status_code for _ in range(2)] == [200, 429]
     assert any(e["event"] == "state_backend_error" for e in events)
     # Brute-Force gilt lokal weiter
+    monkeypatch.setenv("RATE_IP_PER_MIN", "100000")
+    monkeypatch.setenv("RATE_IP_BURST", "100000")
+    c = other("203.0.113.91")
     for _ in range(2):
         assert c.get("/api/me", headers=forged_auth()).status_code == 401
     assert c.get("/api/me").status_code == 429

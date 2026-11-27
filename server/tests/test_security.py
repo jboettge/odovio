@@ -290,24 +290,24 @@ def test_csrf_origin_check_for_state_changing_requests(client, monkeypatch, even
         r = client.post(f"{T}/sync", json=body, headers={"Origin": bad})
         assert r.status_code == 403 and r.json() == {"detail": "Ungültige Origin"}, bad
     assert client.get("/api/me", headers={"Origin": "https://evil.example"}).status_code == 200   # GET: nur CORS
-    monkeypatch.setenv("ALLOWED_HOSTS", "fahrzeugbuch.j-mb.net")
-    r = client.post(f"{T}/sync", json=body, headers={"Origin": "https://fahrzeugbuch.j-mb.net",
-                                                     "Host": "fahrzeugbuch.j-mb.net"})
+    monkeypatch.setenv("ALLOWED_HOSTS", "www.odovio.ch")
+    r = client.post(f"{T}/sync", json=body, headers={"Origin": "https://www.odovio.ch",
+                                                     "Host": "www.odovio.ch"})
     assert r.status_code == 200
     assert "cors_rejected" in names(events)
 
 
 # ---------- Host / Header / HSTS / Request-ID ----------
 def test_trusted_host(client, monkeypatch, events):
-    monkeypatch.setenv("ALLOWED_HOSTS", "fahrzeugbuch.j-mb.net, *.intern.test")
+    monkeypatch.setenv("ALLOWED_HOSTS", "www.odovio.ch, *.intern.test")
     r = client.get("/auth/config")
     assert r.status_code == 400 and r.json() == {"detail": "Ungültiger Host"}
-    assert client.get("/auth/config", headers={"Host": "fahrzeugbuch.j-mb.net"}).status_code == 200
-    assert client.get("/auth/config", headers={"Host": "fahrzeugbuch.j-mb.net:443"}).status_code == 200
+    assert client.get("/auth/config", headers={"Host": "www.odovio.ch"}).status_code == 200
+    assert client.get("/auth/config", headers={"Host": "www.odovio.ch:443"}).status_code == 200
     assert client.get("/auth/config", headers={"Host": "api.intern.test"}).status_code == 200
     assert client.get("/auth/config", headers={"Host": "127.0.0.1:8000"}).status_code == 200     # Healthcheck
     assert client.get("/auth/config", headers={"Host": "evil.example"}).status_code == 400
-    assert client.get("/auth/config", headers={"Host": "fahrzeugbuch.j-mb.net.evil.example"}).status_code == 400
+    assert client.get("/auth/config", headers={"Host": "www.odovio.ch.evil.example"}).status_code == 400
     # Probes/Prometheus (Host = Pod-IP): /health* und /metrics ohne Host-Prüfung
     for path in ("/health", "/health/live", "/health/ready"):
         assert client.get(path, headers={"Host": "10.42.0.17:8000"}).status_code == 200
@@ -569,7 +569,7 @@ def test_config_warnings_and_strict(monkeypatch, events):
 
 
 def test_secure_config_has_no_warnings(monkeypatch):
-    monkeypatch.setenv("ALLOWED_HOSTS", "fahrzeugbuch.j-mb.net")
+    monkeypatch.setenv("ALLOWED_HOSTS", "www.odovio.ch")
     monkeypatch.setenv("ANCHOR_SIGNING_KEY", "x")
     monkeypatch.setenv("N8N_WEBHOOK_URL", "https://n8n.example.test/hook")
     monkeypatch.setenv("N8N_WEBHOOK_SECRET", "s" * 64)

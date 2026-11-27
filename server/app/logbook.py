@@ -20,7 +20,7 @@ from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from . import models
+from . import models, timeutil
 from .report import (
     ACTIONS,
     BOLD,
@@ -123,7 +123,7 @@ def build_logbook(db: Session, tenant: models.Tenant, data: VehicleData, date_fr
     v = data.vehicle
     lk = Lookup(db, tenant.id)
     trips = trips_between(db, tenant.id, v.id, date_from, date_to)
-    created = dt.datetime.now().strftime("%d.%m.%Y %H:%M")
+    created = timeutil.now().strftime("%d.%m.%Y %H:%M")   # APP_TIMEZONE, nicht Server-Zone (S9)
     page = landscape(A4)
 
     story = [
@@ -197,7 +197,9 @@ def build_logbook(db: Session, tenant: models.Tenant, data: VehicleData, date_fr
     periods = {p.month: p for p in db.scalars(select(models.TripPeriod).where(
         models.TripPeriod.tenant_id == tenant.id, models.TripPeriod.vehicle_id == v.id,
         models.TripPeriod.deleted.is_(False)))}
-    anchors = {a.seq: a for a in db.scalars(select(models.Anchor).where(models.Anchor.tenant_id == tenant.id))}
+    seqs = {p.anchor_seq for p in periods.values() if p.status == "closed" and p.anchor_seq is not None}
+    anchors = {a.seq: a for a in db.scalars(select(models.Anchor).where(
+        models.Anchor.tenant_id == tenant.id, models.Anchor.seq.in_(seqs)))} if seqs else {}   # nur benötigte (S15)
     rows = []
     for month in _months(date_from, date_to):
         p = periods.get(month)
@@ -321,7 +323,7 @@ SCOPE_NAMES = {"tenant": "Mandant", "federal": "Bund", "default": "Default [A]"}
 def build_year_report(db: Session, tenant: models.Tenant, rep: dict, user_name: str | None) -> bytes:
     v = rep["vehicle"]
     vehicle = db.get(models.Vehicle, v["id"])
-    created = dt.datetime.now().strftime("%d.%m.%Y %H:%M")
+    created = timeutil.now().strftime("%d.%m.%Y %H:%M")   # APP_TIMEZONE, nicht Server-Zone (S9)
     story = [
         Paragraph(_esc(f"Jahresbericht Fahrtenbuch {rep['year']} – {v['name']}"), STYLES["Title"]),
         _p(_vehicle_head(tenant, vehicle), STYLES["Normal"]),

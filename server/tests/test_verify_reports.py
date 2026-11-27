@@ -185,3 +185,32 @@ def test_old_anchor_keys_still_verify(client, monkeypatch):
     assert v["ok"] and v["anchors"] == 3, v
     monkeypatch.delenv("ANCHOR_SIGNING_KEY")                     # nur Public Keys: alte Anker prüfbar
     assert any("unbekannter Schlüssel" in p for p in client.get(f"{T}/audit/verify").json()["problems"])
+
+
+def test_old_anchor_key_validity_limit(client, monkeypatch):
+    """X8: alter Schlüssel mit Gültigkeitsgrenze (Datum, Zeitpunkt oder Seq) bestätigt keine neueren Anker;
+    Format ohne «@» bleibt unbegrenzt gültig."""
+    import datetime as dt
+    old_seed, old_pub = _b64key(Ed25519PrivateKey.generate())
+    new_seed, _ = _b64key(Ed25519PrivateKey.generate())
+    monkeypatch.setenv("ANCHOR_SIGNING_KEY", old_seed)
+    vid = _seed(client)
+    client.get(f"{T}/vehicles/{vid}/report.pdf")                 # Anker mit altem Schlüssel (heute)
+    seqs = [a["seq"] for a in client.get(f"{T}/audit/anchors").json()["anchors"]]
+    monkeypatch.setenv("ANCHOR_SIGNING_KEY", new_seed)
+    today = dt.datetime.now(dt.UTC).date()
+
+    def problems(spec: str) -> list[str]:
+        monkeypatch.setenv("ANCHOR_PUBLIC_KEYS", spec)
+        return client.get(f"{T}/audit/verify?full=1").json()["problems"]
+
+    assert problems(old_pub) == []
+    assert problems(f"{old_pub}@{today + dt.timedelta(days=1)}") == []
+    assert problems(f"{old_pub}@{today}") == []                  # bis und mit diesem Tag
+    assert problems(f" {old_pub} @ {max(seqs)} ") == []
+    late = problems(f"{old_pub}@{today - dt.timedelta(days=1)}")
+    assert late and all("nur gültig bis" in p for p in late)
+    stamp = "2000-01-01T00:00:00+00:00"
+    assert any(f"nur gültig bis {stamp}" in p for p in problems(f"{old_pub}@{stamp}"))
+    assert any(f"nur gültig bis Seq {min(seqs) - 1}" in p for p in problems(f"{old_pub}@{min(seqs) - 1}"))
+    assert any("unbekannter Schlüssel" in p for p in problems(f"{old_pub}@kein-datum"))   # ungültig → ignoriert

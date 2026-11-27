@@ -6,7 +6,7 @@ Bewusst ohne Import aus main.py (kein Zirkelimport): Mandantenrecht wird direkt 
 Token-Gruppen gelesen (gleiche Logik wie main.tenant_access, aber ohne DB-Zugriff).
 
 Rate-Limits je Benutzer (gleitendes Fenster; STATE_BACKEND=redis → gemeinsam für alle Worker/Replikas,
-sonst je Prozess; Ausfall des gemeinsamen Zustands → fail-open):
+sonst je Prozess; Ausfall des gemeinsamen Zustands → lokal mit Budget-Anteil je Prozess):
   INTEL_RATE_SUGGEST  Anfragen/Minute für /trips/suggest, Default 60
   INTEL_RATE_GEO      Anfragen/Minute für /api/geo/*, Default 30
   INTEL_RATE_SCAN     Anfragen/Minute für /scan (Bildauswertung), Default 20 – geprüft bevor der Body
@@ -14,7 +14,7 @@ sonst je Prozess; Ausfall des gemeinsamen Zustands → fail-open):
 Je Upstream begrenzt geo.Upstream die Gleichzeitigkeit (sofort 503) und sperrt nach Fehlern kurz.
 
 Reverse-Geocoding: POST /api/geo/reverse {lat, lon} – Koordinaten nicht in der URL (Access-Logs).
-GET mit Query-Parametern bleibt eine Version lang erhalten (deprecated).
+Das frühere GET mit Query-Parametern ist entfernt (Review X15; App und Web nutzen nur POST) → 405.
 """
 import datetime as dt
 import logging
@@ -24,7 +24,7 @@ import time
 from collections import deque
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.concurrency import run_in_threadpool
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
@@ -76,10 +76,14 @@ class RateLimiter:
                 retry = shared.window(key, limit, self.window)
             except state.StateUnavailable:
                 security.state_error("rate_limit")
+                self._local(key, security.local_budget(limit))   # Ausfall: Anteil am Budget je Prozess (X5)
                 return
             if retry:
                 self._reject(key, retry)
             return
+        self._local(key, limit)
+
+    def _local(self, key: str, limit: int) -> None:
         now = time.monotonic()
         with self.lock:
             if len(self.hits) > 10_000:   # Speicher begrenzen: leere/alte Einträge verwerfen
@@ -286,14 +290,6 @@ def geo_reverse_post(req: LatLon, _: GeoUser):
     """Reverse-Geocoding; Koordinaten im Body (nicht in URL/Access-Log)."""
     return _reverse(req.lat, req.lon)
 
-
-@router.get("/api/geo/reverse", response_model=ReverseResult, deprecated=True)
-def geo_reverse(_: GeoUser, response: Response,
-                lat: Annotated[float, Query(ge=-90, le=90, allow_inf_nan=False)],
-                lon: Annotated[float, Query(ge=-180, le=180, allow_inf_nan=False)]):
-    """Veraltet: POST verwenden. Das Zugriffslog enthält keine Query-Strings (logfilter)."""
-    response.headers["Deprecation"] = "true"
-    return _reverse(lat, lon)
 
 
 @router.post("/api/t/{tenant}/trips/suggest", response_model=Suggestion,

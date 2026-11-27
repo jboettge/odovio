@@ -5,8 +5,9 @@ kommagetrennt, "*" = alle) – dann der rechteste nicht vertrauenswürdige Eintr
 setzt den Client bereits gleich; die Prüfung hier gilt auch ohne uvicorn (Tests, andere Server).
 
 Gemeinsamer Zustand (app/state.py): STATE_BACKEND=memory → je Prozess (nur 1 Worker/1 Replika);
-STATE_BACKEND=redis → Valkey/Redis für alle Worker und Replikas (Token-Bucket/Sperren atomar per Lua). Ausfall:
-Rate-Limits fail-open (Sicherheits-Log state_backend_error), Brute-Force-Sperren lokal je Prozess weiter.
+STATE_BACKEND=redis → Valkey/Redis für alle Worker und Replikas (Token-Bucket/Sperren atomar per Lua). Ausfall
+(Sicherheits-Log state_backend_error): Rate-Limits lokal je Prozess mit dessen Anteil am Budget (Limit ÷
+WEB_CONCURRENCY × REPLICAS_HINT, aufgerundet, mind. 1 – Review X5), Brute-Force-Sperren lokal je Prozess weiter.
 
 Rate-Limits (Token-Bucket je Client-IP und Kategorie):
   RATE_IP_PER_MIN      /api/* und alles Übrige, Default 600 (Burst RATE_IP_BURST, Default ¼)
@@ -25,6 +26,10 @@ Brute-Force/Missbrauch (Sperre der IP, Antwort 429 „Zu viele fehlgeschlagene A
   BRUTE_BACKOFF_S      Sperrdauern bei wiederholter Sperre, Default "300,900,3600"
   BRUTE_LEVEL_RESET_S  ohne neue Sperre in dieser Zeit beginnt der Backoff von vorn, Default 86400
   SECURITY_ALLOWLIST   CIDRs, die nie gesperrt/IP-limitiert werden (z. B. LAN-Monitoring)
+  IPV6_LIMIT_PREFIX    IPv6: Rate-Limits und Sperren je Präfix dieser Länge, Default 64 (ein Anschluss erhält
+                       meist ein ganzes /64 – sonst umginge jede neue Adresse daraus Limits/Sperren; Review X16).
+                       128 = je Adresse. Das Sicherheits-Log nennt weiter die volle Client-IP (fail2ban/CrowdSec)
+                       und zusätzlich das Netz (Feld net).
   Die Sperre gilt nur für /api/* – Web-Frontend (/, /assets …) und /health* bleiben erreichbar (Rate-Limits
   gelten dort weiter); so zeigt die SPA die 429-Meldung der API an statt einer leeren Seite.
 X-Forwarded-For von einem nicht vertrauten Peer (FORWARDED_ALLOW_IPS passt nicht zum Proxy → alle Clients
@@ -38,6 +43,7 @@ import contextvars
 import ipaddress
 import json
 import logging
+import math
 import os
 import re
 import sys
@@ -52,7 +58,7 @@ from urllib.parse import quote, urlsplit
 
 from fastapi import HTTPException, status
 
-from . import metrics, runtime, state
+from . import config, metrics, runtime, state
 
 log = logging.getLogger("fahrzeugbuch.security")
 
@@ -281,6 +287,27 @@ def in_list(host: str | None, spec: str) -> bool:
     return addr is not None and any(addr.version == n.version and addr in n for n in nets)
 
 
+def limit_key(ip: str) -> str:
+    """Schlüssel für Rate-Limits/Sperren: IPv4 je Adresse, IPv6 je Präfix (IPV6_LIMIT_PREFIX, Default /64)."""
+    addr = _ip(ip)
+    if addr is None or addr.version == 4:
+        return ip
+    if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped is not None:
+        return str(addr.ipv4_mapped)
+    prefix = min(128, max(32, env_int("IPV6_LIMIT_PREFIX", 64)))
+    if prefix == 128:
+        return ip
+    try:
+        return str(ipaddress.ip_network(f"{addr.exploded.split('%')[0]}/{prefix}", strict=False))
+    except ValueError:
+        return ip
+
+
+def _block_event_ip(key: str) -> dict:
+    """Sperr-Ereignis: ip = volle Client-IP (aus dem Kontext, für fail2ban/CrowdSec), net = gesperrtes Netz."""
+    return {"net": key} if "/" in key else {"ip": key}
+
+
 def trusted_proxy(host: str | None) -> bool:
     return in_list(host, os.environ.get("FORWARDED_ALLOW_IPS", "127.0.0.1"))
 
@@ -362,8 +389,18 @@ def state_error(where: str) -> None:
     event("state_backend_error", reason=where, throttle=30)
 
 
+def local_budget(limit: int) -> int:
+    """Anteil dieses Prozesses an einem gemeinsamen Limit, solange der gemeinsame Zustand ausfällt (X5)."""
+    return max(1, math.ceil(limit / config.processes()))
+
+
+def take_local(key: str, per_min: int, burst: int) -> int:
+    """Ausweich-Bucket bei Ausfall des gemeinsamen Zustands: Anteil des Prozesses am Budget."""
+    return buckets.take(key, local_budget(per_min), local_budget(burst))
+
+
 def take(key: str, per_min: int, burst: int) -> int:
-    """Token-Bucket (gemeinsam oder je Prozess); 0 → erlaubt, sonst Retry-After. Ausfall → fail-open."""
+    """Token-Bucket (gemeinsam oder je Prozess); 0 → erlaubt, sonst Retry-After. Ausfall → lokales Budget."""
     shared = state.shared()
     if shared is None:
         return buckets.take(key, per_min, burst)
@@ -371,7 +408,7 @@ def take(key: str, per_min: int, burst: int) -> int:
         return shared.take(key, per_min, burst)
     except state.StateUnavailable:
         state_error("rate_limit")
-        return 0
+        return take_local(key, per_min, burst)
 
 PUBLIC_PATHS = ("/auth/config", "/health", "/health/live", "/health/ready", "/metrics", "/docs", "/openapi.json")
 
@@ -447,7 +484,8 @@ class Guard:
         level = prev[1] + 1 if prev and now - prev[2] < reset_s else 0
         duration = steps[min(level, len(steps) - 1)]
         self._set_block(ip, now, duration, level)
-        event("brute_force_block", status=429, reason=reason, ip=ip, retry_after=duration, level=level + 1)
+        event("brute_force_block", status=429, reason=reason, retry_after=duration, level=level + 1,
+              **_block_event_ip(ip))
 
     def _set_block(self, ip: str, now: float, duration: int, level: int) -> None:
         self.blocks[ip] = (now + duration, level, now)
@@ -518,7 +556,8 @@ def _shared_block(ip: str, reason: str, res: tuple[int, int] | None) -> None:
     if res is not None:
         duration, level = res
         guard.mirror(ip, duration, level)
-        event("brute_force_block", status=429, reason=reason, ip=ip, retry_after=duration, level=level)
+        event("brute_force_block", status=429, reason=reason, retry_after=duration, level=level,
+              **_block_event_ip(ip))
 
 
 def blockable(kind: str) -> bool:
@@ -540,8 +579,10 @@ async def gate(ip: str, kind: str, per_min: int, burst: int) -> tuple[int, int]:
     try:
         blocked, retry = await shared.agate(ip, kind, per_min, burst, check_block, not local_block)
     except state.StateUnavailable:
-        state_error("gate")
-        return local_block, 0                     # Rate-Limit fail-open, Sperren lokal
+        state_error("gate")                       # Sperren lokal, Rate-Limit mit lokalem Budget (X5)
+        if local_block:
+            return local_block, 0
+        return 0, take_local(f"{kind}:{ip}", per_min, burst)
     return max(blocked, local_block), (0 if local_block else retry)
 
 
@@ -572,10 +613,11 @@ def after_auth(sub: str) -> None:
     c = current()
     if c is not None:
         c.sub = sub
-        guard.auth_ok(c.ip, sub)
+        key = limit_key(c.ip)
+        guard.auth_ok(key, sub)
         if (shared := state.shared()) is not None:
             try:
-                shared.auth_ok(c.ip, sub)
+                shared.auth_ok(key, sub)
             except state.StateUnavailable:
                 state_error("brute_force")
     check_user_rate(sub)
@@ -690,7 +732,8 @@ def json_problem(body: bytes) -> str | None:
 
 class JsonGuard:
     """ASGI (innerhalb RequestGuard, d. h. nach den Body-Limits): JSON-Bodies unter /api/* vor dem Parsen auf
-    Tiefe/Elementzahl prüfen → 422; der gepufferte Body wird danach unverändert an die App gereicht."""
+    Tiefe/Elementzahl prüfen → 422; der gepufferte Body wird danach unverändert an die App gereicht.
+    Mehrere Content-Type-Header → 400 (sonst prüfte diese Middleware einen anderen als die App)."""
 
     def __init__(self, app):
         self.app = app
@@ -699,7 +742,15 @@ class JsonGuard:
         if scope["type"] != "http" or scope["method"] not in UNSAFE_METHODS or \
                 not scope["path"].startswith("/api/") or scope["path"].endswith("/blob"):
             return await self.app(scope, receive, send)
-        ctype = dict(scope.get("headers") or []).get(b"content-type", b"").lower()
+        ctypes = [v.lower() for k, v in scope.get("headers") or [] if k == b"content-type"]
+        if len(ctypes) > 1:
+            # mehrdeutig: Starlette/FastAPI werten den ersten aus, eine Prüfung des letzten liesse sich umgehen (X6)
+            await send({"type": "http.response.start", "status": 400,
+                        "headers": [(b"content-type", b"application/json")]})
+            await send({"type": "http.response.body",
+                        "body": json.dumps({"detail": "Content-Type mehrfach angegeben"}).encode()})
+            return
+        ctype = ctypes[0] if ctypes else b""
         if ctype and b"json" not in ctype:
             return await self.app(scope, receive, send)
         chunks, more = [], True
@@ -784,10 +835,11 @@ class SecurityMiddleware:
         if not path.startswith(HOST_CHECK_EXEMPT) and not host_allowed(host):
             event("host_rejected", status=400, reason=host or "(leer)", throttle=60)
             return await reply(wrapped, 400, "Ungültiger Host")
-        if not allowlisted(ctx.ip):
+        allowed_ip, key = allowlisted(ctx.ip), limit_key(ctx.ip)
+        if not allowed_ip:
             kind = category(path)
             per_min, burst = limit_for(kind)
-            blocked, retry = await gate(ctx.ip, kind, per_min, burst)
+            blocked, retry = await gate(key, kind, per_min, burst)
             if blocked:
                 event("rate_limited", status=429, reason="blocked", throttle=30)
                 return await reply(wrapped, 429, "Zu viele fehlgeschlagene Anfragen", blocked)
@@ -812,9 +864,10 @@ class SecurityMiddleware:
                 event("auth_missing", status=401, reason=reason, throttle=60)
             else:
                 event("auth_failed", status=401, reason=reason, sub=ctx.auth_sub)
-                await record_auth_failed(ctx.ip, ctx.auth_sub)
-        elif code in (403, 404) and ctx.probe:
-            await record_probe(ctx.ip, ctx.sub, ctx.probe)
+                if not allowed_ip:
+                    await record_auth_failed(key, ctx.auth_sub)
+        elif code in (403, 404) and ctx.probe and not allowed_ip:
+            await record_probe(key, ctx.sub, ctx.probe)
 
     @staticmethod
     def _headers(scope, ctx: RequestContext, cors_origin: str | bool | None, cors_configured: bool) -> list:
@@ -870,6 +923,47 @@ def _check_forwarded_peer(scope) -> None:
 
 
 # ---------- Startprüfung ----------
+# Hilfsdienste, an die Fahrtdaten gehen: Koordinaten/Tracks (OSRM, Photon), Fahrten/Orte (LLM), Belegfotos (Vision)
+UPSTREAM_URLS = ("OSRM_URL", "PHOTON_URL", "VLLM_URL", "VLLM_VISION_URL")
+INTERNAL_SUFFIXES = (".local", ".internal", ".intern", ".lan", ".home.arpa", ".svc", ".cluster.local", ".localhost")
+
+
+def internal_host(host: str) -> bool:
+    """Host im eigenen Netz: Name ohne Punkt (Docker/Kubernetes-Dienst), localhost, private/Loopback-IP oder
+    interne Domain-Endung."""
+    host = host.strip("[]").lower().rstrip(".")
+    if not host:
+        return False
+    try:
+        ip = ipaddress.ip_address(host)
+        return ip.is_private or ip.is_loopback or ip.is_link_local
+    except ValueError:
+        pass
+    return "." not in host or host == "localhost" or host.endswith(INTERNAL_SUFFIXES)
+
+
+def upstream_warnings(env=os.environ.get) -> list[str]:
+    """X14: Hilfsdienst unverschlüsselt (http) ausserhalb des eigenen Netzes → Warnung (Fahrtdaten/Bilder im
+    Klartext über fremde Netze). https zu einem externen Host ist bewusst erlaubt (nur Hinweis im Log)."""
+    out = []
+    allow_http = env("UPSTREAM_ALLOW_HTTP") == "1"          # bewusst (z. B. VPN/WireGuard zwischen den Hosts)
+    for name in UPSTREAM_URLS:
+        url = (env(name) or "").strip()
+        if not url:
+            continue
+        parts = urlsplit(url)
+        host = parts.hostname or ""
+        if parts.scheme == "http" and not internal_host(host) and not allow_http:
+            out.append(f"{name} über http an externen Host {host or '-'}: Fahrtdaten/Bilder unverschlüsselt – "
+                       "https verwenden oder Dienst im eigenen Netz betreiben")
+        elif parts.scheme not in ("http", "https"):
+            out.append(f"{name}: Schema {parts.scheme or '-'} ungültig (http/https erwartet)")
+        elif parts.scheme == "https" and not internal_host(host):
+            logging.getLogger("fahrzeugbuch.config").info(
+                "Hinweis: %s zeigt auf externen Host %s – Fahrtdaten/Bilder verlassen das eigene Netz", name, host)
+    return out
+
+
 def config_warnings() -> list[str]:
     env = os.environ.get
     out = []
@@ -902,7 +996,7 @@ def config_warnings() -> list[str]:
     mw, mnets, _ = _nets(env("METRICS_ALLOW", ""))
     if mw or any(n.prefixlen == 0 for n in mnets):
         out.append("METRICS_ALLOW umfasst alle Adressen: /metrics öffentlich")
-    return out + runtime.warnings()
+    return out + upstream_warnings(env) + runtime.warnings()
 
 
 class InsecureConfig(RuntimeError):

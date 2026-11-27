@@ -6,10 +6,17 @@ Teil der Revisions-Snapshots (schemas.VehicleData): Altrevisionen ohne Schlüsse
 Datensatz ↔ Journal als gleich, solange der Datensatz vin = NULL hat (integrity._same, wie article_id und
 km_estimated). Bestehende Revisionen und damit die Hash-Kette bleiben unverändert.
 
+Downgrade wird NICHT unterstützt (Review S12): Er löscht erfasste VINs, und jede unter 0005 geschriebene
+Fahrzeug-Revision enthält den Schlüssel `vin` – der Code von 0004 meldete diese Fahrzeuge danach als vom Journal
+abweichend. Rollback auf ein älteres Image daher nur per Datenbank-Sicherung. Für Tests/Notfälle erzwingbar mit
+ALLOW_UNSUPPORTED_DOWNGRADE=1; die Spalte wird dann per ALTER TABLE … DROP COLUMN entfernt (SQLite ≥ 3.35, ohne
+Batch-Neuaufbau der Tabelle – dieser brach unter PRAGMA foreign_keys=ON ab, sobald Fahrten auf Fahrzeuge zeigen).
+
 Revision ID: 0005
 Revises: 0004
 Create Date: 2026-11-27
 """
+import os
 from collections.abc import Sequence
 
 import sqlalchemy as sa
@@ -36,6 +43,9 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    if os.environ.get("ALLOW_UNSUPPORTED_DOWNGRADE") != "1":
+        raise RuntimeError("Downgrade 0005 → 0004 nicht unterstützt (VINs gingen verloren, Integritätsprüfung "
+                           "meldete Fahrzeuge als abweichend) – Rollback per Datenbank-Sicherung; erzwingen nur mit "
+                           "ALLOW_UNSUPPORTED_DOWNGRADE=1")
     if _present():
-        with op.batch_alter_table(TABLE) as batch:
-            batch.drop_column(COLUMN)
+        op.execute(f'ALTER TABLE {TABLE} DROP COLUMN "{COLUMN}"')

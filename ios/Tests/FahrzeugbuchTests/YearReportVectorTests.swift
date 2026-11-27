@@ -116,6 +116,63 @@ final class YearReportVectorTests: XCTestCase {
         }
     }
 
+    func testConsumptionMatchesServerVectors() throws {
+        let cases = try XCTUnwrap(Self.vector("consumption")["cases"] as? [[String: Any]])
+        XCTAssertFalse(cases.isEmpty)
+        for c in cases {
+            let name = c["name"] as? String ?? "?"
+            let fuel = (c["fuel"] as? [[String: Any]] ?? []).map { f in
+                FuelEntry(id: f["id"] as? String ?? UUID().uuidString, vehicleId: "v",
+                          date: Fixture.day(f["date"] as! String), km: f["km"] as! Int,
+                          liters: Self.number(f["liters"]) ?? 0, priceTotal: Self.number(f["price_total"]) ?? 0,
+                          fullTank: f["full_tank"] as? Bool ?? true)
+            }
+            let points = StatsCalculator.consumptionPoints(fuel)
+            let e = try XCTUnwrap(c["expected"] as? [String: Any])
+            let expected = e["points"] as? [[String: Any]] ?? []
+            XCTAssertEqual(points.count, expected.count, name)
+            for (p, x) in zip(points, expected) {
+                XCTAssertEqual(p.km, x["km"] as? Int, name)
+                XCTAssertEqual(p.distance, x["distance"] as? Int, name)
+                XCTAssertEqual(p.liters, Self.number(x["liters"]) ?? -1, accuracy: 0.005, "\(name) liters")
+                XCTAssertEqual(p.cost, Self.number(x["cost"]) ?? -1, accuracy: 0.005, "\(name) cost")
+                XCTAssertEqual(p.consumption, Self.number(x["consumption"]) ?? -1, accuracy: 0.005, "\(name) l/100")
+            }
+        }
+    }
+
+    func testCurrentKmMatchesServerVectors() throws {
+        let cases = try XCTUnwrap(Self.vector("current_km")["cases"] as? [[String: Any]])
+        XCTAssertFalse(cases.isEmpty)
+        for c in cases {
+            let name = c["name"] as? String ?? "?"
+            let vd = try XCTUnwrap(c["vehicle"] as? [String: Any])
+            let v = Vehicle(name: vd["name"] as? String ?? "Auto", initialKm: vd["initial_km"] as? Int ?? 0)
+            let odometer = (c["odometer"] as? [[String: Any]] ?? []).map { o in
+                OdometerReading(vehicleId: v.id, date: Fixture.day(o["date"] as! String), km: o["km"] as! Int)
+            }
+            let fuel = (c["fuel"] as? [[String: Any]] ?? []).map { f in
+                FuelEntry(vehicleId: v.id, date: Fixture.day(f["date"] as! String), km: f["km"] as! Int,
+                          liters: Self.number(f["liters"]) ?? 0, priceTotal: Self.number(f["price_total"]) ?? 0)
+            }
+            let maintenance = (c["maintenance"] as? [[String: Any]] ?? []).map { m in
+                Maintenance(vehicleId: v.id, date: Fixture.day(m["date"] as! String), km: m["km"] as? Int,
+                            title: m["title"] as? String ?? "", nextDueKm: m["next_due_km"] as? Int)
+            }
+            let trips: [Trip] = (c["trips"] as? [[String: Any]] ?? []).enumerated().map { pair in
+                var t = Self.trip(pair.element, id: "t\(pair.offset)", vehicleId: v.id)
+                t.deleted = pair.element["deleted"] as? Bool ?? false
+                return t
+            }
+            let stats = StatsCalculator.stats(vehicle: v, odometer: odometer, fuel: fuel, maintenance: maintenance,
+                                              materials: [], trips: trips, today: Fixture.day("2026-01-01"))
+            let e = try XCTUnwrap(c["expected"] as? [String: Any])
+            XCTAssertEqual(stats.currentKm, e["current_km"] as? Int, name)
+            XCTAssertEqual(stats.drivenKm, e["driven_km"] as? Int, name)
+            XCTAssertEqual(stats.due.filter(\.overdue).map(\.title).sorted(), e["overdue"] as? [String], name)
+        }
+    }
+
     func testTaxParamResolutionPrefersTenantAndFallsBackToDefaults() {
         let params = [
             TaxParam(year: 2026, scope: "federal", key: "km_rate", value: 0.70),

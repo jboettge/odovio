@@ -21,7 +21,7 @@ import anyio
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, Request, Response, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, StreamingResponse
-from sqlalchemy import select, text
+from sqlalchemy import func, select, text
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 from starlette.middleware.gzip import DEFAULT_EXCLUDED_CONTENT_TYPES, GZipMiddleware
@@ -33,6 +33,7 @@ from .auth import TENANT_SLUG, User, can_write, get_config, require_user
 from .db import engine, get_session, snapshot_session
 from .geo import UpstreamError
 from .integrity import VerifyBusy, key_id, maybe_anchor, public_key_b64, signing_key, verify_tenant
+from .jobs import xact_lock
 from .logbook import build_logbook, build_year_report, iter_trips_csv
 from .migrate import create_schema, head_revision, known_revisions, schema_state
 from .report import build_report
@@ -537,7 +538,7 @@ async def health_ready():
     """Readiness: DB erreichbar, Schema = Alembic head oder ein neuerer, als kompatibel markierter Stand
     (Rolling Update/Rollback, app.migrate), kein SIGTERM. Valkey-Ausfall macht NICHT unbereit (alle Pods teilen
     Valkey – sonst Totalausfall bei dessen Neustart): 200 mit "degraded": true; Rate-Limits laufen dann
-    fail-open, Sperren lokal (app.security)."""
+    lokal mit dem Budget-Anteil je Prozess, Sperren lokal (app.security)."""
     checks = {"shutdown": "ok" if not SHUTTING_DOWN.is_set() else "shutting_down"}
     loop = asyncio.get_running_loop()
     try:
@@ -629,10 +630,15 @@ def checklist_templates(_: CurrentUser):
 def get_changes(access: TenantAccess, db: DB, since: Annotated[int, Query(ge=0)] = 0,
                 limit: Annotated[int, Query(ge=1, le=CHANGES_MAX)] = CHANGES_LIMIT):
     """Änderungen seit `since`, seitenweise: solange `has_more`, mit since=cursor erneut abrufen.
-    Leserolle: Privatfahrten und private Orte maskiert."""
+    Leserolle: Privatfahrten und private Orte maskiert.
+    Rate-Limit gestaffelt (Review X7): since=0 (Vollabgleich) RATE_FULL_SYNC; liegt `since` mehr als CHANGES_MAX
+    Revisionen hinter dem Stand (weitere Seiten eines Vollabgleichs bzw. since=1 statt 0) RATE_DEEP_SYNC;
+    inkrementell nur die allgemeinen Limits."""
+    db.refresh(access.tenant)
     if since == 0:
         _rate(access, "changes0", "RATE_FULL_SYNC", 10)
-    db.refresh(access.tenant)
+    elif access.tenant.seq - since > CHANGES_MAX:
+        _rate(access, "changes-deep", "RATE_DEEP_SYNC", 60)
     return changes_since(db, access.tenant, since, limit, mask_private=access.masked)
 
 
@@ -958,17 +964,33 @@ def audit_verify(access: TenantAccess, db: DB, full: Annotated[bool, Query()] = 
     return result
 
 
+ANCHORS_PAGE_MAX = 1000
+
+
 @app.get("/api/t/{tenant}/audit/anchors", response_model=schemas.AnchorList)
-def audit_anchors(access: TenantAccess, db: DB):
-    """Signierte Anker zur externen Archivierung (z. B. täglich per n8n → Paperless)."""
+def audit_anchors(access: TenantAccess, db: DB,
+                  after_seq: Annotated[int | None, Query(ge=0)] = None,
+                  limit: Annotated[int | None, Query(ge=1, le=ANCHORS_PAGE_MAX)] = None):
+    """Signierte Anker zur externen Archivierung (z. B. täglich per n8n → Paperless), aufsteigend nach Seq.
+    Paging (Review S15): `after_seq` (nur Anker mit grösserer Seq) und `limit`; ist danach noch mehr vorhanden,
+    nennt `next_after_seq` den Wert für die nächste Seite. Ohne `limit` wie bisher alle (ab `after_seq`).
+    `total` = Anzahl aller Anker des Mandanten."""
     key = signing_key()
-    q = select(models.Anchor).where(models.Anchor.tenant_id == access.tenant.id).order_by(models.Anchor.seq)
+    tenant_q = models.Anchor.tenant_id == access.tenant.id
+    q = select(models.Anchor).where(tenant_q).order_by(models.Anchor.seq)
+    if after_seq is not None:
+        q = q.where(models.Anchor.seq > after_seq)
+    rows = list(db.scalars(q if limit is None else q.limit(limit + 1)))
+    more = limit is not None and len(rows) > limit
+    rows = rows[:limit] if more else rows
     return {
         "tenant": access.tenant.slug,
         "public_key": public_key_b64(key) if key else None,
         "key_id": key_id(key) if key else None,
         "message_format": "fahrzeugbuch-anchor|<tenant>|<seq>|<head_hash>|<created_at>",
-        "anchors": [{c: getattr(a, c) for c in schemas.AnchorOut.model_fields} for a in db.scalars(q)],
+        "anchors": [{c: getattr(a, c) for c in schemas.AnchorOut.model_fields} for a in rows],
+        "total": db.scalar(select(func.count()).select_from(models.Anchor).where(tenant_q)),
+        "next_after_seq": rows[-1].seq if more else None,
     }
 
 
@@ -996,55 +1018,73 @@ def get_members(access: TenantAccess, db: DB):
             "manageable": _manageable(access)}
 
 
-def _member_admin(access: Access, db: Session) -> tuple[members.KeycloakAdmin, models.Tenant]:
-    """Verwalter im Web-Frontend + Keycloak konfiguriert; Mandantenzeile sperren (Änderungen je Mandant
-    nacheinander → „letzter Verwalter“ sicher geprüft, Journal sequenziell)."""
+def _member_admin(access: Access, db: Session) -> members.KeycloakAdmin:
+    """Verwalter im Web-Frontend + Keycloak konfiguriert; Änderungen je Mandant nacheinander („letzter Verwalter“
+    sicher geprüft): PostgreSQL per Advisory-Lock "members" – die Mandantenzeile wird erst fürs Journal gesperrt,
+    Syncs warten so nicht auf Keycloak; SQLite (ein Schreiber) sperrt wie bisher sofort."""
     _require_admin_web(access)
     _rate(access, "members-write", "RATE_MEMBERS", 30)
     kc = members.admin_client()
     if kc is None:
         raise HTTPException(status.HTTP_501_NOT_IMPLEMENTED, members.NOT_CONFIGURED)
-    return kc, _locked_tenant(db, access)
+    if db.get_bind().dialect.name == "postgresql":
+        xact_lock(db, "members", access.tenant.id)
+    else:
+        _locked_tenant(db, access)
+    return kc
 
 
-def _member_change(db: Session, tenant: models.Tenant, fn):
-    """Keycloak ändern, dann Journal (Revision „membership“) committen; Fehler → nichts im Journal."""
+def _member_change(db: Session, access: Access, fn):
+    """Keycloak ändern, dann Journal (Revision „membership“) unter der Mandantensperre committen. Scheitert ein
+    Schritt (Keycloak, Journal, Commit), werden ausgeführte Keycloak-Schritte zurückgenommen (Kompensation) und
+    nichts erscheint im Journal."""
+    change = members.Change()
     try:
-        out = fn(tenant)
+        out = fn(access.tenant, change)
+        tenant = _locked_tenant(db, access)
+        for entry in change.entries:
+            entry(tenant)
+        maybe_anchor(db, tenant)
+        db.commit()
     except (UpstreamError, members.KeycloakDenied) as e:
+        change.compensate()
         db.rollback()
         raise members.upstream_error(e) from e
     except HTTPException:
+        change.compensate()
         db.rollback()
         raise
-    maybe_anchor(db, tenant)
-    db.commit()
+    except Exception:
+        change.compensate()
+        db.rollback()
+        log.exception("Mitgliederänderung fehlgeschlagen – Keycloak-Schritte zurückgenommen")
+        raise
     return out
 
 
 @app.post("/api/t/{tenant}/members", response_model=schemas.Member, status_code=status.HTTP_201_CREATED)
 def add_member(req: schemas.MemberCreate, access: TenantAccess, db: DB):
     """Benutzer (Benutzername oder E-Mail, muss in Keycloak existieren) mit genau einer Rolle aufnehmen."""
-    kc, tenant = _member_admin(access, db)
-    out = _member_change(db, tenant, lambda t: members.add_member(db, t, access.user, kc, req.user, req.role,
-                                                                  is_admin=True))
+    kc = _member_admin(access, db)
+    out = _member_change(db, access, lambda t, ch: members.add_member(db, t, access.user, kc, req.user, req.role,
+                                                                      is_admin=True, change=ch))
     security.event("admin_action", status=201, reason="member_add", target=out["id"], role=req.role)
     return out
 
 
 @app.patch("/api/t/{tenant}/members/{member_id}", response_model=schemas.Member)
 def patch_member(member_id: MemberId, req: schemas.MemberUpdate, access: TenantAccess, db: DB):
-    kc, tenant = _member_admin(access, db)
-    out = _member_change(db, tenant, lambda t: members.change_role(db, t, access.user, kc, member_id, req.role,
-                                                                   is_admin=True))
+    kc = _member_admin(access, db)
+    out = _member_change(db, access, lambda t, ch: members.change_role(db, t, access.user, kc, member_id,
+                                                                       req.role, is_admin=True, change=ch))
     security.event("admin_action", status=200, reason="member_role", target=member_id, role=req.role)
     return out
 
 
 @app.delete("/api/t/{tenant}/members/{member_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_member(member_id: MemberId, access: TenantAccess, db: DB):
-    kc, tenant = _member_admin(access, db)
-    _member_change(db, tenant, lambda t: members.remove_member(db, t, access.user, kc, member_id))
+    kc = _member_admin(access, db)
+    _member_change(db, access, lambda t, ch: members.remove_member(db, t, access.user, kc, member_id, change=ch))
     security.event("admin_action", status=204, reason="member_remove", target=member_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 

@@ -7,7 +7,11 @@ Env:
   LLM_TIMEOUT_S      Default 10
 
 Datenschutz: Das Bild wird nur an das selbst gehostete LLM weitergereicht – weder gespeichert noch
-protokolliert. Das Ergebnis ist ein Vorschlag; übernommen wird in der App.
+protokolliert. Vorher entfernt der Server Metadaten (Review X14, ohne Neukodierung der Pixel): JPEG ohne
+APP1 (Exif inkl. GPS, XMP), APP13 (IPTC), Kommentare, MPF und angehängte Zusatzbilder – die Ausrichtung bleibt als
+minimales Exif (nur Orientation) erhalten; PNG ohne eXIf/tEXt/zTXt/iTXt/tIME. Lässt sich die Struktur nicht
+lesen, geht das Bild unverändert weiter (die App sendet ohnehin neu kodierte Bilder). Das Ergebnis ist ein
+Vorschlag; übernommen wird in der App.
 """
 import base64
 import binascii
@@ -58,7 +62,7 @@ JPEG, PNG = b"\xff\xd8\xff", b"\x89PNG\r\n\x1a\n"
 
 
 def decode_image(image_b64: str) -> tuple[bytes, str]:
-    """Base64 (optional als data:-URL) → (Bytes, MIME). Nur JPEG/PNG, dekodiert ≤ 2 MiB.
+    """Base64 (optional als data:-URL) → (Bytes ohne Metadaten, MIME). Nur JPEG/PNG, dekodiert ≤ 2 MiB.
     Fehlermeldungen ohne Teile der Eingabe."""
     s = image_b64.strip()
     if s.startswith("data:"):
@@ -75,10 +79,114 @@ def decode_image(image_b64: str) -> tuple[bytes, str]:
     if len(raw) > MAX_IMAGE_BYTES:
         raise InvalidImage("Bild zu gross (max. 2 MiB)")
     if raw.startswith(JPEG):
-        return raw, "image/jpeg"
+        return strip_metadata(raw, "image/jpeg"), "image/jpeg"
     if raw.startswith(PNG):
-        return raw, "image/png"
+        return strip_metadata(raw, "image/png"), "image/png"
     raise InvalidImage("Nur JPEG oder PNG")
+
+
+# ---------- Metadaten entfernen ----------
+class _Malformed(ValueError):
+    pass
+
+
+_JPEG_DROP = {0xE1, 0xED, 0xFE}                  # APP1 (Exif/XMP), APP13 (IPTC/Photoshop), COM
+_PNG_DROP = {b"eXIf", b"tEXt", b"zTXt", b"iTXt", b"tIME"}
+_ORIENTATION = 0x0112
+
+
+def _exif_orientation(payload: bytes) -> int | None:
+    """Orientation (1–8) aus dem IFD0 eines APP1-Exif-Segments, sonst None."""
+    if not payload.startswith(b"Exif\0\0"):
+        return None
+    tiff = payload[6:]
+    order = {b"II*\0": "little", b"MM\0*": "big"}.get(tiff[:4])
+    if order is None:
+        return None
+    off = int.from_bytes(tiff[4:8], order)
+    if off + 2 > len(tiff):
+        return None
+    for i in range(int.from_bytes(tiff[off:off + 2], order)):
+        e = off + 2 + 12 * i
+        if e + 12 > len(tiff):
+            break
+        if int.from_bytes(tiff[e:e + 2], order) == _ORIENTATION:
+            v = int.from_bytes(tiff[e + 8:e + 10], order)
+            return v if 1 <= v <= 8 else None
+    return None
+
+
+def _orientation_segment(v: int) -> bytes:
+    """Minimales APP1-Exif nur mit IFD0/Orientation (Big Endian)."""
+    entry = _ORIENTATION.to_bytes(2, "big") + (3).to_bytes(2, "big") + (1).to_bytes(4, "big") \
+        + v.to_bytes(2, "big") + b"\0\0"
+    payload = b"Exif\0\0" + b"MM\0*" + (8).to_bytes(4, "big") + (1).to_bytes(2, "big") + entry + bytes(4)
+    return b"\xff\xe1" + (len(payload) + 2).to_bytes(2, "big") + payload
+
+
+def _strip_jpeg(raw: bytes) -> bytes:
+    head, rest, orientation, i = [raw[:2]], [], None, 2
+    while True:
+        if i >= len(raw) or raw[i] != 0xFF:
+            raise _Malformed
+        while i < len(raw) and raw[i] == 0xFF:          # Füllbytes vor dem Marker
+            i += 1
+        if i >= len(raw):
+            raise _Malformed
+        marker = raw[i]
+        i += 1
+        if 0xD0 <= marker <= 0xD7 or marker == 0x01:  # ohne Länge
+            rest.append(bytes([0xFF, marker]))
+            continue
+        if i + 2 > len(raw):
+            raise _Malformed
+        length = int.from_bytes(raw[i:i + 2], "big")
+        if length < 2 or i + length > len(raw):
+            raise _Malformed
+        if marker == 0xDA:                             # Start of Scan: Bilddaten bis EOI, Anhang verwerfen
+            end = raw.find(b"\xff\xd9", i + length)
+            if end < 0:
+                raise _Malformed
+            rest.append(b"\xff\xda" + raw[i:end + 2])
+            break
+        payload = raw[i + 2:i + length]
+        if marker in _JPEG_DROP or (marker == 0xE2 and payload.startswith(b"MPF\0")):
+            if marker == 0xE1 and orientation is None:
+                orientation = _exif_orientation(payload)
+        elif marker == 0xE0 and not rest:              # JFIF/JFXX bleibt direkt nach SOI
+            head.append(b"\xff\xe0" + raw[i:i + length])
+        else:
+            rest.append(bytes([0xFF, marker]) + raw[i:i + length])
+        i += length
+    if orientation and orientation != 1:
+        head.append(_orientation_segment(orientation))
+    return b"".join(head + rest)
+
+
+def _strip_png(raw: bytes) -> bytes:
+    out, i = [raw[:8]], 8
+    while True:
+        if i + 12 > len(raw):
+            raise _Malformed
+        length = int.from_bytes(raw[i:i + 4], "big")
+        kind = raw[i + 4:i + 8]
+        end = i + 12 + length
+        if end > len(raw):
+            raise _Malformed
+        if kind not in _PNG_DROP:
+            out.append(raw[i:end])
+        i = end
+        if kind == b"IEND":
+            return b"".join(out)
+
+
+def strip_metadata(raw: bytes, mime: str) -> bytes:
+    """Metadaten (Exif/GPS, XMP, IPTC, Kommentare) entfernen, ohne die Pixel neu zu kodieren."""
+    try:
+        return _strip_jpeg(raw) if mime == "image/jpeg" else _strip_png(raw)
+    except _Malformed:
+        log.debug("Bildstruktur nicht lesbar – Metadaten nicht entfernt")
+        return raw
 
 
 # ---------- Konfiguration ----------

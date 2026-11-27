@@ -95,7 +95,8 @@ def test_private_vehicle_km_compensation_and_priorities(client, monkeypatch):
     it = r["items"]
     assert it["km_compensation"]["value"] == 540.0                    # 600 × 0.9 (Mandant vor Bund)
     assert it["commute_deduction_federal"]["value"] == 50.0           # 100 × 0.5 (Kanton vor Bund)
-    assert it["commute_deduction_canton"]["value"] is None and "cap_canton" in it["commute_deduction_canton"]["reason"]
+    assert it["commute_deduction_canton"]["value"] is None
+    assert "Obergrenze Kanton" in it["commute_deduction_canton"]["reason"]
     assert it["private_share_flat"]["value"] is None and it["private_share_effective"]["value"] is None
     assert r["vehicle"]["ownership"] == "private" and r["vehicle"]["private_use_method"] == "flat"
     assert any("ownership" in w for w in r["warnings"])
@@ -134,3 +135,24 @@ def test_default_constants(year, key, value):
     p = tax._default(year, key)
     assert p.value == value and p.scope == "default" and p.source_url.startswith("https://") and "[A]" in p.note
     assert tax._default(2026, "cap_canton") is None
+
+
+def test_tenant_params_fall_back_to_previous_year(client, monkeypatch):
+    """S8: Mandanten-Parameter ohne Eintrag im Berichtsjahr → jüngster Vorjahreswert mit Hinweis; ein neuerer
+    Default-Jahrgang geht einem älteren Mandanten-Eintrag vor; Einträge des Berichtsjahres gehen immer vor."""
+    monkeypatch.delenv("TAX_CANTON", raising=False)
+    vid = seed_year(client)
+    sync(client, param("km_rate", 0.9, year=2026, note="Spesenreglement"), param("km_rate", 0.5, year=2024),
+         param("commute_rate", 0.5, year=2025), param("cap_canton", 4000, year=2025), headers=web_headers())
+    r27 = client.get(f"{T}/vehicles/{vid}/year-report?year=2027").json()
+    km_rate = r27["params"]["km_rate"]
+    assert (km_rate["value"], km_rate["year"], km_rate["scope"]) == (0.9, 2026, "tenant")
+    assert km_rate["note"].startswith("Spesenreglement; Wert von 2026 übernommen")
+    assert r27["params"]["commute_rate"]["scope"] == "default"          # Default 2026 jünger als Mandant 2025
+    assert r27["params"]["cap_canton"]["value"] == 4000 and "2025" in r27["params"]["cap_canton"]["note"]
+    assert any("aus Vorjahren übernommen" in w and "2026" in w and "2025" in w for w in r27["warnings"])
+    r26 = client.get(f"{T}/vehicles/{vid}/year-report?year=2026").json()
+    assert r26["params"]["km_rate"]["note"] == "Spesenreglement"         # Berichtsjahr: unverändert
+    assert r26["items"]["km_compensation"]["value"] == 540.0             # 600 × 0.9
+    r25 = client.get(f"{T}/vehicles/{vid}/year-report?year=2025").json()
+    assert r25["params"]["km_rate"]["scope"] == "default"                # Default 2025 jünger als Mandant 2024

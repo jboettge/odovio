@@ -16,6 +16,17 @@
 {{- end }}
 {{- end }}
 
+{{/* ---- NetworkPolicy (Standard an): Ziele für DB und Issuer Pflicht ---- */}}
+{{- if $v.networkPolicy.enabled }}
+{{- $e := $v.networkPolicy.egress }}
+{{- if not (or $e.database.cidrs $e.database.namespaceSelector $e.database.podSelector) }}
+{{- fail "networkPolicy.enabled (Standard): networkPolicy.egress.database setzen (cidrs, namespaceSelector oder podSelector) – sonst ist die Datenbank gesperrt. Ohne NetworkPolicy: networkPolicy.enabled=false." }}
+{{- end }}
+{{- if not (or $e.oidc.cidrs $e.oidc.namespaceSelector $e.oidc.podSelector) }}
+{{- fail "networkPolicy.enabled (Standard): networkPolicy.egress.oidc setzen (Keycloak/Issuer: cidrs, namespaceSelector oder podSelector) – sonst schlagen Anmeldungen fehl. Ohne NetworkPolicy: networkPolicy.enabled=false." }}
+{{- end }}
+{{- end }}
+
 {{/* ---- Skalierung: gemeinsamer Zustand und Speicher ---- */}}
 {{- $replicasMax := include "fahrzeugbuch.replicasMax" . | atoi }}
 {{- $workers := include "fahrzeugbuch.workersMax" . | atoi }}

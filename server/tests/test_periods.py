@@ -136,9 +136,12 @@ def test_close_workflow_locks_and_rules(client):
                op("trip", uid(), trip(vid, start="2026-03-25T08:00:00+01:00", end=None, km_start=10070,
                                       km_end=10080)),                            # neu im Monat ohne Notiz
                op("trip", uid(), trip(vid, start="2026-03-25T08:00:00+01:00", end=None, km_start=10070,
-                                      km_end=10080, note="   ")))
-    assert statuses(res) == ["rejected"] * 4
+                                      km_end=10080, note="   ")),
+               op("trip", uid(), trip(vid, start="2026-03-25T08:00:00+01:00", end=None, km_start=10070,
+                                      km_end=10080, note="  ok  ")))           # Notiz zu kurz (S11)
+    assert statuses(res) == ["rejected"] * 5
     assert errors(res)[:2] == ["Monat abgeschlossen"] * 2 and "Begründung" in errors(res)[2]
+    assert "mind. 10 Zeichen" in errors(res)[4]
     # Storno gesperrter Fahrten nur mit Begründung (S3a)
     res = sync(client, op("trip", ids[1], action="delete", base=2),
                op("trip", ids[1], action="delete", base=2, reason="zu kurz"))
