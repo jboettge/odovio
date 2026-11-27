@@ -108,8 +108,11 @@ def test_upgrade_0004_to_0005_adds_vin():
     from alembic import command
     reset_db()
     try:
-        with engine.begin() as conn:
+        # Upgrade ohne äussere Transaktion (wie create_schema): 0003 braucht unter PostgreSQL einen autocommit-Block
+        with engine.connect() as conn:
             command.upgrade(alembic_config(conn), "0004")
+            conn.commit()
+        with engine.begin() as conn:
             assert "vin" not in {c["name"] for c in inspect(conn).get_columns("vehicles")}
             conn.exec_driver_sql("INSERT INTO tenants (id, slug, name, seq, head_hash) VALUES (1, 't', 't', 0, 'x')")
             conn.exec_driver_sql("INSERT INTO vehicles (id, tenant_id, version, deleted, last_seq, name, fuel_type, "
