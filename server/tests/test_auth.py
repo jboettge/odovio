@@ -18,6 +18,17 @@ def test_public_endpoints(client):
     cfg = client.get("/auth/config", headers={"Authorization": ""}).json()
     assert cfg["issuer"] == ISSUER and cfg["client_id"] == CLIENT_ID
     assert "offline_access" in cfg["scopes"]
+    assert cfg["source_url"] == "https://github.com/jboettge/odovio"
+
+
+def test_source_url_configurable(client, monkeypatch):
+    """AGPL § 13: Betreiber einer geänderten Fassung verlinken deren Quellcode; nur https."""
+    monkeypatch.setenv("SOURCE_URL", "https://git.example.ch/odovio")
+    assert client.get("/auth/config", headers={"Authorization": ""}).json()["source_url"] == "https://git.example.ch/odovio"
+    for bad in ("http://git.example.ch/odovio", "javascript:alert(1)", "https://a b"):
+        monkeypatch.setenv("SOURCE_URL", bad)
+        assert client.get("/auth/config", headers={"Authorization": ""}).json()["source_url"] == \
+            "https://github.com/jboettge/odovio"
 
 
 def test_valid_token(client):

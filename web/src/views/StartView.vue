@@ -6,6 +6,7 @@ import Icon from '../components/Icon.vue'
 import RoleBadge from '../components/RoleBadge.vue'
 import AlertBox from '../components/AlertBox.vue'
 import Loading from '../components/Loading.vue'
+import SourceLink from '../components/SourceLink.vue'
 import { authState, login, logout, safeReturnTo } from '../auth/oidc'
 import { IDLE_TIMEOUT_MIN, LOGOUT_REASON_KEY } from '../auth/idle'
 import { displayName, loadMe, selectTenant, session, tenants } from '../store/session'
@@ -101,6 +102,7 @@ onMounted(async () => {
         </template>
         <button type="button" class="btn btn-ghost mt-2" @click="logout()"><Icon name="logout" size="sm" />Abmelden</button>
       </template>
+      <SourceLink />
     </div>
   </main>
 </template>

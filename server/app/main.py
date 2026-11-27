@@ -590,12 +590,22 @@ def get_metrics(request: Request):
                              headers={"Cache-Control": "no-store"})
 
 
+DEFAULT_SOURCE_URL = "https://github.com/jboettge/odovio"
+
+
+def source_url() -> str:
+    """Quellcode-Link (AGPL-3.0 § 13): SOURCE_URL, nur https; sonst das öffentliche Repository.
+    Wer eine geänderte Fassung betreibt, setzt SOURCE_URL auf deren Quellcode."""
+    v = (os.environ.get("SOURCE_URL") or "").strip()
+    return v if v.startswith("https://") and len(v) <= 300 and not any(c.isspace() for c in v) else DEFAULT_SOURCE_URL
+
+
 @app.get("/auth/config", response_model=schemas.AuthConfig)
 def auth_config():
-    """OIDC-Parameter für die App (nur die Server-URL muss konfiguriert werden)."""
+    """OIDC-Parameter für die App (nur die Server-URL muss konfiguriert werden) und Quellcode-Link."""
     cfg = get_config()
     return {"issuer": cfg.issuer, "client_id": cfg.client_id, "web_client_id": cfg.web_client_id,
-            "scopes": "openid profile offline_access"}
+            "scopes": "openid profile offline_access", "source_url": source_url()}
 
 
 # ---------- Benutzer / Mandanten ----------

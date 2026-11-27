@@ -105,6 +105,8 @@ services:
       OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:-fahrzeugbuch-ios}
       # Web-Frontend: immer als azp zugelassen; nur dort Mitgliederverwaltung und Steuerparameter
       OIDC_WEB_CLIENT_ID: ${OIDC_WEB_CLIENT_ID:-fahrzeugbuch-web}
+      # Quellcode-Link in Web/App (AGPL-3.0 § 13); bei geänderter Fassung auf deren Quellcode setzen (nur https)
+      SOURCE_URL: ${SOURCE_URL:-https://github.com/jboettge/odovio}
       OIDC_AUDIENCE: ${OIDC_AUDIENCE:-}
       OIDC_REQUIRED_ROLE: ${OIDC_REQUIRED_ROLE:-}
       TENANT_GROUP_PREFIX: ${TENANT_GROUP_PREFIX:-/fahrzeugbuch/}

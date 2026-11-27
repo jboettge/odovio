@@ -691,7 +691,7 @@ const server = createServer(async (req, res) => {
       return json(res, 200, { ok: true, cfg })
     }
     if (url.pathname === '/auth/config') {
-      return json(res, 200, { issuer: `${originOf(req)}${REALM}`, client_id: APP_CLIENT, scopes: 'openid profile offline_access', web_client_id: WEB_CLIENT }, { 'Cache-Control': 'no-store' })
+      return json(res, 200, { issuer: `${originOf(req)}${REALM}`, client_id: APP_CLIENT, scopes: 'openid profile offline_access', web_client_id: WEB_CLIENT, source_url: 'https://github.com/jboettge/odovio' }, { 'Cache-Control': 'no-store' })
     }
     if (url.pathname.startsWith(REALM)) return await oidc(req, res, url)
     if (url.pathname.startsWith('/api/')) {

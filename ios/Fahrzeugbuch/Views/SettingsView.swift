@@ -108,8 +108,15 @@ struct SettingsView: View {
                 } label: {
                     Label("Absturzberichte", systemImage: "ladybug")
                 }
+                // AGPL-3.0: Quellcode der App frei zugänglich
+                Link(destination: AppInfo.sourceURL) {
+                    Label("Quellcode (AGPL-3.0)", systemImage: "chevron.left.forwardslash.chevron.right")
+                }
+                .accessibilityHint("Öffnet das öffentliche Repository im Browser")
             } header: {
                 Text("Hilfe")
+            } footer: {
+                Text("odovio ist freie Software unter der GNU Affero General Public License 3.0 oder später.")
             }
         }
         .navigationTitle("Einstellungen")
@@ -769,4 +776,10 @@ struct CrashReportsView: View {
             }
         }
     }
+}
+
+/// Feste App-Angaben.
+enum AppInfo {
+    /// Öffentliches Repository (AGPL-3.0); konstante, gültige URL
+    static let sourceURL = URL(string: "https://github.com/jboettge/odovio")!
 }

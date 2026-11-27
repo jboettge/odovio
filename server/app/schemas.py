@@ -26,6 +26,8 @@ class AuthConfig(BaseModel):
     client_id: str
     web_client_id: str
     scopes: str
+    # Quellcode der laufenden Fassung (AGPL-3.0 § 13), für den Link in Web und App
+    source_url: str
 
 
 Role = Literal["admin", "write", "read"]

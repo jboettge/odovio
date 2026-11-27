@@ -1681,3 +1681,15 @@ dl.stack dd {
 .data-table-note {
   margin: 6px 0 0;
 }
+
+/* Quellcode-Link (AGPL-3.0 § 13) */
+.source-link {
+  margin: 18px 10px 0;
+  color: var(--text-3);
+}
+.sidenav .source-link a {
+  display: inline;
+  padding: 0;
+  color: var(--text-3);
+  text-decoration: underline;
+}

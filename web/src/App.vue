@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
+import SourceLink from './components/SourceLink.vue'
 import { useRoute, useRouter } from 'vue-router'
 import Icon from './components/Icon.vue'
 import RoleBadge from './components/RoleBadge.vue'
@@ -159,6 +160,7 @@ function retry() {
       <ul aria-labelledby="nav-account">
         <li><RouterLink to="/konto"><Icon name="user" />Konto</RouterLink></li>
       </ul>
+      <SourceLink />
     </nav>
     <main id="main" class="main" tabindex="-1">
       <div class="container">

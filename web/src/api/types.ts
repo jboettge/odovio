@@ -20,6 +20,8 @@ export interface AuthConfig {
   client_id: string
   scopes: string
   web_client_id?: string | null
+  /** Quellcode der laufenden Fassung (AGPL-3.0 § 13) */
+  source_url?: string | null
 }
 
 /** Gemeinsame Metadaten aller synchronisierten Objekte. */
