@@ -477,7 +477,12 @@ struct TripRecordingSection: View {
             }
         } footer: {
             if let err = coordinator.lastError {
-                Label(err, systemImage: "exclamationmark.triangle").foregroundStyle(Color.warningText)
+                VStack(alignment: .leading, spacing: 6) {
+                    Label(err, systemImage: "exclamationmark.triangle").foregroundStyle(Color.warningText)
+                    if coordinator.lastErrorOpensSettings {
+                        OpenSystemSettingsButton()   // U2: direkt zu Einstellungen › odovio
+                    }
+                }
             }
         }
     }

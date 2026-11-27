@@ -22,6 +22,22 @@ Kernprinzipien: local-first App mit Outbox/Sync (`/sync`, `/changes`), revisions
 - **Web**: Ansicht + Verwaltung je Rolle, Monatsabschluss, Stammdaten, Mitglieder (admin). Skalierung: Lazy-Routen, vorkomprimierte Assets, virtuelles Scrollen, Web Worker.
 - **iOS**: Betriebsarten „Nur auf diesem iPhone“ (lokales Journal, Berichte, Backup) und „Mit Server“; Fahrtenbuch (CoreLocation/CoreMotion), Scan (Vision), Belege, Mitglieder/Aktivität nur lesend. Demo-Modus für Screenshots (`-demo -screen <name>`).
 - **VIN/Fahrgestellnummer** (27.11.2026): Feld `vin` am Fahrzeug (Server: `models.Vehicle.vin` String(17), Alembic 0005 idempotent, `schemas.normalize_vin` → abgelehnt/422 «VIN ungültig: genau 17 Zeichen …»; Web: Stammdaten-Formular mit Normalisierung beim Verlassen, Fahrzeugdetails, `web/src/lib/vin.ts`; iOS: Formular «Identifikation» mit «VIN scannen» (`Scan/VINScannerView.swift`, VisionKit Code 39/Data Matrix/QR + Text, OCR-Korrektur I/O/Q → 1/0/0, Logik `Shared/VIN.swift`), Anzeige in der Übersicht). PDF/CSV/Jahresbericht zeigen die VIN (CSV: neue Spalte «VIN» vor «ID», auch lokal in iOS). Prüfziffer nur Hinweis (nordamerikanische VINs). Hash-Kette: Altrevisionen ohne `vin` gelten beim Abgleich als gleich, solange der Datensatz `vin = NULL` hat (`integrity._same`, wie `article_id`); iOS kodiert `nil` nicht → lokale Journal-Hashes bestehender Fahrzeuge unverändert. Web-Scan bewusst weggelassen (Permissions-Policy `camera=()`, `BarcodeDetector` auf Desktop-Browsern meist nicht vorhanden).
+- **iOS-Review 27.11.2026 umgesetzt** (`docs/REVIEW-2026-11.md`): I1 Einrichtungslink immer mit Rückfrage (Host im
+  Titel, `ServerLink.setupDecision`), jede Server-URL-Änderung meldet ab, Tokens an Server+Issuer gebunden
+  (`TokenBinding`, Keychain `tokenBinding`; ältere Tokens ohne Bindung → einmal neu anmelden), Keychain nach
+  Neuinstallation gelöscht (Marker `keychainInstallMarker`). Q1 laufende Aufzeichnung Schutzklasse C
+  (`completeUntilFirstUserAuthentication`), «gesperrt» ≠ «fehlt», Fortsetzen bei `protectedDataDidBecomeAvailable`,
+  gesperrte Aufzeichnung vor neuer Fahrt nach `Tracks/Parked/` zurückgestellt. Q2/Q4 Ende = letzter Bewegungspunkt,
+  `isStationary` als Stopp-Signal, Lücke > 10 min teilt Automatik-Fahrten (CoreMotion-Historie: Stau bleibt eine
+  Fahrt), kein Stopp ohne GPS solange «automotive», Bewegung ab 1 m/s (`Trips/TripRules.swift`). Q3 Automatik/Siri/
+  CarPlay nur mit ausdrücklichem Standardfahrzeug (Einstellungen › Fahrtenbuch) oder genau einem Fahrzeug; Öffnen
+  eines Fahrzeugs setzt es nicht mehr. Q13 CLMonitor-Identifier alphanumerisch. I2 Mitteilungsaktionen
+  `.authenticationRequired`. Neu «Auto erkennen über» Aus/CarPlay/Bluetooth (`Trips/CarDetection.swift`,
+  `Views/CarDetectionViews.swift`, Details `docs/TESTFLIGHT.md`). CarPlay ohne «Tanken», kurze Meldungen (U4).
+  U1–U3 (Begründungs-Sheet nur `.large`, Texte «Einstellungen › odovio» + Knopf, «Immer» abgelehnt → Einstellungen).
+  **Grenze:** iOS weckt die App nicht bei Bluetooth-/CarPlay-Verbindung → Kurzbefehle-Automation «Verbindet → Fahrt
+  starten» empfehlen (Hinweis in der Einstellung). Gerätetests offen (siehe Review «nur auf dem Gerät klärbar» 1–5,
+  10–12, plus Audio-Route im Auto).
 - **Helm**: Chart mit HPA/VPA, Valkey optional, Migrations-Hook-Job, NetworkPolicy, ServiceMonitor. Nicht in echtem Cluster installiert (kind lief in der Sandbox nicht); Image mit Chart-Settings in Docker geprüft.
 
 ## Teststatus (letzter Stand)
@@ -32,7 +48,7 @@ Kernprinzipien: local-first App mit Outbox/Sync (`/sync`, `/changes`), revisions
 | Server PG 16 + Valkey (ohne S3, lokal 25.11.) | 352 bestanden, 5 übersprungen (S3) |
 | Server PG + Valkey + S3 (RustFS) | 342 bestanden (lokal); in CI als Services |
 | Web | 79 Unit, 24 E2E funktional (27.11. inkl. VIN) + 1 Perf (90k Fahrten), `npm audit` 0 |
-| iOS | 87 XCTests grün (CI macOS-15, Simulator) |
+| iOS | 87 XCTests grün (CI macOS-15, Simulator); 27.11. +16 Tests (`TripDetectionTests`, Q13) – CI-Lauf ausstehend |
 | Helm | `test-chart.sh` 48/48 (lint, template, kubeconform, 20 Negativtests) |
 | Lint/Security | ruff, bandit, pip-audit sauber |
 

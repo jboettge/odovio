@@ -27,6 +27,15 @@ struct MotionSample {
         date = a.startDate
     }
 
+    /// Wertbasiert (Tests, Auswertung von Lücken)
+    init(automotive: Bool, stationary: Bool = false, onFoot: Bool = false, confidence: Int = 2, date: Date) {
+        self.automotive = automotive
+        self.stationary = stationary
+        self.onFoot = onFoot
+        self.confidence = confidence
+        self.date = date
+    }
+
     var isCar: Bool { automotive && confidence >= CMMotionActivityConfidence.medium.rawValue }
     var isOnFoot: Bool { onFoot && confidence >= CMMotionActivityConfidence.medium.rawValue }
 }
@@ -35,8 +44,11 @@ struct MotionSample {
 ///
 /// - Start: CoreMotion „automotive“ (Konfidenz ≥ mittel) seit ≥ 60 s. Bei Rotlicht meldet iOS oft
 ///   automotive + stationary gleichzeitig → das zählt weiter als Fahrt; nur Gehen/Laufen/Velo setzt zurück.
-/// - Stopp (automatisch gestartete Fahrten): > 3 min kein automotive und keine Bewegung im GPS
-///   (stillstehend/gehend), bzw. > 10 min ohne GPS-Bewegung.
+/// - Stopp (automatisch gestartete Fahrten, `TripStopRule`): > 3 min kein automotive und keine Bewegung im
+///   GPS (stillstehend/gehend) bzw. iOS meldet Stillstand (`isStationary`) seit 1 min und CoreMotion nicht mehr
+///   «automotive». Ohne GPS-Bewegung, aber «automotive» (Stau) läuft die Fahrt weiter (Q4). Wird die App
+///   beim Parkieren suspendiert, gilt als Ende der letzte Bewegungspunkt (`TripTiming`), und eine Bewegung
+///   nach > 10 min Lücke beginnt eine neue Fahrt (`TripGap`, im Coordinator).
 /// - Manuell gestartete Fahrten (Knopf/Kurzbefehl): nach 10 min Stillstand nur ein Vorschlag
 ///   (`onIdleDetected` → Mitteilung „Fahrt beenden?“), kein automatisches Beenden.
 /// - Weck-Trigger, wenn die App suspendiert oder beendet ist: wesentliche Standortänderungen,
@@ -47,13 +59,19 @@ struct MotionSample {
 @MainActor
 final class TripDetector: NSObject, CLLocationManagerDelegate {
     static let startAfter: TimeInterval = 60
-    static let stopAfter: TimeInterval = 180
-    static let stopWithoutMovement: TimeInterval = 600
+    static let stopWithoutMovement = TripStopRule.stopWithoutMovement
     static let cooldown: TimeInterval = 120
     static let maxRegions = 20
     /// Nur Buchstaben/Ziffern: CoreLocation bricht bei anderen Zeichen (Punkt, Bindestrich) mit
     /// «Monitor name is not valid» ab (NSInternalInconsistencyException in `CLMonitor.init`).
     static let monitorName = "fahrzeugbuchOrte"
+
+    /// Bedingungs-Identifier ebenfalls nur aus Buchstaben/Ziffern (Q13: Orts-IDs sind UUIDs mit Bindestrich).
+    nonisolated static func monitorIdentifier(_ placeId: String) -> String {
+        String(String.UnicodeScalarView(placeId.unicodeScalars.filter {
+            $0.isASCII && CharacterSet.alphanumerics.contains($0)
+        }))
+    }
 
     var onStartDetected: (() -> Void)?
     var onStopDetected: (() -> Void)?
@@ -84,6 +102,11 @@ final class TripDetector: NSObject, CLLocationManagerDelegate {
     private var watchStartedAt: Date?
     private var cooldownUntil = Date.distantPast
     private var lastKnownLocation: CLLocation?
+    /// iOS meldet Stillstand (`CLLocationUpdate.isStationary`) seit
+    private var stationarySince: Date?
+
+    /// Letzte CoreMotion-Aktivität (Startbedingung der Auto-Erkennung: «widerspricht Motion?»)
+    var latestMotion: MotionSample? { lastActivity }
 
     override init() {
         super.init()
@@ -129,6 +152,7 @@ final class TripDetector: NSObject, CLLocationManagerDelegate {
         let now = Date()
         watchStartedAt = now
         lastMovingAt = now
+        stationarySince = nil
         if auto || CMMotionActivityManager.authorizationStatus() == .authorized {
             startMotionUpdates()   // manuell: keine unvermittelte Abfrage „Bewegung & Fitness“
         }
@@ -140,6 +164,7 @@ final class TripDetector: NSObject, CLLocationManagerDelegate {
         stopsAutomatically = false
         idleNotified = false
         automotiveSince = nil
+        stationarySince = nil
         cooldownUntil = Date().addingTimeInterval(Self.cooldown)
         if !isEnabled { stopMotionUpdates() }
     }
@@ -147,9 +172,40 @@ final class TripDetector: NSObject, CLLocationManagerDelegate {
     /// GPS-Fix während der Aufzeichnung (Bewegung zählt als „fährt noch“).
     func noteLocation(_ location: CLLocation) {
         lastKnownLocation = location
-        if location.speed >= 3 {
+        if location.speed >= TripStopRule.movingSpeed {
             lastMovingAt = Date()
+            stationarySince = nil
             idleNotified = false   // fährt wieder → nächster Stillstand meldet erneut
+        }
+    }
+
+    /// `CLLocationUpdate.isStationary` der laufenden Aufzeichnung (Stopp-Signal, Q2).
+    func noteStationary(_ stationary: Bool) {
+        if stationary {
+            if stationarySince == nil { stationarySince = Date() }
+            guard watchingStop else { return }
+            if evaluate() { ensureTicking() }
+        } else {
+            stationarySince = nil
+        }
+    }
+
+    /// Bewegte sich das Fahrzeug in den letzten `seconds` (GPS ≥ 1 m/s)?
+    func movedRecently(within seconds: TimeInterval) -> Bool {
+        lastMovingAt.map { Date().timeIntervalSince($0) < seconds } ?? false
+    }
+
+    /// CoreMotion-Historie (inkl. der Aktivität, die vor `from` begann: Abfrage ab 15 min früher).
+    /// `nil` ohne Berechtigung/Verfügbarkeit oder bei Fehler.
+    func motionHistory(from: Date, to: Date) async -> [MotionSample]? {
+        guard CMMotionActivityManager.isActivityAvailable(),
+              CMMotionActivityManager.authorizationStatus() == .authorized, to > from else { return nil }
+        let manager = motion
+        return await withCheckedContinuation { (continuation: CheckedContinuation<[MotionSample]?, Never>) in
+            manager.queryActivityStarting(from: from.addingTimeInterval(-900), to: to,
+                                          to: OperationQueue.main) { activities, error in
+                continuation.resume(returning: error == nil ? (activities ?? []).map { MotionSample($0) } : nil)
+            }
         }
     }
 
@@ -202,8 +258,9 @@ final class TripDetector: NSObject, CLLocationManagerDelegate {
                 return true
             }
             let stillInCar = lastActivity?.automotive ?? false
-            let noMovement = now.timeIntervalSince(lastMovingAt ?? watchStartedAt ?? now)
-            if (!stillInCar && idle > Self.stopAfter) || noMovement > Self.stopWithoutMovement {
+            if TripStopRule.shouldStop(now: now, lastAutomotiveAt: lastAutomotiveAt, lastMovingAt: lastMovingAt,
+                                       watchStartedAt: watchStartedAt, stillInCar: stillInCar,
+                                       stationarySince: stationarySince) {
                 watchingStop = false
                 stopsAutomatically = false
                 onStopDetected?()
@@ -341,16 +398,16 @@ final class TripDetector: NSObject, CLLocationManagerDelegate {
             }
         }
         guard let monitor else { return }
-        let wantedIds = Set(wanted.map(\.id))
+        let wantedIds = Set(wanted.map { Self.monitorIdentifier($0.id) })
         let existing = await monitor.identifiers
         for id in existing where !wantedIds.contains(id) {
             await monitor.remove(id)
         }
         let existingIds = Set(existing)
-        for p in wanted where !existingIds.contains(p.id) {
+        for p in wanted where !existingIds.contains(Self.monitorIdentifier(p.id)) {
             let condition = CLMonitor.CircularGeographicCondition(
                 center: CLLocationCoordinate2D(latitude: p.lat, longitude: p.lon), radius: max(p.radius, 150))
-            await monitor.add(condition, identifier: p.id)
+            await monitor.add(condition, identifier: Self.monitorIdentifier(p.id))
         }
     }
 

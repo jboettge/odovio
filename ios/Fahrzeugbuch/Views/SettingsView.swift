@@ -72,7 +72,7 @@ struct SettingsView: View {
 
             if settings.isLocal, let store = settings.store {
                 catalogSection(store)
-                tripSection
+                tripSection(store)
                 geocodingSection
                 backupSection(store)
                 localIntegritySection(store)
@@ -92,7 +92,7 @@ struct SettingsView: View {
                 if let store = settings.store {
                     sharedSection(store)
                     catalogSection(store)
-                    tripSection
+                    tripSection(store)
                     dataSection(store)
                 }
             }
@@ -488,12 +488,22 @@ struct SettingsView: View {
     // MARK: Fahrtenbuch
 
     /// Fahrtenbuch: Einrichtung, Automatik, Datenschutz.
-    private var tripSection: some View {
+    private func tripSection(_ store: TenantStore) -> some View {
         Section {
             NavigationLink {
                 TripSetupView(forAutomation: coordinator.autoDetectEnabled)
             } label: {
                 Label("Fahrtenbuch einrichten", systemImage: "checklist")
+            }
+            DefaultVehiclePicker(store: store)
+            NavigationLink {
+                CarDetectionSettingsView(store: store)
+            } label: {
+                LabeledContent {
+                    Text(CarConnectionMonitor.shared.mode.label)
+                } label: {
+                    Label("Auto erkennen über", systemImage: "antenna.radiowaves.left.and.right")
+                }
             }
             Toggle(isOn: Binding(
                 get: { coordinator.autoDetectEnabled },
@@ -518,6 +528,9 @@ struct SettingsView: View {
                 Label(err, systemImage: "exclamationmark.triangle")
                     .font(.footnote)
                     .foregroundStyle(Color.warningText)
+                if coordinator.lastErrorOpensSettings {
+                    OpenSystemSettingsButton()
+                }
             }
         } header: {
             Text("Fahrtenbuch")

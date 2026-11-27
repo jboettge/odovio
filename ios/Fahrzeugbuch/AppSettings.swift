@@ -9,8 +9,16 @@ import UserNotifications
 @MainActor
 @Observable
 final class AppSettings {
+    /// Jede Änderung der Server-URL meldet vollständig ab (Tokens, Sitzung, Issuer-Pin; I1) – Tokens sind
+    /// zusätzlich an den Server gebunden (`TokenBinding`). Lokale Daten entfernt `changeServer(to:)`.
     var serverURL: String {
-        didSet { UserDefaults.standard.set(serverURL, forKey: "serverURL") }
+        didSet {
+            UserDefaults.standard.set(serverURL, forKey: "serverURL")
+            if TokenBinding.normalize(oldValue) != TokenBinding.normalize(serverURL) {
+                auth.clearSession()
+                auth.resetIssuerPin()
+            }
+        }
     }
     let auth = AuthManager()
 
@@ -428,6 +436,22 @@ enum Keychain {
         guard SecItemCopyMatching(q as CFDictionary, &out) == errSecSuccess,
               let data = out as? Data else { return nil }
         return String(data: data, encoding: .utf8)
+    }
+
+    /// UserDefaults-Marker: App wurde auf diesem Gerät schon gestartet (fehlt nach einer Neuinstallation).
+    static let installMarkerKey = "keychainInstallMarker"
+
+    /// Keychain-Einträge überleben das Löschen der App. Beim ersten Start nach einer (Neu-)Installation alle
+    /// Einträge der App entfernen (I1: kein Refresh-Token einer früheren Installation/eines früheren Servers).
+    /// Nur bei entsperrtem Gerät: vor der ersten Entsperrung sind UserDefaults nicht lesbar (Marker fehlte
+    /// scheinbar) – dann beim nächsten Start.
+    @MainActor
+    static func removeAllAfterFreshInstall() {
+        guard UIApplication.shared.isProtectedDataAvailable else { return }
+        let defaults = UserDefaults.standard
+        guard !defaults.bool(forKey: installMarkerKey) else { return }
+        SecItemDelete([kSecClass as String: kSecClassGenericPassword] as CFDictionary)
+        defaults.set(true, forKey: installMarkerKey)
     }
 }
 

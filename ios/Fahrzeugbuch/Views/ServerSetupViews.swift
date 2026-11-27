@@ -39,6 +39,29 @@ enum ServerLink {
     static func host(_ server: String) -> String {
         URLComponents(string: server)?.host ?? server
     }
+
+    /// Entscheid für einen Einrichtungslink (I1): Ein Server wird nie ohne Bestätigung übernommen – auch nicht,
+    /// wenn noch keine Betriebsart gewählt bzw. kein Server eingerichtet ist (Phishing-Link).
+    enum SetupDecision: Equatable {
+        /// keine gültige HTTPS-Adresse
+        case invalid
+        /// Lokalmodus: nichts umstellen, Server nur im Übertragungs-Assistenten vorbelegen
+        case suggestForTransfer(server: String)
+        /// derselbe Server ist schon eingerichtet (ggf. nur Betriebsart «Mit Server» wieder wählen)
+        case alreadyConfigured
+        /// Rückfrage mit deutlich angezeigtem Host; `replacing` = Host des bisherigen Servers
+        case confirm(server: String, host: String, replacing: String?)
+    }
+
+    static func setupDecision(link: URL, mode: AppMode?, currentServer: String) -> SetupDecision {
+        guard isSetupLink(link), let server = serverURL(from: link.absoluteString) else { return .invalid }
+        if mode == .local { return .suggestForTransfer(server: server) }
+        let current = currentServer.trimmed
+        if !current.isEmpty && TokenBinding.normalize(current) == TokenBinding.normalize(server) {
+            return .alreadyConfigured
+        }
+        return .confirm(server: server, host: host(server), replacing: current.isEmpty ? nil : host(current))
+    }
 }
 
 /// QR-Code mit der Server-Adresse scannen (Live per VisionKit, sonst aus einem Foto).

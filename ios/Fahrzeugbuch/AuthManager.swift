@@ -48,8 +48,42 @@ enum AuthError: LocalizedError {
     }
 }
 
+/// Bindung der Anmeldung an Server und Anmeldeserver (I1): Access-/Refresh-Token gelten nur für den Server,
+/// an dem angemeldet wurde, und den Issuer/Client, den dieser damals meldete. Token eines anderen Servers werden
+/// nie verwendet oder gesendet (Schutz vor manipulierten Einrichtungslinks).
+struct TokenBinding: Codable, Equatable {
+    /// Normalisierte Server-URL (`normalize`)
+    var server: String
+    var issuer: String
+    var clientId: String
+
+    /// Vergleichsform einer Server-URL: Schema/Host klein, ohne abschliessende «/». Port und Pfad bleiben.
+    static func normalize(_ server: String) -> String {
+        var text = server.trimmingCharacters(in: .whitespacesAndNewlines)
+        while text.hasSuffix("/") { text.removeLast() }
+        guard var comps = URLComponents(string: text), comps.host != nil else { return text.lowercased() }
+        comps.scheme = comps.scheme?.lowercased()
+        comps.host = comps.host?.lowercased()
+        while comps.path.hasSuffix("/") { comps.path.removeLast() }
+        return comps.string ?? text
+    }
+
+    static func normalize(_ server: URL) -> String { normalize(server.absoluteString) }
+
+    /// Darf ein Token dieser Anmeldung an `server` gehen?
+    func allows(server other: URL) -> Bool {
+        server == Self.normalize(other)
+    }
+
+    /// Meldet der Server (noch) denselben Anmeldeserver?
+    func allows(issuer otherIssuer: String, clientId otherClient: String) -> Bool {
+        issuer == otherIssuer && clientId == otherClient
+    }
+}
+
 /// OIDC Authorization Code Flow mit PKCE (S256) gegen Keycloak.
-/// Refresh-Token (offline_access) liegt in der Keychain, Access-Token nur im Speicher.
+/// Refresh-Token (offline_access) liegt in der Keychain, Access-Token nur im Speicher; beide sind an Server
+/// und Issuer gebunden (`TokenBinding`, Keychain-Eintrag `tokenBinding`).
 @MainActor
 @Observable
 final class AuthManager {
@@ -61,6 +95,7 @@ final class AuthManager {
 
     @ObservationIgnored private var refreshToken: String?
     @ObservationIgnored private var accessToken: String?
+    @ObservationIgnored private var binding: TokenBinding?
     @ObservationIgnored private var expiry = Date.distantPast
     @ObservationIgnored private var refreshTask: Task<String, Error>?
     @ObservationIgnored private var cache: (server: URL, config: AuthConfig, discovery: OIDCDiscovery)?
@@ -72,9 +107,18 @@ final class AuthManager {
     }()
 
     init() {
-        refreshToken = Keychain.get("refreshToken")
-        isLoggedIn = refreshToken != nil
-        userName = UserDefaults.standard.string(forKey: "userName")
+        Keychain.removeAllAfterFreshInstall()
+        var token = Keychain.get("refreshToken")
+        let stored = Keychain.get(AuthManager.bindingKey).flatMap { try? JSONDecoder().decode(TokenBinding.self, from: Data($0.utf8)) }
+        if token != nil && stored == nil {
+            // Token älterer Versionen ohne Bindung: Server unbekannt → nicht verwenden, neu anmelden (I1)
+            Keychain.set("", for: "refreshToken")
+            token = nil
+        }
+        refreshToken = token
+        binding = token == nil ? nil : stored
+        isLoggedIn = token != nil
+        userName = token == nil ? nil : UserDefaults.standard.string(forKey: "userName")
     }
 
     // MARK: Öffentliche API
@@ -116,6 +160,11 @@ final class AuthManager {
             "client_id": cfg.clientId,
             "code_verifier": verifier,
         ])
+        let newBinding = TokenBinding(server: TokenBinding.normalize(server), issuer: cfg.issuer, clientId: cfg.clientId)
+        binding = newBinding
+        if let data = try? JSONEncoder().encode(newBinding), let text = String(data: data, encoding: .utf8) {
+            Keychain.set(text, for: Self.bindingKey)
+        }
         store(tokens)
         UserDefaults.standard.set(cfg.issuer, forKey: Self.pinnedIssuerKey)
         UserDefaults.standard.set(cfg.clientId, forKey: Self.pinnedClientKey)
@@ -123,8 +172,10 @@ final class AuthManager {
         return sub
     }
 
-    /// Gültiges Access-Token; erneuert bei Bedarf (parallele Aufrufe teilen sich einen Refresh).
+    /// Gültiges Access-Token für `server`; erneuert bei Bedarf (parallele Aufrufe teilen sich einen Refresh).
+    /// Nur für den Server, an dem angemeldet wurde – sonst `notLoggedIn`, ohne ein Token zu senden (I1).
     func validAccessToken(server: URL, forceRefresh: Bool = false) async throws -> String {
+        guard let binding, binding.allows(server: server) else { throw AuthError.notLoggedIn }
         if !forceRefresh, let t = accessToken, expiry > Date().addingTimeInterval(30) { return t }
         if let running = refreshTask { return try await running.value }
         let task = Task { try await self.refresh(server: server) }
@@ -135,8 +186,10 @@ final class AuthManager {
 
     /// Explizites Abmelden: Tokens widerrufen, Issuer-Pin lösen.
     func logout(server: URL?) async {
-        if let server, let rt = refreshToken,
+        // Widerruf nur beim eigenen Anmeldeserver (nie das Token an einen anderen Server senden)
+        if let server, let rt = refreshToken, let binding, binding.allows(server: server),
            let loaded = try? await loadConfig(server),
+           binding.allows(issuer: loaded.0.issuer, clientId: loaded.0.clientId),
            let revoke = loaded.1.revocationEndpoint {
             _ = try? await tokenRequest(revoke, [
                 "token": rt, "token_type_hint": "refresh_token", "client_id": loaded.0.clientId,
@@ -161,8 +214,10 @@ final class AuthManager {
         accessToken = nil
         expiry = .distantPast
         refreshToken = nil
+        binding = nil
         cache = nil
         Keychain.set("", for: "refreshToken")
+        Keychain.set("", for: Self.bindingKey)
         UserDefaults.standard.removeObject(forKey: "userName")
         userName = nil
         isLoggedIn = false
@@ -178,8 +233,10 @@ final class AuthManager {
     // MARK: Intern
 
     private func refresh(server: URL) async throws -> String {
-        guard let rt = refreshToken else { throw AuthError.notLoggedIn }
+        guard let rt = refreshToken, let binding, binding.allows(server: server) else { throw AuthError.notLoggedIn }
         let (cfg, disc) = try await loadConfig(server)
+        // Meldet der Server einen anderen Anmeldeserver, geht das Refresh-Token nicht dorthin
+        guard binding.allows(issuer: cfg.issuer, clientId: cfg.clientId) else { throw AuthError.issuerChanged(cfg.issuer) }
         do {
             let tokens = try await tokenRequest(disc.tokenEndpoint, [
                 "grant_type": "refresh_token", "refresh_token": rt, "client_id": cfg.clientId,
@@ -238,6 +295,8 @@ final class AuthManager {
 
     static let pinnedIssuerKey = "pinnedIssuer"
     static let pinnedClientKey = "pinnedClientId"
+    /// Keychain: `TokenBinding` als JSON
+    static let bindingKey = "tokenBinding"
 
     /// HTTPS Pflicht; Debug-Builds erlauben zusätzlich http://localhost (Simulator/Entwicklung).
     nonisolated static func isSecure(_ url: URL) -> Bool {

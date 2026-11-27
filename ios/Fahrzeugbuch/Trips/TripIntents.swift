@@ -7,9 +7,12 @@ import Foundation
 //   • „CarPlay – Verbindet“  → Aktion „Fahrt starten“ (läuft ohne Rückfrage)
 //   • „CarPlay – Trennt“     → Aktion „Fahrt beenden“
 //   Alternativ „Bluetooth – Auto-Freisprecher verbunden/getrennt“ (fragt je nach iOS-Version nach).
+// Das ist der verlässliche Weg zur Auto-Erkennung: iOS weckt die App nicht, wenn sich ein Bluetooth-Gerät
+// oder CarPlay verbindet (Einstellung «Auto erkennen über» wirkt nur bei Weck-Ereignissen bzw. laufender App).
 // Die Intents laufen ohne Öffnen der App im Hintergrund; damit die Aufzeichnung dort weiterläuft,
 // braucht es die Standortberechtigung „Immer“ (sonst die App einmal öffnen).
-// Fahrzeug = Standardfahrzeug des geöffneten Mandanten (bzw. das einzige Fahrzeug).
+// Fahrzeug = ausdrücklich gewähltes Standardfahrzeug des geöffneten Mandanten (Einstellungen › Fahrtenbuch)
+// bzw. das einzige Fahrzeug – bei mehreren ohne Wahl startet nichts (klare Meldung statt falscher km-Kette).
 
 struct StartTripIntent: AppIntent {
     static let title: LocalizedStringResource = "Fahrt starten"

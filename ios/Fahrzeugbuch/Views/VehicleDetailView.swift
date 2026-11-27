@@ -84,7 +84,8 @@ struct VehicleDetailView: View {
             case .activity: ModalNavigation { ActivityView(vehicleId: current.id) }
             }
         }
-        .onAppear { store.defaultVehicleId = vehicle.id }   // zuletzt gewählt → Start/Automatik
+        // Kein Setzen des Standardfahrzeugs beim blossen Öffnen (Q3): Automatik/Siri/CarPlay nutzen nur die
+        // ausdrückliche Wahl (Einstellungen › Fahrtenbuch bzw. Fahrt starten mit diesem Fahrzeug).
     }
 
     /// Aktivität (wer hat was geändert) nur im Servermodus

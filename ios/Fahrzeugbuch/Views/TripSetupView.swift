@@ -233,6 +233,12 @@ struct TripSetupView: View {
             }
         case .unavailable:
             EmptyView()
+        case .open where step == .locationAlways && coordinator.alwaysPromptUsed && state(.locationInUse) == .done:
+            // iOS zeigt den Dialog «Immer» nur einmal; danach hilft nur die Einstellung (U3)
+            OpenSystemSettingsButton(title: "In den iOS-Einstellungen auf «Immer» stellen")
+            Text("Einstellungen › odovio › Standort › «Immer».")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
         case .open:
             Button {
                 Task { await perform(step) }
