@@ -1,6 +1,7 @@
 {
   "name": "fahrzeugbuch-web",
   "private": true,
+  "license": "AGPL-3.0-or-later",
   "version": "1.0.0",
   "type": "module",
   "description": "Web-Frontend für das Fahrzeugbuch (Vue 3 + TypeScript + Vite)",

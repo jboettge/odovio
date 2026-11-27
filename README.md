@@ -236,3 +236,12 @@ OIDC_ISSUER=https://id.j-mb.net/realms/<realm> OIDC_CLIENT_ID=fahrzeugbuch-ios u
 ```
 
 CI (`.github/workflows/fahrzeugbuch.yml`, liegt im Repo-Root unter `.github/` – beim Umzug mitnehmen und Pfade `fahrzeugbuch/` anpassen): Tests gegen SQLite + PostgreSQL, Docker-Build, iOS-Simulator-Build.
+
+## Lizenz
+
+Copyright (C) 2026 odovio-Mitwirkende.
+
+odovio ist freie Software: Du kannst es unter den Bedingungen der **GNU Affero General Public License** Version 3
+oder (nach deiner Wahl) jeder späteren Version weitergeben und/oder ändern (SPDX: `AGPL-3.0-or-later`, Text in
+[`LICENSE`](LICENSE)). Wer eine geänderte Fassung als Netzdienst anbietet, muss den Nutzern den Quellcode dieser
+Fassung zugänglich machen (§ 13 AGPL).
