@@ -228,6 +228,46 @@ final class TripDetectionTests: XCTestCase {
         XCTAssertEqual(CarRouteMatcher.learnable([speaker, airpods, carPlay]).map(\.name), ["AirPods", "CarPlay"])
     }
 
+    /// CarPlay und Bluetooth gleichzeitig: Auto ohne CarPlay über Bluetooth, sonst CarPlay-Audio.
+    func testCarPlayAndBluetoothCombined() {
+        let golf = CarDevice(uid: "00:11:22:AA:BB:CC-tacl", name: "Golf", vehicleId: "v1")
+        let carHFP = AudioPortInfo(type: AVAudioSession.Port.bluetoothHFP.rawValue, uid: "00:11:22:aa:bb:cc-tsco",
+                                   name: "Golf")
+        let carPlay = AudioPortInfo(type: AVAudioSession.Port.carAudio.rawValue, uid: "CarPlay-1", name: "CarPlay")
+        let both = CarDetectionMode.carPlayAndBluetooth
+        // Auto ohne CarPlay → Bluetooth
+        let bt = CarRouteMatcher.connection(mode: both, outputs: [carHFP], devices: [golf],
+                                            carPlaySceneConnected: false, carPlayVehicleId: "v3")
+        XCTAssertEqual(bt?.kind, .bluetooth)
+        XCTAssertEqual(bt?.vehicleId, "v1")
+        // Auto mit CarPlay (kein gelerntes Gerät) → CarPlay
+        let cp = CarRouteMatcher.connection(mode: both, outputs: [carPlay], devices: [golf],
+                                            carPlaySceneConnected: false, carPlayVehicleId: "v3")
+        XCTAssertEqual(cp?.kind, .carPlayRoute)
+        XCTAssertEqual(cp?.vehicleId, "v3")
+        // Nichts verbunden → kein Start auf «automotive»
+        let none = CarRouteMatcher.connection(mode: both, outputs: [], devices: [golf],
+                                              carPlaySceneConnected: false, carPlayVehicleId: nil)
+        XCTAssertNil(none)
+        XCTAssertFalse(CarRouteMatcher.motionStartAllowed(mode: both, connection: none))
+        XCTAssertTrue(CarRouteMatcher.motionStartAllowed(mode: both, connection: bt))
+    }
+
+    /// Gespeicherter Wert: frühere Einzelwerte bleiben gültig, Kombination neu.
+    func testCarDetectionModeStorage() {
+        XCTAssertEqual(CarDetectionMode(rawValue: "off"), .off)
+        XCTAssertEqual(CarDetectionMode(rawValue: "carPlay"), .carPlay)
+        XCTAssertEqual(CarDetectionMode(rawValue: "bluetooth"), .bluetooth)
+        XCTAssertEqual(CarDetectionMode(rawValue: "carPlay+bluetooth"), .carPlayAndBluetooth)
+        XCTAssertNil(CarDetectionMode(rawValue: "wlan"))
+        XCTAssertNil(CarDetectionMode(rawValue: ""))
+        for m in [CarDetectionMode.off, .carPlay, .bluetooth, .carPlayAndBluetooth] {
+            XCTAssertEqual(CarDetectionMode(rawValue: m.rawValue), m)
+        }
+        XCTAssertTrue(CarDetectionMode.off.isOff)
+        XCTAssertEqual(CarDetectionMode.carPlayAndBluetooth.label, "CarPlay und Bluetooth")
+    }
+
     func testStartConditionWithCarDetection() {
         let bt = CarConnection(kind: .bluetooth, name: "Golf", deviceKey: "k", vehicleId: nil)
         let scene = CarConnection(kind: .carPlayScene, name: "CarPlay", deviceKey: nil, vehicleId: nil)

@@ -78,7 +78,7 @@ Mit Mac alternativ: Schlüsselbundverwaltung → Zertifikatsassistent → «Zert
 
 ## Auto-Erkennung (CarPlay / Bluetooth) und Kurzbefehle-Automation
 
-- Einstellung: odovio › Einstellungen › Fahrtenbuch › **Auto erkennen über** [Aus / CarPlay / Bluetooth-Gerät(e)].
+- Einstellung: odovio › Einstellungen › Fahrtenbuch › **Auto erkennen über**: Schalter «CarPlay» und «Bluetooth» unabhängig (auch beide – Autos ohne CarPlay werden dann über das gelernte Bluetooth-Gerät erkannt; beide aus = nur «Bewegung & Fitness»).
   Bluetooth: im Auto «Aktuell verbundenes Gerät als Auto übernehmen» (gelernt werden Name und Port-UID des
   Audio-Ausgangs aus `AVAudioSession.currentRoute`: A2DP/HFP/LE bzw. CarPlay-Audio), mehrere Geräte möglich, je
   Gerät optional ein Fahrzeug (Automatik bucht dann auf dieses Fahrzeug).

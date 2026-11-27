@@ -2,22 +2,49 @@ import AVFoundation
 import Foundation
 import Observation
 
-/// Wie die Automatik erkennt, dass man im (eigenen) Auto sitzt.
-enum CarDetectionMode: String, Codable, CaseIterable, Identifiable {
-    /// Nur CoreMotion «automotive» (auch Zug/Tram/Bus lösen aus)
-    case off
-    /// Zusätzlich CarPlay verbunden (CarPlay-Szene oder Audio-Route `.carAudio`)
-    case carPlay
-    /// Zusätzlich ein gelerntes Bluetooth-Audiogerät (Freisprecher/Autoradio) in der Audio-Route
-    case bluetooth
+/// Wie die Automatik erkennt, dass man im (eigenen) Auto sitzt. CarPlay und Bluetooth sind unabhängig
+/// voneinander wählbar (auch beide): Autos ohne CarPlay werden über ein gelerntes Bluetooth-Gerät erkannt.
+struct CarDetectionMode: Equatable, Hashable {
+    /// CarPlay verbunden (CarPlay-Szene oder Audio-Route `.carAudio`)
+    var useCarPlay: Bool
+    /// Gelerntes Bluetooth-Audiogerät (Freisprecher/Autoradio) in der Audio-Route
+    var useBluetooth: Bool
 
-    var id: String { rawValue }
+    init(useCarPlay: Bool = false, useBluetooth: Bool = false) {
+        self.useCarPlay = useCarPlay
+        self.useBluetooth = useBluetooth
+    }
+
+    /// Nur CoreMotion «automotive» (auch Zug/Tram/Bus lösen aus)
+    static let off = CarDetectionMode()
+    static let carPlay = CarDetectionMode(useCarPlay: true)
+    static let bluetooth = CarDetectionMode(useBluetooth: true)
+    static let carPlayAndBluetooth = CarDetectionMode(useCarPlay: true, useBluetooth: true)
+
+    var isOff: Bool { !useCarPlay && !useBluetooth }
+
+    /// Gespeicherter Wert; kompatibel mit früheren Einzelwerten («off», «carPlay», «bluetooth»).
+    var rawValue: String {
+        switch (useCarPlay, useBluetooth) {
+        case (false, false): "off"
+        case (true, false): "carPlay"
+        case (false, true): "bluetooth"
+        case (true, true): "carPlay+bluetooth"
+        }
+    }
+
+    init?(rawValue: String) {
+        let parts = Set(rawValue.split(separator: "+").map(String.init))
+        guard !parts.isEmpty, parts.isSubset(of: ["off", "carPlay", "bluetooth"]) else { return nil }
+        self.init(useCarPlay: parts.contains("carPlay"), useBluetooth: parts.contains("bluetooth"))
+    }
 
     var label: String {
-        switch self {
-        case .off: "Aus"
-        case .carPlay: "CarPlay"
-        case .bluetooth: "Bluetooth-Gerät(e)"
+        switch (useCarPlay, useBluetooth) {
+        case (false, false): "Aus"
+        case (true, false): "CarPlay"
+        case (false, true): "Bluetooth"
+        case (true, true): "CarPlay und Bluetooth"
         }
     }
 }
@@ -103,29 +130,28 @@ enum CarRouteMatcher {
     }
 
     /// Aktuelle Verbindung zum Auto gemäss Einstellung. Eine verbundene CarPlay-Szene zählt immer.
+    /// Sind CarPlay und Bluetooth gewählt, gilt zuerst ein gelerntes Gerät (genauere Fahrzeugzuordnung),
+    /// sonst CarPlay-Audio – ein Auto ohne CarPlay wird so über Bluetooth erkannt.
     static func connection(mode: CarDetectionMode, outputs: [AudioPortInfo], devices: [CarDevice],
                            carPlaySceneConnected: Bool, carPlayVehicleId: String?) -> CarConnection? {
         if carPlaySceneConnected {
             return CarConnection(kind: .carPlayScene, name: "CarPlay", deviceKey: nil, vehicleId: carPlayVehicleId)
         }
-        switch mode {
-        case .off:
-            return nil
-        case .carPlay:
-            guard let port = outputs.first(where: { $0.type == carPlayPortType }) else { return nil }
-            return CarConnection(kind: .carPlayRoute, name: port.name.isEmpty ? "CarPlay" : port.name,
-                                 deviceKey: nil, vehicleId: carPlayVehicleId)
-        case .bluetooth:
-            guard let match = matchingDevice(outputs, devices: devices) else { return nil }
+        if mode.useBluetooth, let match = matchingDevice(outputs, devices: devices) {
             let (device, port) = match
             return CarConnection(kind: .bluetooth, name: port.name.isEmpty ? device.name : port.name,
                                  deviceKey: device.id, vehicleId: device.vehicleId)
         }
+        if mode.useCarPlay, let port = outputs.first(where: { $0.type == carPlayPortType }) {
+            return CarConnection(kind: .carPlayRoute, name: port.name.isEmpty ? "CarPlay" : port.name,
+                                 deviceKey: nil, vehicleId: carPlayVehicleId)
+        }
+        return nil
     }
 
     /// Start der Automatik auf «automotive» (CoreMotion): ohne Auto-Erkennung immer, sonst nur verbunden.
     static func motionStartAllowed(mode: CarDetectionMode, connection: CarConnection?) -> Bool {
-        mode == .off || connection != nil
+        mode.isOff || connection != nil
     }
 
     /// Start direkt beim Verbinden (Routenwechsel, CarPlay-Szene), wenn CoreMotion nicht widerspricht
@@ -134,7 +160,7 @@ enum CarRouteMatcher {
                                     latestMotion: MotionSample?) -> Bool {
         guard let connection else { return false }
         if connection.kind == .carPlayScene { return true }
-        guard mode != .off else { return false }
+        guard !mode.isOff else { return false }
         return !(latestMotion?.isOnFoot ?? false)
     }
 }

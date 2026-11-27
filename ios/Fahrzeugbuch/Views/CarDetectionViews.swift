@@ -48,7 +48,7 @@ struct DefaultVehiclePicker: View {
     }
 }
 
-/// «Auto erkennen über»: Aus / CarPlay / Bluetooth-Gerät(e). Mit Auto-Erkennung startet die Automatik nur,
+/// «Auto erkennen über»: CarPlay und/oder Bluetooth-Gerät(e), unabhängig wählbar. Mit Auto-Erkennung startet die Automatik nur,
 /// wenn CoreMotion «im Auto» meldet UND CarPlay bzw. ein gelerntes Gerät verbunden ist (weniger Fehlalarme in
 /// Zug/Tram/Bus); beim Verbinden startet sie direkt, beim Trennen endet die automatische Fahrt nach 2 min.
 struct CarDetectionSettingsView: View {
@@ -61,25 +61,22 @@ struct CarDetectionSettingsView: View {
     var body: some View {
         Form {
             Section {
-                Picker("Auto erkennen über", selection: $car.mode) {
-                    ForEach(CarDetectionMode.allCases) { mode in
-                        Text(mode.label).tag(mode)
-                    }
+                Toggle(isOn: $car.mode.useCarPlay) {
+                    Label("CarPlay", systemImage: "carplay")
                 }
-                .pickerStyle(.inline)
-                .labelsHidden()
+                Toggle(isOn: $car.mode.useBluetooth) {
+                    Label("Bluetooth (Autoradio, Freisprecher)", systemImage: "dot.radiowaves.left.and.right")
+                }
             } header: {
                 Text("Auto erkennen über")
             } footer: {
                 Text(modeFooter)
             }
 
-            switch car.mode {
-            case .off:
-                EmptyView()
-            case .carPlay:
+            if car.mode.useCarPlay {
                 carPlaySection
-            case .bluetooth:
+            }
+            if car.mode.useBluetooth {
                 bluetoothSections
             }
 
@@ -105,15 +102,20 @@ struct CarDetectionSettingsView: View {
     }
 
     private var modeFooter: String {
-        switch car.mode {
-        case .off:
-            "Fahrten starten, sobald «Bewegung & Fitness» eine Autofahrt erkennt – auch in Zug, Tram oder Bus."
-        case .carPlay:
+        switch (car.mode.useCarPlay, car.mode.useBluetooth) {
+        case (false, false):
+            "Beides aus: Fahrten starten, sobald «Bewegung & Fitness» eine Autofahrt erkennt – auch in Zug, Tram "
+                + "oder Bus."
+        case (true, false):
             "Automatik nur mit verbundenem CarPlay. Ist die odovio-Oberfläche in CarPlay geöffnet, startet die "
-                + "Fahrt beim Verbinden und endet beim Trennen (nach 2 min Karenz, z. B. Tankstopp)."
-        case .bluetooth:
+                + "Fahrt beim Verbinden und endet beim Trennen (nach 2 min Karenz, z. B. Tankstopp). Autos ohne "
+                + "CarPlay: zusätzlich Bluetooth einschalten."
+        case (false, true):
             "Automatik nur, wenn ein gelerntes Bluetooth-Gerät (Autoradio, Freisprecher) verbunden ist. Trennen "
                 + "beendet die automatische Fahrt nach 2 min Karenz (z. B. Tankstopp)."
+        case (true, true):
+            "Automatik, wenn CarPlay oder ein gelerntes Bluetooth-Gerät verbunden ist – so funktioniert sie auch "
+                + "in Autos ohne CarPlay. Trennen beendet die automatische Fahrt nach 2 min Karenz (z. B. Tankstopp)."
         }
     }
 
