@@ -100,6 +100,11 @@ Mit Mac alternativ: Schlüsselbundverwaltung → Zertifikatsassistent → «Zert
 
 ## Environment `testflight` und Tag-Schutz (in GitHub einzurichten)
 
+Optional, empfohlen. **Keine neuen Zertifikate oder Schlüssel nötig** – auch nicht, weil das Repo öffentlich ist:
+Secrets sind verschlüsselt, in Logs maskiert und für Pull Requests aus Forks nicht verfügbar; starten können den
+Workflow nur Personen mit Schreibrecht. Die Einstellungen unten verschieben nur die bestehenden Werte und
+verlangen eine Freigabe pro Lauf. Neu erzeugen nur bei Verdacht auf Abfluss oder beim jährlichen Ablauf.
+
 Der Workflow läuft im Environment `testflight`. Solange es in GitHub nicht eingerichtet ist, legt GitHub es beim
 ersten Lauf **ohne Schutz** an – die Härtung greift erst mit diesen Einstellungen:
 
@@ -120,9 +125,9 @@ ersten Lauf **ohne Schutz** an – die Härtung greift erst mit diesen Einstellu
 
 - [x] Gerät registriert (für Tests auf dem iPhone; für TestFlight nicht mehr nötig).
 - [x] API-Key (Rolle Admin) als Secrets.
-- [ ] **Distribution-Zertifikat + App-Store-Profil** erstellen und als Secrets hinterlegen (Abschnitt unten). Jährlich erneuern.
-- [ ] Environment `testflight` (Required Reviewers, nur Tag `ios-v*`/`main`, Environment-Secrets) und Tag-Ruleset `ios-v*` einrichten (Abschnitt oben).
-- [ ] Ersten Lauf starten und Ergebnis prüfen.
+- [x] **Distribution-Zertifikat + App-Store-Profil** als Secrets hinterlegt (Abschnitt unten). Jährlich erneuern.
+- [ ] Optional: Environment `testflight` (Required Reviewers, nur Tag `ios-v*`/`main`, bestehende Secrets verschieben) und Tag-Ruleset `ios-v*` einrichten (Abschnitt oben).
+- [x] Ersten Lauf starten und Ergebnis prüfen.
 - [ ] App Store Connect → App → **App-Datenschutz** ausfüllen, passend zum Manifest: Genauer Standort, Fotos oder Videos, Sonstige Nutzerinhalte, Benutzer-ID, Name, E-Mail-Adresse – jeweils «mit Identität verknüpft», «nicht für Tracking», Zweck «App-Funktionalität». Datenschutzerklärung-URL (z. B. https://www.odovio.ch/datenschutz) nötig.
 - [ ] TestFlight → **Testinformationen**: Beta-Beschreibung, Feedback-E-Mail, Kontakt.
 - [ ] Interne Tester (Team-Mitglieder) hinzufügen → sofort verfügbar.
