@@ -35,7 +35,7 @@ final class TripRecorder {
     /// `CLLocationUpdate.isStationary` hat gewechselt (iOS pausiert die Updates bei Stillstand).
     var onStationary: ((Bool) -> Void)?
 
-    /// Lücke > `TripGap.splitAfter` zwischen zwei Bewegungspunkten (nur mit `splitsOnGap`).
+    /// Lücke > `RecordingGap.splitAfter` zwischen zwei Bewegungspunkten (nur mit `splitsOnGap`).
     struct Gap {
         /// Anzahl gespeicherter Punkte vor der Lücke
         var index: Int
@@ -208,7 +208,7 @@ final class TripRecorder {
         let d = GeoMath.distance(last, p)
         if d / dt > Self.maxSpeed { return }              // Sprung
         if d < max(5, min(acc, 25)) { return }            // Zittern im Stand
-        if splitsOnGap, pendingGap == nil, TripGap.isGap(previousTs: last.ts, nextTs: p.ts) {
+        if splitsOnGap, pendingGap == nil, RecordingGap.isGap(previousTs: last.ts, nextTs: p.ts) {
             pendingGap = Gap(index: points.count, lastBefore: last, distanceBefore: distanceMeters,
                              firstAfter: p, jumpMeters: d)
         }

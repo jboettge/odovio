@@ -34,46 +34,46 @@ final class TripDetectionTests: XCTestCase {
     // MARK: Lücken (Q2, Q4)
 
     func testGapDetectionAndResume() {
-        XCTAssertTrue(TripGap.isGap(previousTs: 0, nextTs: 601))
-        XCTAssertFalse(TripGap.isGap(previousTs: 0, nextTs: 600))
-        XCTAssertTrue(TripGap.endsOnResume(source: "auto", lastMovingAt: t0.addingTimeInterval(-900), now: t0))
-        XCTAssertFalse(TripGap.endsOnResume(source: "auto", lastMovingAt: t0.addingTimeInterval(-120), now: t0),
+        XCTAssertTrue(RecordingGap.isGap(previousTs: 0, nextTs: 601))
+        XCTAssertFalse(RecordingGap.isGap(previousTs: 0, nextTs: 600))
+        XCTAssertTrue(RecordingGap.endsOnResume(source: "auto", lastMovingAt: t0.addingTimeInterval(-900), now: t0))
+        XCTAssertFalse(RecordingGap.endsOnResume(source: "auto", lastMovingAt: t0.addingTimeInterval(-120), now: t0),
                        "Jetsam während der Fahrt → fortsetzen")
-        XCTAssertFalse(TripGap.endsOnResume(source: "manual", lastMovingAt: t0.addingTimeInterval(-3600), now: t0),
+        XCTAssertFalse(RecordingGap.endsOnResume(source: "manual", lastMovingAt: t0.addingTimeInterval(-3600), now: t0),
                        "manuelle Fahrt beendet der Nutzer")
     }
 
     func testGapSplitsParkedTrips() {
         let end = t0.addingTimeInterval(1800)
-        XCTAssertTrue(TripGap.shouldSplit(gapStart: t0, gapEnd: end, samples: nil), "ohne CoreMotion: teilen")
-        XCTAssertTrue(TripGap.shouldSplit(gapStart: t0, gapEnd: end, samples: []))
+        XCTAssertTrue(RecordingGap.shouldSplit(gapStart: t0, gapEnd: end, samples: nil), "ohne CoreMotion: teilen")
+        XCTAssertTrue(RecordingGap.shouldSplit(gapStart: t0, gapEnd: end, samples: []))
         // Ausgestiegen und gegangen
         let walked = [MotionSample(automotive: true, date: t0.addingTimeInterval(-600)),
                       MotionSample(automotive: false, onFoot: true, date: t0.addingTimeInterval(60)),
                       MotionSample(automotive: false, stationary: true, date: t0.addingTimeInterval(400))]
-        XCTAssertTrue(TripGap.shouldSplit(gapStart: t0, gapEnd: end, samples: walked))
+        XCTAssertTrue(RecordingGap.shouldSplit(gapStart: t0, gapEnd: end, samples: walked))
         // iPhone im parkierten Auto liegen gelassen: nur «stillstehend»
         let parked = [MotionSample(automotive: true, date: t0.addingTimeInterval(-600)),
                       MotionSample(automotive: false, stationary: true, date: t0.addingTimeInterval(30))]
-        XCTAssertTrue(TripGap.shouldSplit(gapStart: t0, gapEnd: end, samples: parked))
+        XCTAssertTrue(RecordingGap.shouldSplit(gapStart: t0, gapEnd: end, samples: parked))
     }
 
     func testGapInTrafficJamStaysOneTrip() {
         let end = t0.addingTimeInterval(1800)
         // «automotive» begann vor der Lücke und dauert an (CoreMotion meldet nur Wechsel)
-        XCTAssertFalse(TripGap.shouldSplit(gapStart: t0, gapEnd: end,
+        XCTAssertFalse(RecordingGap.shouldSplit(gapStart: t0, gapEnd: end,
                                            samples: [MotionSample(automotive: true, date: t0.addingTimeInterval(-300))]))
         // «automotive» + «stationary» (Stau, Rotlicht)
         let jam = [MotionSample(automotive: true, date: t0.addingTimeInterval(-300)),
                    MotionSample(automotive: true, stationary: true, date: t0.addingTimeInterval(120))]
-        XCTAssertFalse(TripGap.shouldSplit(gapStart: t0, gapEnd: end, samples: jam))
+        XCTAssertFalse(RecordingGap.shouldSplit(gapStart: t0, gapEnd: end, samples: jam))
         // kurze Fehlerkennung «zu Fuss» (< 60 s) im Stau
         let blip = [MotionSample(automotive: true, date: t0.addingTimeInterval(-300)),
                     MotionSample(automotive: false, onFoot: true, date: t0.addingTimeInterval(100)),
                     MotionSample(automotive: true, date: t0.addingTimeInterval(130))]
-        XCTAssertFalse(TripGap.shouldSplit(gapStart: t0, gapEnd: end, samples: blip))
+        XCTAssertFalse(RecordingGap.shouldSplit(gapStart: t0, gapEnd: end, samples: blip))
         // Lücke ≤ 10 min wird nie geteilt
-        XCTAssertFalse(TripGap.shouldSplit(gapStart: t0, gapEnd: t0.addingTimeInterval(500), samples: nil))
+        XCTAssertFalse(RecordingGap.shouldSplit(gapStart: t0, gapEnd: t0.addingTimeInterval(500), samples: nil))
     }
 
     // MARK: Stopp (Q2, Q4)

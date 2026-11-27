@@ -18,7 +18,7 @@ enum TripTiming {
 
 /// Lücken in der Aufzeichnung (Q2): Nach mehr als 10 Minuten ohne Bewegungspunkt gehört die nächste
 /// Bewegung zu einer neuen Fahrt – ausser CoreMotion meldete in der Lücke überwiegend «im Auto» (Stau, Q4).
-enum TripGap {
+enum RecordingGap {
     static let splitAfter: TimeInterval = 600
     /// So viel «gehend/laufend/Velo» in der Lücke genügt für eine neue Fahrt (ausgestiegen)
     static let onFootThreshold: TimeInterval = 60

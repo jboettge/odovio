@@ -634,7 +634,7 @@ final class TripCoordinator {
         }
         let now = Date()
         if now.timeIntervalSince(a.startedAt) > Self.maxResumeAge
-            || TripGap.endsOnResume(source: a.source, lastMovingAt: a.lastMovement, now: now) {
+            || RecordingGap.endsOnResume(source: a.source, lastMovingAt: a.lastMovement, now: now) {
             // App lange beendet bzw. automatische Fahrt seit > 10 min ohne Bewegung (geparkt, Q2): am letzten
             // Bewegungspunkt abschliessen statt fortsetzen – fährt man weiter, beginnt die Automatik eine neue Fahrt
             let track = Self.staleTrack(a, now: now)
@@ -716,7 +716,7 @@ final class TripCoordinator {
             let samples = await self.detector.motionHistory(from: gapStart, to: gapEnd)
             self.gapCheckRunning = false
             guard self.isRecording, self.recorder.pendingGap != nil else { return }
-            if TripGap.shouldSplit(gapStart: gapStart, gapEnd: gapEnd, samples: samples) {
+            if RecordingGap.shouldSplit(gapStart: gapStart, gapEnd: gapEnd, samples: samples) {
                 self.splitAtGap()
             } else {
                 self.recorder.acceptGap()

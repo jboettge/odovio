@@ -48,7 +48,7 @@ struct MotionSample {
 ///   GPS (stillstehend/gehend) bzw. iOS meldet Stillstand (`isStationary`) seit 1 min und CoreMotion nicht mehr
 ///   «automotive». Ohne GPS-Bewegung, aber «automotive» (Stau) läuft die Fahrt weiter (Q4). Wird die App
 ///   beim Parkieren suspendiert, gilt als Ende der letzte Bewegungspunkt (`TripTiming`), und eine Bewegung
-///   nach > 10 min Lücke beginnt eine neue Fahrt (`TripGap`, im Coordinator).
+///   nach > 10 min Lücke beginnt eine neue Fahrt (`RecordingGap`, im Coordinator).
 /// - Manuell gestartete Fahrten (Knopf/Kurzbefehl): nach 10 min Stillstand nur ein Vorschlag
 ///   (`onIdleDetected` → Mitteilung „Fahrt beenden?“), kein automatisches Beenden.
 /// - Weck-Trigger, wenn die App suspendiert oder beendet ist: wesentliche Standortänderungen,
