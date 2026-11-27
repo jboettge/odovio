@@ -53,6 +53,21 @@ Team-ID, ohne Namen) und packt die IPA direkt aus dem Archiv.
 
 Mit Mac alternativ: Schlüsselbundverwaltung → Zertifikatsassistent → «Zertifikat einer Zertifizierungsinstanz anfordern» (CSR), Zertifikat laden, doppelklicken, im Schlüsselbund mit privatem Schlüssel als `.p12` exportieren.
 
+## CarPlay (Fahrt starten/beenden, Tanken)
+
+- Umsetzung: `ios/Fahrzeugbuch/CarPlay/CarPlaySceneDelegate.swift` – Raster mit drei Kacheln; Start/Stopp mit dem
+  Standardfahrzeug (wie Siri/Kurzbefehle), «Tanken» merkt den Tankvorgang vor (Mitteilung, Formular beim nächsten
+  Öffnen auf dem iPhone – CarPlay erlaubt keine Texteingabe).
+- Kategorie **Driving Task** (`com.apple.developer.carplay-driving-task`). Die Berechtigung vergibt Apple auf Antrag:
+  developer.apple.com/contact/carplay → App «odovio», Bundle-ID `ch.odovio`, Kategorie «Driving Task»,
+  Begründung: Fahrtenbuch – Fahrt starten/beenden und Tankvorgang vormerken während der Fahrt.
+- Bis zur Freischaltung: Entitlement nur in Debug (`project.yml` → `configs.Debug`), testbar im Simulator
+  (Xcode → I/O → External Displays → CarPlay). TestFlight-Builds zeigen in CarPlay noch nichts.
+- Nach der Freischaltung:
+  1. developer.apple.com → Identifiers → `ch.odovio` → Capability «CarPlay Driving Task» aktivieren.
+  2. App-Store-Profil neu erzeugen → Secret `ASC_PROFILE` ersetzen.
+  3. In `ios/project.yml` `CODE_SIGN_ENTITLEMENTS` von `configs.Debug` nach `base` verschieben.
+
 ## Checkliste Nutzer
 
 - [x] Gerät registriert (für Tests auf dem iPhone; für TestFlight nicht mehr nötig).

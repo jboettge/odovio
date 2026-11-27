@@ -19,6 +19,7 @@ final class TripNotifications: NSObject, UNUserNotificationCenterDelegate {
         static let idle = "fzb.trip.idle"
         static let detected = "fzb.trip.detected"
         static let review = "fzb.trip.review"
+        static let fuel = "fzb.fuel.reminder"
     }
 
     enum Action {
@@ -31,6 +32,7 @@ final class TripNotifications: NSObject, UNUserNotificationCenterDelegate {
         static let prefix = "fzb-trip-"
         static let idle = "fzb-trip-idle"
         static let weekly = "fzb-trip-weekly"
+        static let fuel = "fzb-fuel-reminder"
         static func detected(_ tripId: String) -> String { "fzb-trip-detected-\(tripId)" }
     }
 
@@ -55,6 +57,7 @@ final class TripNotifications: NSObject, UNUserNotificationCenterDelegate {
             UNNotificationCategory(identifier: Category.idle, actions: [stop], intentIdentifiers: []),
             UNNotificationCategory(identifier: Category.detected, actions: [business, personal], intentIdentifiers: []),
             UNNotificationCategory(identifier: Category.review, actions: [], intentIdentifiers: []),
+            UNNotificationCategory(identifier: Category.fuel, actions: [], intentIdentifiers: []),
         ])
     }
 
@@ -72,6 +75,21 @@ final class TripNotifications: NSObject, UNUserNotificationCenterDelegate {
         content.threadIdentifier = "fzb-trip"
         try? await UNUserNotificationCenter.current().add(
             UNNotificationRequest(identifier: Identifier.idle, content: content, trigger: nil))
+    }
+
+    /// CarPlay «Tanken»: Erinnerung, den Tankvorgang auf dem iPhone zu erfassen (Tippen öffnet das Formular).
+    func notifyFuelReminder(vehicleId: String?, vehicleName: String?) async {
+        guard await isAllowed() else { return }
+        let content = UNMutableNotificationContent()
+        content.title = "Tankvorgang erfassen"
+        content.body = "Vorgemerkt um \(Self.timeFormatter.string(from: Date()))"
+            + (vehicleName.map { " (\($0))" } ?? "") + ". Liter und Betrag eintragen."
+        content.sound = .default
+        content.categoryIdentifier = Category.fuel
+        content.threadIdentifier = "fzb-fuel"
+        if let vehicleId { content.userInfo = [Key.vehicleId: vehicleId] }
+        try? await UNUserNotificationCenter.current().add(
+            UNNotificationRequest(identifier: Identifier.fuel, content: content, trigger: nil))
     }
 
     /// Stillstands-Mitteilung zurückziehen (Fahrt beendet oder wieder in Bewegung).
@@ -176,6 +194,8 @@ final class TripNotifications: NSObject, UNUserNotificationCenterDelegate {
         case UNNotificationDefaultActionIdentifier:
             if category == Category.detected || category == Category.review {
                 AppRouter.shared.pending = .review(vehicleId: vehicleId)
+            } else if category == Category.fuel {
+                AppRouter.shared.pending = .addFuel(vehicleId: vehicleId)
             }
         default:
             break

@@ -414,6 +414,12 @@ final class TripCoordinator {
         return lastError ?? "Die Fahrt konnte nicht gestartet werden."
     }
 
+    /// Standardfahrzeug (ID + Name) für CarPlay «Tanken»; `nil`, wenn keines eindeutig ist.
+    func defaultVehicleSummary() async -> (id: String, name: String)? {
+        guard configured, let store = await currentStore(), let v = defaultVehicle(store) else { return nil }
+        return (v.id, v.name)
+    }
+
     /// Für App-Intents: Fahrt beenden; Rückgabe = Text für Siri/Kurzbefehle.
     func stopFromIntent() async -> String {
         guard isRecording else { return "Es läuft keine Fahrt." }

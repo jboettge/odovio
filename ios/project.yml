@@ -20,6 +20,11 @@ targets:
         TARGETED_DEVICE_FAMILY: "1"
         CODE_SIGN_STYLE: Automatic
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+      configs:
+        # CarPlay-Berechtigung nur Debug/Simulator, bis Apple sie für ch.odovio freischaltet (dann auch Release
+        # setzen und das App-Store-Profil neu erzeugen – sonst schlägt die Signierung fehl).
+        Debug:
+          CODE_SIGN_ENTITLEMENTS: Fahrzeugbuch/CarPlay/CarPlay.entitlements
     info:
       path: Fahrzeugbuch/Info.plist
       properties:
@@ -31,6 +36,13 @@ targets:
         # Nur Standard-Krypto (HTTPS, CryptoKit-Hashes/Signaturprüfung) → keine Exportdeklaration nötig
         ITSAppUsesNonExemptEncryption: false
         UILaunchScreen: {}
+        # CarPlay-Szene (Fahrt starten/beenden, Tanken); das iPhone-Fenster liefert SwiftUI
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: true
+          UISceneConfigurations:
+            CPTemplateApplicationSceneSessionRoleApplication:
+              - UISceneConfigurationName: CarPlay
+                UISceneDelegateClassName: $(PRODUCT_MODULE_NAME).CarPlaySceneDelegate
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
         # Einrichtung per Link/QR: fahrzeugbuch://setup?server=https://…
         # (das OIDC-Callback-Schema ch.odovio behandelt ASWebAuthenticationSession – nicht hier eintragen)
