@@ -19,7 +19,8 @@ import uuid
 from collections.abc import Callable
 
 BUCKETS = (0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0)
-COUNTED_EVENTS = {"rate_limited", "brute_force_block", "auth_failed", "state_backend_error", "integrity_failed",
+COUNTED_EVENTS = {"rate_limited", "brute_force_block", "auth_failed", "auth_missing", "state_backend_error",
+                  "integrity_failed", "integrity_full_overdue", "verify_full_busy",
                   "upload_rejected", "forbidden_tenant", "cors_rejected", "host_rejected"}
 WORKER_ID = uuid.uuid4().hex[:12]          # Identität des Prozesses im gemeinsamen Zustand (nicht die PID)
 

@@ -97,6 +97,9 @@ spec:
               value: {{ default "Europe/Zurich" $v.config.APP_TIMEZONE | quote }}
             - name: LOG_LEVEL
               value: {{ default "INFO" $v.config.LOG_LEVEL | quote }}
+            # neuerer, als kompatibel zugelassener Schema-Stand → Migration ändert nichts (README «Upgrade / Rollback»)
+            - name: SCHEMA_COMPATIBLE_NEWER
+              value: {{ default "" $v.config.SCHEMA_COMPATIBLE_NEWER | toString | quote }}
             # Owner-Rolle (Schema, Trigger, App-Rolle) – Passwort per MIGRATION_DATABASE_PASSWORD(_FILE)
             - name: MIGRATION_DATABASE_URL
               value: {{ include "fahrzeugbuch.db.url" (dict "ctx" . "user" $v.database.ownerUser "target" "migration") | quote }}

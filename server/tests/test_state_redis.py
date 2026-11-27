@@ -8,7 +8,7 @@ import pytest
 
 from app import geo, main, metrics, security, state
 
-from .conftest import REDIS_URL, T, bearer_token
+from .conftest import REDIS_URL, T, bearer_token, forged_auth
 from .test_security import events, other  # noqa: F401  (Fixture)
 
 pytestmark = pytest.mark.requires_redis
@@ -107,11 +107,24 @@ def test_app_brute_force_via_redis(client, redis_state, monkeypatch, events):  #
     monkeypatch.setenv("BRUTE_401_THRESHOLD", "3")
     c = other("203.0.113.80")
     for _ in range(3):
-        assert c.get("/api/me", headers={"Authorization": "Bearer kaputt"}).status_code == 401
+        assert c.get("/api/me", headers=forged_auth()).status_code == 401
     security.guard.reset()                                       # anderer Worker: lokal nichts bekannt
     r = c.get("/api/me")
     assert r.status_code == 429 and 290 <= int(r.headers["retry-after"]) <= 301
     assert [e for e in events if e["event"] == "brute_force_block"][0]["level"] == 1
+
+
+def test_shared_block_api_only(client, redis_state, monkeypatch):  # noqa: F811
+    monkeypatch.setenv("BRUTE_401_THRESHOLD", "2")
+    c = other("203.0.113.81")
+    for _ in range(3):
+        assert c.get("/api/me", headers={"Authorization": ""}).status_code == 401   # zählt nicht
+    assert c.get("/api/me").status_code == 200
+    for _ in range(2):
+        assert c.get("/api/me", headers=forged_auth()).status_code == 401
+    security.guard.reset()                                       # Sperre nur in Valkey
+    assert c.get("/api/me").status_code == 429
+    assert [c.get(p).status_code for p in ("/health", "/health/ready", "/auth/config")] == [200, 200, 200]
 
 
 def test_app_circuit_breaker_via_redis(client, redis_state, monkeypatch):
@@ -168,11 +181,12 @@ def test_outage_fail_open_but_local_blocks(client, broken_state, monkeypatch, ev
     assert any(e["event"] == "state_backend_error" for e in events)
     # Brute-Force gilt lokal weiter
     for _ in range(2):
-        assert c.get("/api/me", headers={"Authorization": "Bearer kaputt"}).status_code == 401
+        assert c.get("/api/me", headers=forged_auth()).status_code == 401
     assert c.get("/api/me").status_code == 429
     assert client.get("/health").json() == {"status": "degraded"}
-    r = client.get("/health/ready")
-    assert r.status_code == 503 and r.json()["state"] == "unavailable"
+    r = client.get("/health/ready")            # S1: Valkey weg → nur «degraded», Pod bleibt bereit
+    assert r.status_code == 200 and r.json()["state"] == "unavailable" and r.json()["degraded"] is True
+    assert r.json()["status"] == "ready"
     assert client.get("/health/live").status_code == 200
 
 
@@ -190,7 +204,7 @@ def test_blocks_mirrored_locally_survive_outage(client, redis_state, monkeypatch
     monkeypatch.setenv("BRUTE_401_THRESHOLD", "2")
     c = other("203.0.113.95")
     for _ in range(2):
-        c.get("/api/me", headers={"Authorization": "Bearer kaputt"})
+        c.get("/api/me", headers=forged_auth())
     assert security.guard.blocked("203.0.113.95") > 0             # gespiegelt
     state.configure(state.RedisState("redis://127.0.0.1:1/0", key_prefix="fzbbroken:"))
     assert c.get("/api/me").status_code == 429                    # Valkey weg, Sperre gilt weiter

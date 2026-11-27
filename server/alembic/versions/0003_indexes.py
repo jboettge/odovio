@@ -23,6 +23,9 @@ revision: str = '0003'
 down_revision: str | None = '0002'
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
+# Läuft der Code der Vorgängerrevision unverändert auf diesem Stand? (nur ein Index)
+# → app.migrate: Readiness/Rollback eines älteren Images
+compatible_with_previous = True
 
 INDEXES = (('ix_anchors_tenant_seq', 'anchors', ('tenant_id', 'seq')),)
 

@@ -38,6 +38,31 @@ Kernprinzipien: local-first App mit Outbox/Sync (`/sync`, `/changes`), revisions
   **Grenze:** iOS weckt die App nicht bei Bluetooth-/CarPlay-Verbindung → Kurzbefehle-Automation «Verbindet → Fahrt
   starten» empfehlen (Hinweis in der Einstellung). Gerätetests offen (siehe Review «nur auf dem Gerät klärbar» 1–5,
   10–12, plus Audio-Route im Auto).
+
+- **Review 27.11.2026, Priorität 1 Server/Deploy/CI** (`docs/REVIEW-2026-11.md`):
+  - X1: 401 ohne Token bzw. mit syntaktisch kaputtem Token (`missing_token`, `malformed`) zählt nicht für die
+    IP-Sperre (eigenes Ereignis `auth_missing`, gedrosselt); Sperre nur für `/api/*` (SPA, Assets, `/health*`,
+    `/auth/config` bleiben erreichbar, Rate-Limits weiter); `config_warning` (höchstens stündlich), wenn
+    X-Forwarded-For von einem nicht vertrauten Peer kommt. Compose: `STRICT_CONFIG` Default 1,
+    `ANCHOR_SIGNING_KEY` Pflicht (`:?`). Beispiele auf `www.odovio.ch` (+ Apex `odovio.ch` → Redirect).
+  - X2: fällige Vollprüfung, die > 2 × `VERIFY_FULL_INTERVAL_S` nicht laufen kann (try-Lock belegt) → `ok=false`,
+    `full_overdue`, PDF «NICHT BESTÄTIGT – Vollprüfung überfällig», Sicherheits-Log `integrity_full_overdue`;
+    409 auf `?full=1` → `verify_full_busy` (ab 3× in Folge WARNING). Prüfstand-Signatur v2 inkl. `failed_seq`
+    (alte Signaturen → einmalig Vollprüfung).
+  - X3: Upload vermerkt die Datei in `blob_checks`; fehlt eine so belegte Datei später → Befund
+    «Datei fehlt (war vorhanden)», inkrementell und voll. Nur nie hochgeladene Belege bleiben `blobs_missing`.
+  - X4: fail2ban-Filter am Zeilenanfang verankert (kein `^.*`), Jail nur auf den API-Container (journald bzw.
+    exakter json-file-Pfad), Pfade im Sicherheits-Log URL-kodiert (nie `"`); Test `tests/test_fail2ban.py`.
+  - S1: `/health/ready` bei Valkey-Ausfall 200 mit `"degraded": true`; Schema bereit bei head oder neuerem, als
+    kompatibel markiertem Stand (`compatible_with_previous` in der Migration → Kommentar an `alembic_version`,
+    bzw. Env `SCHEMA_COMPATIBLE_NEWER`); `app.migrate` ändert neuere Stände nie. Helm-README «Upgrade / Rollback».
+  - S2: PDF wartet höchstens `PDF_WAIT_S` ≤ 1 s und nur bis `PDF_QUEUE` (2 × `PDF_CONCURRENCY`) Wartende, sonst
+    sofort 503 + Retry-After; Health-Endpunkte `async`, DB-Prüfung der Readiness in eigenem Mini-Pool mit Timeout.
+  - X10/S14: `hide_parameters=True`, Constraint-Fehler im Sync nur mit SQLSTATE/Constraint geloggt.
+  - X11: TestFlight-Workflow: Environment `testflight`, `persist-credentials: false`, XcodeGen 2.46.0 als
+    Release-Zip mit SHA-256 vor dem Import der Schlüssel, `security import` ohne `-T /usr/bin/security`.
+    **In GitHub einzurichten** (Environment mit Required Reviewers, Environment-Secrets, Tag-Ruleset `ios-v*`):
+    `docs/TESTFLIGHT.md`.
 - **Helm**: Chart mit HPA/VPA, Valkey optional, Migrations-Hook-Job, NetworkPolicy, ServiceMonitor. Nicht in echtem Cluster installiert (kind lief in der Sandbox nicht); Image mit Chart-Settings in Docker geprüft.
 
 ## Teststatus (letzter Stand)
@@ -90,7 +115,8 @@ Kernprinzipien: local-first App mit Outbox/Sync (`/sync`, `/changes`), revisions
 
 - Lasttest (4 vCPU, 1 Mio. Revisionen, 32 Nutzer): 1 Worker 42 RPS / p95 2.1 s, 4 Worker 87 RPS / p95 1.6 s; PDF siehe oben.
 - Inkrementelle Integritätsprüfung: Manipulationen bereits bestätigter Revisionen (ohne Neuberechnen der Kette) bzw. unveränderter Datensätze erkennt erst die nächste Vollprüfung (≤ `VERIFY_FULL_INTERVAL_S` nach der letzten, sofern ein Bericht/Verify sie auslöst).
-- Rate-Limits/Sperren ohne Valkey nur im Prozess (1 Worker, Reset bei Neustart); `FORWARDED_ALLOW_IPS` muss die Proxy-IP sein.
+- Rate-Limits/Sperren ohne Valkey nur im Prozess (1 Worker, Reset bei Neustart); `FORWARDED_ALLOW_IPS` muss die Proxy-IP sein (falsch → `config_warning` «X-Forwarded-For von nicht vertrautem Peer»).
+- Zähler für wiederholte 409 auf `?full=1` (`verify_full_busy`) je Worker; «Vollprüfung überfällig» greift unabhängig davon.
 - Web: Voll-Sync hält alle Fachdaten im Tab (~130 MB bei 100k Fahrten).
 - Lokalmodus iOS: Journal-Abgleich kann bei Zeitzonenwechsel falsch-positiv melden.
 - Valkey-Passwort in Prozessargumenten sichtbar (nur internes Netz).

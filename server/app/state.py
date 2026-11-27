@@ -367,6 +367,13 @@ class RedisState:
         except self._errors() as e:
             raise self._failed(e) from None
 
+    async def aping(self) -> bool:
+        """Wie ping, aber in der Event-Loop (Readiness ohne Threadpool)."""
+        try:
+            return bool(await self._aclient().ping())
+        except self._errors() as e:
+            raise self._failed(e) from None
+
     def reset(self) -> None:
         """Alle Schlüssel mit diesem Präfix löschen (Tests)."""
         with self._lock:

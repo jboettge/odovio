@@ -112,6 +112,17 @@ def new_vehicle(client, name="Golf", initial_km=10000):
     return vid
 
 
+def forge(token: str) -> str:
+    """JWT mit ersetzter Signatur → bad_signature (zählt für die Brute-Force-Sperre, anders als ein fehlendes
+    oder syntaktisch kaputtes Token)."""
+    head, body, sig = token.split(".")
+    return f"{head}.{body}.{'A' * len(sig)}"
+
+
+def forged_auth(**claims) -> dict:
+    return {"Authorization": f"Bearer {forge(make_token(**claims))}"}
+
+
 def bearer_token(**claims) -> dict:
     return {"Authorization": f"Bearer {make_token(**claims)}"}
 

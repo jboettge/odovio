@@ -15,7 +15,9 @@ der Metadaten), atomar geschrieben (tmp + rename) und von der Integritätsprüfu
 Der Inhalt muss zum Typ passen (Magic Bytes: JPEG, HEIC/HEIF, PDF).
 
 Prüfsummen-Cache: im Prozess und persistent (Tabelle blob_checks, je Datei-Fingerabdruck) → nach einem
-Neustart liest das erste PDF nicht alle Belege des Mandanten neu.
+Neustart liest das erste PDF nicht alle Belege des Mandanten neu. Eine Zeile in blob_checks belegt zugleich,
+dass die Datei existiert hat (beim Upload angelegt, von jeder Prüfung bestätigt): fehlt die Datei später, ist
+das ein Befund «Datei fehlt» (inkrementell und voll). Nur nie hochgeladene Belege gelten als ausstehend.
 """
 import datetime as dt
 import hashlib
@@ -333,12 +335,14 @@ def fuel_with_receipt(db: Session, tenant_id: int, fuel_ids: list[str]) -> set[s
 
 def verify_blobs(db: Session, tenant: models.Tenant, use_cache: bool = True) -> dict:
     """SHA-256 jeder vorhandenen Datei nicht stornierter Belege gegen die Metadaten.
-    Fehlende Dateien (noch nicht hochgeladen) sind kein Fehler, werden aber gezählt.
+    Fehlende Dateien: nie hochgeladen → kein Fehler, gezählt (`missing`); belegt vorhanden gewesen (Zeile in
+    blob_checks: Upload bzw. frühere Prüfung) → Befund «Datei fehlt» (gelöscht/verloren).
     `updates` = neu berechnete (Beleg, Fingerabdruck, Prüfsumme) für persist_blob_checks."""
     if not use_cache:          # Vollprüfung: jede Datei neu lesen
         clear_hash_cache()
-    known = {c.attachment_id: (c.fingerprint, c.sha256) for c in db.scalars(
-        select(models.BlobCheck).where(models.BlobCheck.tenant_id == tenant.id))} if use_cache else {}
+    seen = {c.attachment_id: (c.fingerprint, c.sha256) for c in db.scalars(
+        select(models.BlobCheck).where(models.BlobCheck.tenant_id == tenant.id))}
+    known = seen if use_cache else {}
     problems, checked, missing, updates = [], 0, 0, []
     try:
         st = storage()
@@ -351,7 +355,10 @@ def verify_blobs(db: Session, tenant: models.Tenant, use_cache: bool = True) -> 
         except ValueError:
             fp = None
         if fp is None:
-            missing += 1
+            if att.id in seen:
+                problems.append(f"Beleg {att.id}: Datei fehlt (war vorhanden)")
+            else:
+                missing += 1
             continue
         try:
             digest = st.sha256(tenant.id, att.id, fp, known.get(att.id))
@@ -367,6 +374,23 @@ def verify_blobs(db: Session, tenant: models.Tenant, use_cache: bool = True) -> 
         if digest != att.sha256:
             problems.append(f"Beleg {att.id}: Datei verändert")
     return {"problems": problems, "checked": checked, "missing": missing, "updates": updates}
+
+
+UPLOADED = "upload"        # Fingerabdruck-Platzhalter: Datei beim Upload gespeichert, noch nicht nachgerechnet
+
+
+def mark_uploaded(db: Session, tenant_id: int, aid: str, digest: str) -> None:
+    """Nach dem Speichern (in der Sitzung der Anfrage, beendet deren Transaktion): Existenz der Datei in
+    blob_checks festhalten, falls noch keine Zeile. Der Platzhalter-Fingerabdruck passt zu keiner Datei → die
+    nächste Prüfung rechnet die Prüfsumme nach."""
+    try:
+        if db.get(models.BlobCheck, aid) is None:
+            db.add(models.BlobCheck(attachment_id=aid, tenant_id=tenant_id, fingerprint=UPLOADED, sha256=digest,
+                                    checked_at=dt.datetime.now(dt.UTC).isoformat(timespec="seconds")))
+        db.commit()
+    except SQLAlchemyError as e:
+        db.rollback()
+        log.warning("Beleg %s: Upload-Vermerk nicht gespeichert (%s)", aid, type(e).__name__)
 
 
 def persist_blob_checks(tenant_id: int, updates: list[tuple[str, str, str]]) -> None:

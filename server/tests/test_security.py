@@ -13,7 +13,7 @@ from app.geo import UpstreamError
 from app.logbook import _cell
 from app.main import app, content_disposition
 
-from .conftest import T, bearer_token, make_token, new_vehicle, op, sync, uid
+from .conftest import T, bearer_token, forged_auth, make_token, new_vehicle, op, sync, uid
 from .test_collab import admin_ios, admin_web, kc  # noqa: F401 – Fixture kc (Keycloak-Admin-API gemockt)
 
 
@@ -135,8 +135,7 @@ def test_rate_limit_keyed_by_forwarded_ip(client, monkeypatch):
 # ---------- Brute-Force ----------
 def _bad(c, n, **claims):
     for _ in range(n):
-        assert c.get("/api/me", headers=bearer_token(**claims) if claims else
-                     {"Authorization": "Bearer kaputt"}).status_code == 401
+        assert c.get("/api/me", headers=bearer_token(**claims) if claims else forged_auth()).status_code == 401
 
 
 def test_brute_force_401_blocks_ip_with_backoff(client, monkeypatch, events):
@@ -150,7 +149,7 @@ def test_brute_force_401_blocks_ip_with_backoff(client, monkeypatch, events):
     blocks = [e for e in events if e["event"] == "brute_force_block"]
     assert blocks[0]["ip"] == "203.0.113.40" and blocks[0]["retry_after"] == 300 and blocks[0]["level"] == 1
     auth_failed = [e for e in events if e["event"] == "auth_failed"]
-    assert len(auth_failed) == 3 and auth_failed[0]["reason"] == "malformed" and auth_failed[0]["status"] == 401
+    assert len(auth_failed) == 3 and auth_failed[0]["reason"] == "bad_signature" and auth_failed[0]["status"] == 401
     # Sperre abgelaufen → nächste Sperre 15 min, dann 60 min
     for expected in (900, 3600, 3600):
         until, level, since = security.guard.blocks["203.0.113.40"]
@@ -182,6 +181,53 @@ def test_success_resets_401_series_of_same_sub_only(client, monkeypatch):
     assert d.get("/api/me").status_code == 200
     _bad(d, 1)
     assert d.get("/api/me").status_code == 429
+
+
+def test_missing_or_malformed_token_not_counted(client, monkeypatch, events):
+    """X1: fehlendes/kaputtes Token ist kein Rateversuch → keine Sperre (sonst anonymer DoS über die Proxy-IP)."""
+    monkeypatch.setenv("BRUTE_401_THRESHOLD", "2")
+    c = other("203.0.113.42")
+    for h in ({"Authorization": ""}, {"Authorization": "Bearer kaputt"}, {"Authorization": "Basic eDp5"},
+              {"Authorization": "Bearer a.b.c"}) * 5:
+        assert c.get("/api/me", headers=h).status_code == 401
+    assert c.get("/api/me").status_code == 200
+    assert "brute_force_block" not in names(events) and "auth_failed" not in names(events)
+    missing = [e for e in events if e["event"] == "auth_missing"]
+    assert {e["reason"] for e in missing} == {"missing_token", "malformed"}      # gedrosselt geloggt
+    assert len(missing) == 2
+    _bad(c, 2)                                    # gefälschte Signatur zählt weiterhin
+    assert c.get("/api/me").status_code == 429
+
+
+def test_block_applies_to_api_only(client, monkeypatch, tmp_path):
+    """X1: gesperrte IP erhält weiterhin SPA, Assets, /health* und /auth/config (dort nur Rate-Limits)."""
+    from .test_web import _dist
+    _dist(tmp_path, monkeypatch)
+    monkeypatch.setenv("BRUTE_401_THRESHOLD", "2")
+    c = other("203.0.113.43")
+    _bad(c, 2)
+    assert c.get("/api/me").status_code == 429
+    assert c.get(f"{T}/vehicles").status_code == 429
+    for path in ("/", "/verwaltung/mitglieder", "/assets/app-abc123.js", "/health", "/health/live",
+                 "/health/ready", "/auth/config"):
+        assert c.get(path).status_code == 200, path
+
+
+def test_xff_from_untrusted_peer_warns_once(client, monkeypatch, events):
+    """X1: X-Forwarded-For von nicht vertrautem Peer → config_warning (höchstens stündlich), kein Effekt."""
+    for ip in ("198.51.100.1", "198.51.100.2"):
+        assert client.get("/api/me", headers={"X-Forwarded-For": ip}).status_code == 200
+    warn = [e for e in events if e["event"] == "config_warning"]
+    assert len(warn) == 1 and "FORWARDED_ALLOW_IPS" in warn[0]["reason"] and warn[0]["peer"] == "testclient"
+    client.get("/api/me")                                         # ohne Header: nichts
+    # uvicorn --proxy-headers hat den Client schon aus dem Header übernommen (Peer = Eintrag) → kein Hinweis
+    security.reset()
+    assert other("198.51.100.9").get("/api/me", headers={"X-Forwarded-For": "198.51.100.9"}).status_code == 200
+    assert len([e for e in events if e["event"] == "config_warning"]) == 1
+    security.reset()
+    monkeypatch.setenv("FORWARDED_ALLOW_IPS", "testclient")       # Peer vertraut → keine Warnung
+    assert client.get("/api/me", headers={"X-Forwarded-For": "198.51.100.3"}).status_code == 200
+    assert len([e for e in events if e["event"] == "config_warning"]) == 1
 
 
 def test_brute_force_tenant_probing_and_foreign_ids(client, monkeypatch, events):
@@ -306,7 +352,7 @@ def test_request_id(client, caplog):
 
 def test_request_id_in_security_log(client, events):
     client.get("/api/me", headers={"Authorization": "Bearer x", "X-Request-ID": "req-12345678"})
-    ev = [e for e in events if e["event"] == "auth_failed"][0]
+    ev = [e for e in events if e["event"] == "auth_missing"][0]
     assert ev["request_id"] == "req-12345678" and ev["path"] == "/api/me"
 
 
@@ -451,10 +497,10 @@ def test_jwks_https_only(monkeypatch):
 
 # ---------- Sicherheits-Log / Log-Injection ----------
 def test_security_log_json_lines_sanitized(client, events):
-    r = client.get("/api/t/privat%0D%0AFAKE%20event/vehicles", headers={"Authorization": "Bearer x"})
+    r = client.get("/api/t/privat%0D%0AFAKE%20event/vehicles", headers=forged_auth())
     assert r.status_code == 401
     ev = [e for e in events if e["event"] == "auth_failed"][0]
-    assert "\r" not in ev["path"] and "\n" not in ev["path"] and "\\u000d" in ev["path"]
+    assert "\r" not in ev["path"] and "\n" not in ev["path"] and "%0D%0AFAKE%20event" in ev["path"]
     rec = logging.LogRecord("fahrzeugbuch.security", logging.INFO, "", 0, "x", (), None)
     rec.security = ev
     line = security.JsonFormatter().format(rec)

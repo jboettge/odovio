@@ -23,6 +23,18 @@ Mehrere Worker/Replikas mit AUTO_MIGRATE=1: PostgreSQL-Advisory-Lock "migrate" �
 den Stand head vor. Empfohlen bleibt der eigene Lauf vor dem Start (Compose-Dienst migrate, Kubernetes-Job/
 Init-Container) mit AUTO_MIGRATE=0 in der API.
 
+Schema-Kompatibilität (Readiness, Rollback): Ein Image ist bereit, wenn der DB-Stand = sein head ist ODER ein ihm
+unbekannter, neuerer Stand, der als kompatibel gilt – d. h. der Code dieses Images läuft darauf unverändert
+(rein additive Migration, die er nicht braucht). Kompatibel ist ein neuerer Stand, wenn
+  - die neuere Migration dies selbst erklärt: Modulattribut `compatible_with_previous = True`; der Migrationslauf
+    (Owner) schreibt die Liste der so kompatiblen älteren Stände als Kommentar an alembic_version (PostgreSQL,
+    COMMENT ON TABLE; das ältere Image liest ihn) – damit bleiben alte Pods beim Rolling Update und nach einem
+    Rollback bereit, ohne dass sie die neue Revision kennen müssen;
+  - oder er in COMPATIBLE_NEWER (unten) bzw. SCHEMA_COMPATIBLE_NEWER (Env, kommagetrennt, "*" = jeder unbekannte
+    neuere Stand) steht – Notbehelf des Betriebs für ältere Images/SQLite.
+Unbekannter, nicht kompatibler Stand → Readiness 503 (schema_newer); der Migrationslauf eines älteren Images
+ändert einen neueren Stand nie (kompatibel → Exit 0 ohne Änderung, sonst Fehler).
+
 Aufruf: python -m app.migrate            (Exit 0 = Schema aktuell, ≠ 0 = Fehler)
         python -m app.migrate --check    (Exit 0 = Stand ist head, 3 = Migration nötig; ändert nichts)
 """
@@ -36,6 +48,7 @@ from alembic.config import Config
 from alembic.script import ScriptDirectory
 from sqlalchemy import Connection, Engine, create_engine, inspect, text
 from sqlalchemy.engine import make_url
+from sqlalchemy.exc import SQLAlchemyError
 
 from alembic import command
 
@@ -53,6 +66,10 @@ RESTRICTED = ("NOSUPERUSER", "NOCREATEDB", "NOCREATEROLE", "NOREPLICATION", "NOB
 
 ROOT = Path(__file__).resolve().parents[1]
 BASELINE = "0001"
+# Neuere, diesem Image unbekannte Revisionen, auf denen es nachweislich läuft (z. B. in einem Hotfix-Release
+# nachgetragen); zusätzlich Env SCHEMA_COMPATIBLE_NEWER und der Kommentar an alembic_version (s. oben)
+COMPATIBLE_NEWER: frozenset[str] = frozenset()
+COMPAT_COMMENT = "fahrzeugbuch-schema compatible:"
 
 
 def alembic_config(conn: Connection | None = None) -> Config:
@@ -108,21 +125,93 @@ def head_revision() -> str:
     return ScriptDirectory.from_config(alembic_config()).get_current_head()
 
 
+def known_revisions() -> frozenset[str]:
+    return frozenset(s.revision for s in ScriptDirectory.from_config(alembic_config()).walk_revisions())
+
+
+def compatible_previous(script: ScriptDirectory | None = None) -> list[str]:
+    """Ältere Stände, deren Code auf dem aktuellen head läuft: von head abwärts, solange jede Migration
+    `compatible_with_previous = True` erklärt (z. B. head 0007 und 0006 kompatibel → ["0006", "0005"])."""
+    script = script or ScriptDirectory.from_config(alembic_config())
+    out = []
+    for rev in script.walk_revisions():          # head → Baseline
+        if not getattr(rev.module, "compatible_with_previous", False) or rev.down_revision is None:
+            break
+        out.append(str(rev.down_revision))
+    return out
+
+
+def _compat_comment(conn: Connection) -> list[str]:
+    if conn.dialect.name != "postgresql":
+        return []
+    try:
+        comment = conn.execute(text("SELECT obj_description('alembic_version'::regclass, 'pg_class')")).scalar()
+    except SQLAlchemyError:
+        return []
+    if not isinstance(comment, str) or not comment.startswith(COMPAT_COMMENT):
+        return []
+    return comment[len(COMPAT_COMMENT):].split()
+
+
+def write_compat_comment(conn: Connection, compatible: list[str] | None = None) -> None:
+    """Owner: kompatible ältere Stände an alembic_version vermerken (nur PostgreSQL)."""
+    if conn.dialect.name != "postgresql":
+        return
+    revs = compatible_previous() if compatible is None else compatible
+    if any(not re.fullmatch(r"[A-Za-z0-9_]+", r) for r in revs):
+        raise ValueError("Revisionsbezeichner ungültig")
+    conn.exec_driver_sql(f"COMMENT ON TABLE alembic_version IS '{COMPAT_COMMENT} {' '.join(revs)}'")
+
+
+def compatible_env() -> set[str]:
+    return {x.strip() for x in (os.environ.get("SCHEMA_COMPATIBLE_NEWER") or "").split(",") if x.strip()}
+
+
+def schema_state(conn: Connection, current: str | None, head: str | None = None,
+                 known: frozenset[str] | None = None) -> str:
+    """ok | compatible_newer | migration_pending (älter bzw. leer) | schema_newer (unbekannt, nicht kompatibel)."""
+    head = head or head_revision()
+    if current == head:
+        return "ok"
+    known = known if known is not None else known_revisions()
+    if current is None or current in known:
+        return "migration_pending"
+    allowed = compatible_env()
+    if "*" in allowed or current in allowed or current in COMPATIBLE_NEWER or head in _compat_comment(conn):
+        return "compatible_newer"
+    return "schema_newer"
+
+
 def current_revision(conn: Connection) -> str | None:
     return _version(conn, set(inspect(conn).get_table_names()))
 
 
-def create_schema(engine: Engine) -> None:
+class SchemaNewer(RuntimeError):
+    """DB-Stand ist neuer als dieses Image und nicht als kompatibel markiert."""
+
+
+def create_schema(engine: Engine) -> bool:
+    """Migration auf head. False = DB ist auf einem neueren, kompatiblen Stand (nichts geändert)."""
     with jobs.session_lock(engine, "migrate"):
-        _create_schema(engine)
+        if not _create_schema(engine):
+            return False
         install_triggers(engine)
+    return True
 
 
-def _create_schema(engine: Engine) -> None:
+def _create_schema(engine: Engine) -> bool:
     with engine.begin() as conn:
         tables = set(inspect(conn).get_table_names())
         model_tables = set(Base.metadata.tables)
         version = _version(conn, tables)
+        if version is not None and version not in known_revisions():
+            if schema_state(conn, version) != "compatible_newer":
+                raise SchemaNewer(f"Schema-Stand {version} ist neuer als dieses Image (head {head_revision()}) und "
+                                  "nicht als kompatibel markiert – neueres Image verwenden oder "
+                                  "SCHEMA_COMPATIBLE_NEWER setzen")
+            log.warning("Schema-Stand %s neuer als head %s, aber kompatibel – keine Migration", version,
+                        head_revision())
+            return False
         if not tables & model_tables:
             if version is not None:                        # Tabellen entfernt, Versionsstand übrig
                 conn.execute(text("DELETE FROM alembic_version"))
@@ -138,6 +227,9 @@ def _create_schema(engine: Engine) -> None:
     with engine.connect() as conn:
         command.upgrade(alembic_config(conn), "head")
         conn.commit()
+    with engine.begin() as conn:
+        write_compat_comment(conn)
+    return True
 
 
 def setup_app_role(owner: Engine, role: str, password: str | None) -> None:
@@ -176,13 +268,16 @@ def setup_app_role(owner: Engine, role: str, password: str | None) -> None:
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     owner_url = os.environ.get("MIGRATION_DATABASE_URL") or os.environ["DATABASE_URL"]
-    owner = create_engine(owner_url)
+    owner = create_engine(owner_url, hide_parameters=True)
     if "--check" in argv:
         with owner.connect() as conn:
             current, head = current_revision(conn), head_revision()
-        print(f"Schema-Stand {current or '-'}, head {head}")
-        return 0 if current == head else 3
-    create_schema(owner)
+            state = schema_state(conn, current, head)
+        print(f"Schema-Stand {current or '-'}, head {head} ({state})")
+        return 0 if state in ("ok", "compatible_newer") else 3
+    if not create_schema(owner):
+        print("Schema neuer als dieses Image, aber kompatibel – nichts geändert.")
+        return 0
     app_url = os.environ.get("DATABASE_URL")
     if owner.dialect.name == "postgresql" and app_url and app_url != owner_url:
         u = make_url(app_url)

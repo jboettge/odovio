@@ -104,7 +104,9 @@ Kerne/Verbindungen hat (`.env.example`, Tabelle 8/16/32 GB).
 PDF (`pdf`, 4 Worker, 6 gleichzeitig), vor der inkrementellen Prüfung: ≈ 0.2 PDF/s, p50 ≈ 28 s. Jeder Bericht
 enthielt den Integritätsabschnitt mit Abgleich ALLER Datensätze mit dem Journal (≈ 6.5 s bei 67 000 Fahrten je
 Mandant; der erste Bericht je Worker prüfte zusätzlich die ganze Kette, ≈ 7 s). PDF_CONCURRENCY (2 je Worker)
-begrenzt die Speicherspitzen, darüber nach PDF_WAIT_S 503 mit Retry-After. Die Testdaten sind ungünstig (jede
+begrenzt die Speicherspitzen, darüber nach PDF_WAIT_S 503 mit Retry-After (seit Review 27.11.2026: höchstens
+1 s Wartezeit und höchstens PDF_QUEUE = 2 × PDF_CONCURRENCY Wartende, sonst sofort 503 – wartende PDFs belegen den
+Threadpool nicht mehr bis zu 20 s; Lastwerte oben mit dem alten Verhalten gemessen). Die Testdaten sind ungünstig (jede
 Fahrt viermal geändert → langes Änderungsprotokoll im PDF).
 
 ### Inkrementelle Integritätsprüfung (Alembic 0004, 2026-11-25)

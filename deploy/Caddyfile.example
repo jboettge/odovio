@@ -8,7 +8,10 @@
 # - Die API vertraut X-Forwarded-For/-Proto nur von FORWARDED_ALLOW_IPS = IP dieses Proxys.
 #   Caddy ersetzt X-Forwarded-For standardmässig durch die echte Client-IP (keine Übernahme fremder Werte,
 #   solange `trusted_proxies` nicht gesetzt ist) → IP-Rate-Limits/-Sperren der API greifen je Client.
-# - API-Env dazu: ALLOWED_HOSTS=fahrzeugbuch.j-mb.net,localhost  FORWARDED_ALLOW_IPS=<IP von Caddy>
+# - API-Env dazu: ALLOWED_HOSTS=www.odovio.ch,localhost  FORWARDED_ALLOW_IPS=<IP von Caddy, wie die API sie sieht>
+#   (falsch → Sicherheits-Log config_warning «X-Forwarded-For von nicht vertrautem Peer …»)
+# - Kanonisch ist https://www.odovio.ch; die Apex-Domain odovio.ch leitet dauerhaft dorthin um (eigenes
+#   Zertifikat, kein Proxy auf die API).
 #
 # Upstream: API_BIND:API_PORT aus docker-compose (z. B. 10.0.10.5:8085).
 
@@ -26,7 +29,12 @@
 	}
 }
 
-fahrzeugbuch.j-mb.net {
+# Apex → www (Pfad und Query bleiben erhalten)
+odovio.ch {
+	redir https://www.odovio.ch{uri} permanent
+}
+
+www.odovio.ch {
 	# Die API liefert vorkomprimierte Assets (br/gzip) und gzip für /api/*-JSON selbst; Caddy komprimiert
 	# bereits kodierte Antworten nicht erneut (nur der Rest wird hier komprimiert)
 	encode zstd gzip

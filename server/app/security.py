@@ -16,12 +16,19 @@ Rate-Limits (Token-Bucket je Client-IP und Kategorie):
   (Burst je Kategorie: RATE_<KAT>_BURST, Default ¼ des Minutenwerts, mind. 10)
 Brute-Force/Missbrauch (Sperre der IP, Antwort 429 „Zu viele fehlgeschlagene Anfragen“):
   BRUTE_401_THRESHOLD  401 je IP im Fenster, Default 20; erfolgreiche Anmeldung desselben sub entfernt dessen
-                       (signaturgeprüfte) Fehlversuche, nicht aber anonyme (fehlendes/gefälschtes Token)
+                       (signaturgeprüfte) Fehlversuche, nicht aber anonyme (gefälschtes Token). Fehlendes oder
+                       syntaktisch kaputtes Token (missing_token, malformed) zählt NICHT (Ereignis auth_missing):
+                       kein Rateversuch, aber sonst könnte jeder anonym eine IP – bei falsch gesetztem
+                       FORWARDED_ALLOW_IPS die des Proxys, d. h. alle Nutzer – sperren.
   BRUTE_403_THRESHOLD  403 (fremder Mandant) und 404 (fremde/ungültige IDs) je IP+sub, Default 30
   BRUTE_WINDOW_S       Fenster, Default 300
   BRUTE_BACKOFF_S      Sperrdauern bei wiederholter Sperre, Default "300,900,3600"
   BRUTE_LEVEL_RESET_S  ohne neue Sperre in dieser Zeit beginnt der Backoff von vorn, Default 86400
   SECURITY_ALLOWLIST   CIDRs, die nie gesperrt/IP-limitiert werden (z. B. LAN-Monitoring)
+  Die Sperre gilt nur für /api/* – Web-Frontend (/, /assets …) und /health* bleiben erreichbar (Rate-Limits
+  gelten dort weiter); so zeigt die SPA die 429-Meldung der API an statt einer leeren Seite.
+X-Forwarded-For von einem nicht vertrauten Peer (FORWARDED_ALLOW_IPS passt nicht zum Proxy → alle Clients
+  teilen die Proxy-IP): Sicherheits-Log config_warning (höchstens stündlich).
 Header/Transport: ALLOWED_HOSTS (kommagetrennt, "*.domain" erlaubt; Default "*"), FORCE_HSTS=1,
   CORS_ORIGINS (exakte Origins; leer = keine Cross-Origin-Freigabe), X-Request-ID.
 JSON-Bodies: JSON_MAX_DEPTH (32), JSON_MAX_ITEMS (100000) – geprüft vor dem Parsen.
@@ -41,7 +48,7 @@ import uuid
 from collections import OrderedDict, deque
 from dataclasses import dataclass
 from functools import lru_cache
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 from fastapi import HTTPException, status
 
@@ -152,8 +159,21 @@ def _throttled(key: tuple, every: float) -> bool:
     return False
 
 
+WARNING_EVENTS = frozenset({"brute_force_block", "integrity_failed", "integrity_full_overdue", "config_warning",
+                            "state_backend_error"})
+
+
+# Pfad im Sicherheits-Log URL-kodiert (ohne Query): nie `"`, Backslash, Leer- oder Steuerzeichen → keine
+# eingeschleusten JSON-Fragmente für fail2ban/CrowdSec (deploy/fail2ban), auch nicht in escapter Form
+_PATH_SAFE = "/:@!$&'()*+,;=-._~"
+
+
+def log_path(path: str) -> str:
+    return clean(quote(path.split("?", 1)[0][:1024], safe=_PATH_SAFE), 256)
+
+
 def event(name: str, *, status: int | None = None, reason: str | None = None, throttle: float = 0,
-          **extra) -> None:
+          warn: bool = False, **extra) -> None:
     """Sicherheits-Ereignis als JSON-Zeile: ts, event, ip, sub?, tenant?, path (ohne Query), status, reason,
     request_id (+ weitere Felder). Alle Werte gesäubert."""
     c = current()
@@ -170,7 +190,7 @@ def event(name: str, *, status: int | None = None, reason: str | None = None, th
         fields["tenant"] = clean(tenant, 64)
     path = extra.pop("path", None) or (c.path if c else None)
     if path:
-        fields["path"] = clean(path.split("?", 1)[0], 256)
+        fields["path"] = log_path(path)
     if c and c.method:
         fields["method"] = clean(c.method, 10)
     if status is not None:
@@ -182,8 +202,7 @@ def event(name: str, *, status: int | None = None, reason: str | None = None, th
             fields[clean(k, 32)] = v if isinstance(v, bool | int | float) else clean(v, 200)
     if c:
         fields["request_id"] = c.request_id
-    level = logging.WARNING if name in ("brute_force_block", "integrity_failed", "config_warning",
-                                        "state_backend_error") else logging.INFO
+    level = logging.WARNING if warn or name in WARNING_EVENTS else logging.INFO
     log.log(level, "%s", name, extra={"security": fields})
 
 
@@ -386,6 +405,10 @@ def check_user_rate(sub: str) -> None:
 
 
 # ---------- Brute-Force-/Missbrauchserkennung ----------
+# 401-Gründe, die nicht für die Sperre zählen: kein Token bzw. kein JWT (kein Rateversuch, anonym fälschbar)
+UNCOUNTED_401 = frozenset({"missing_token", "malformed"})
+
+
 class Guard:
     def __init__(self, max_keys: int = 20_000):
         self.max_keys = max_keys
@@ -498,17 +521,24 @@ def _shared_block(ip: str, reason: str, res: tuple[int, int] | None) -> None:
         event("brute_force_block", status=429, reason=reason, ip=ip, retry_after=duration, level=level)
 
 
+def blockable(kind: str) -> bool:
+    """Brute-Force-Sperre nur für die API (Kategorie "ip" = /api/*), nie für SPA/Assets/Health."""
+    return kind == "ip"
+
+
 async def gate(ip: str, kind: str, per_min: int, burst: int) -> tuple[int, int]:
     """(Sperre in s, Rate-Limit-Wartezeit in s) für die Middleware – gemeinsam in einem Roundtrip.
-    Lokale Sperren (Spiegel bzw. während eines Ausfalls entstanden) gelten immer zusätzlich."""
-    local_block = guard.blocked(ip)
+    Lokale Sperren (Spiegel bzw. während eines Ausfalls entstanden) gelten immer zusätzlich. Sperren nur für
+    /api/* (blockable), Rate-Limits überall."""
+    check_block = blockable(kind)
+    local_block = guard.blocked(ip) if check_block else 0
     shared = state.shared()
     if shared is None:
         if local_block:
             return local_block, 0
         return 0, buckets.take(f"{kind}:{ip}", per_min, burst)
     try:
-        blocked, retry = await shared.agate(ip, kind, per_min, burst, True, not local_block)
+        blocked, retry = await shared.agate(ip, kind, per_min, burst, check_block, not local_block)
     except state.StateUnavailable:
         state_error("gate")
         return local_block, 0                     # Rate-Limit fail-open, Sperren lokal
@@ -722,6 +752,8 @@ class SecurityMiddleware:
         ctx = RequestContext(request_id=request_id_from(headers), ip=ip, method=scope.get("method", ""),
                              path=path)
         token = _ctx.set(ctx)
+        if b"x-forwarded-for" in headers:
+            _check_forwarded_peer(scope)
         try:
             await self._handle(scope, receive, send, headers, ctx)
         finally:
@@ -776,8 +808,11 @@ class SecurityMiddleware:
         code = status_holder["code"]
         if code == 401 and path.startswith("/api/"):
             reason = ctx.auth_reason or "invalid_token"
-            event("auth_failed", status=401, reason=reason, sub=ctx.auth_sub)
-            await record_auth_failed(ctx.ip, ctx.auth_sub)
+            if reason in UNCOUNTED_401:   # nicht für Sperre/fail2ban/CrowdSec (eigenes Ereignis, gedrosselt)
+                event("auth_missing", status=401, reason=reason, throttle=60)
+            else:
+                event("auth_failed", status=401, reason=reason, sub=ctx.auth_sub)
+                await record_auth_failed(ctx.ip, ctx.auth_sub)
         elif code in (403, 404) and ctx.probe:
             await record_probe(ctx.ip, ctx.sub, ctx.probe)
 
@@ -808,6 +843,30 @@ async def reply(send, code: int, detail: str | None, retry_after: int | None = N
     body = b"" if detail is None else json.dumps({"detail": detail}).encode()
     await send({"type": "http.response.start", "status": code, "headers": hdrs})
     await send({"type": "http.response.body", "body": body})
+
+
+# ---------- Proxy-Konfiguration zur Laufzeit ----------
+XFF_WARN_EVERY_S = 3600.0
+
+
+def _check_forwarded_peer(scope) -> None:
+    """X-Forwarded-For von einem Peer, der nicht in FORWARDED_ALLOW_IPS steht, wird ignoriert. Meist passt dann
+    FORWARDED_ALLOW_IPS nicht zum Reverse Proxy (z. B. Docker-Netz statt 127.0.0.1) – alle Clients teilen dessen
+    IP, Rate-Limits/Sperren treffen alle gemeinsam – oder die API ist ohne Proxy direkt erreichbar. Höchstens
+    stündlich ein config_warning (prozessweit, nicht je Peer: kein Log-Flooding mit gefälschten Headern).
+    Steht der Peer selbst im Header, hat uvicorn (--proxy-headers, vertrauter Proxy) den Client bereits aus
+    X-Forwarded-For übernommen – kein Hinweis."""
+    peer = (scope.get("client") or ("",))[0] or ""
+    if trusted_proxy(peer):
+        return
+    hops = {_strip_port(h) for h in ",".join(_header_values(scope, b"x-forwarded-for")).split(",") if h.strip()}
+    if peer in hops:
+        return
+    if _throttled(("xff_untrusted_peer",), XFF_WARN_EVERY_S):
+        return
+    event("config_warning", reason=f"X-Forwarded-For von nicht vertrautem Peer {peer or '-'} ignoriert – "
+                                   "FORWARDED_ALLOW_IPS passt nicht zum Reverse Proxy (alle Clients teilen "
+                                   "dessen IP für Rate-Limits/Sperren)", ip=peer or "-", peer=peer or "-")
 
 
 # ---------- Startprüfung ----------

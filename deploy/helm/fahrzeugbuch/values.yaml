@@ -129,6 +129,10 @@ config:
   ANCHOR_INTERVAL_MIN: "60"
   ANCHOR_PUBLIC_KEYS: ""
   VERIFY_FULL_INTERVAL_S: "86400"
+  # Rollback auf ein älteres Image nach einer Migration, deren Revision dieses Image nicht kennt: hier als kompatibel
+  # zulassen (kommagetrennt, "*" = jede unbekannte neuere). Neuere Migrationen mit compatible_with_previous=True
+  # vermerken das selbst in der DB – dann ist nichts nötig (README «Upgrade / Rollback»).
+  SCHEMA_COMPATIBLE_NEWER: ""
   # Keycloak-Admin-API (Mitgliederverwaltung); Client-Secret in secrets
   KC_ADMIN_URL: ""
   KC_ADMIN_REALM: ""

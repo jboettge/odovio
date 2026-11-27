@@ -65,13 +65,13 @@ ingress:
     traefik.ingress.kubernetes.io/router.tls: "true"
     # cert-manager.io/cluster-issuer: letsencrypt
   hosts:
-    - host: fahrzeugbuch.j-mb.net
+    - host: www.odovio.ch
       paths:
         - path: /
           pathType: Prefix
   tls:
     - secretName: fahrzeugbuch-tls
-      hosts: [fahrzeugbuch.j-mb.net]
+      hosts: [www.odovio.ch]
   # Body-Limit 8 MiB (Belege …/blob) per Traefik-Middleware
   traefikMiddleware:
     enabled: true

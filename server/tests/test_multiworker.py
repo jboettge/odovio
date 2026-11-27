@@ -104,7 +104,8 @@ def test_rate_limit_across_workers(server):
 def test_brute_force_block_across_workers(server):
     base, issuer = server["base"], server["issuer"]
     for _ in range(5):
-        r = _get(f"{base}/api/me", "198.18.2.2", headers={"Authorization": "Bearer kaputt"})
+        forged = issuer.token().rsplit(".", 1)[0] + "." + "A" * 342   # falsche Signatur (zählt, anders als kaputt)
+        r = _get(f"{base}/api/me", "198.18.2.2", headers={"Authorization": f"Bearer {forged}"})
         assert r.status_code == 401
     good = {"Authorization": f"Bearer {issuer.token()}"}
     codes = [_get(f"{base}/api/me", "198.18.2.2", headers=good).status_code for _ in range(8)]

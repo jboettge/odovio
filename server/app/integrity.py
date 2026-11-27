@@ -16,10 +16,14 @@ Erst die nächste Vollprüfung erkennt: Änderungen an bereits bestätigten Revi
 Folgehashes und an seither unveränderten Datensätzen (beides nur mit DB-Vollzugriff bzw. abgeschalteten Triggern).
 Vollprüfung: `full=True` (API ?full=1, je Mandant ein Lauf gleichzeitig), ohne gültigen Prüfstand und sobald
 die letzte älter als VERIFY_FULL_INTERVAL_S (Default 24 h) ist – dann übernimmt sie der Worker, der den
-try-Advisory-Lock "verify_full" erhält; die übrigen prüfen so lange inkrementell weiter.
+try-Advisory-Lock "verify_full" erhält; die übrigen prüfen so lange inkrementell weiter. Liegt die letzte
+Vollprüfung mehr als FULL_OVERDUE_FACTOR × VERIFY_FULL_INTERVAL_S zurück und kann sie trotzdem nicht laufen
+(Lock dauerhaft belegt – der Schlüssel ist ableitbar, wer die DB erreicht, kann ihn halten), meldet die Prüfung
+«Vollprüfung überfällig» (ok=false, full_overdue, Sicherheits-Log integrity_full_overdue) statt «OK».
 
 Absicherung des Prüfstands: mit ANCHOR_SIGNING_KEY Ed25519-signiert (Schlüssel wie bei den Ankern, liegt nicht in
-der DB). Fehlende/ungültige Signatur, unbekannter Schlüssel, S > Mandantenstand, geänderter Hash an S oder
+der DB), inkl. failed_seq (Format v2; ältere Signaturen ohne failed_seq gelten nicht → einmalig Vollprüfung).
+Fehlende/ungültige Signatur, unbekannter Schlüssel, S > Mandantenstand, geänderter Hash an S oder
 Vollprüfungszeitpunkt in der Zukunft → Vollprüfung. Ohne Schlüssel ist der Prüfstand unsigniert (wer die DB
 schreiben kann, könnte die Vollprüfung hinauszögern; ?full=1 prüft immer vollständig). Fortschreiben nur
 monoton, in eigener kurzer Transaktion unter Advisory-Lock je Mandant: Vollprüfung mit Stand ≥ letzter
@@ -135,6 +139,7 @@ def maybe_anchor(db: Session, tenant: models.Tenant, force: bool = False) -> mod
 
 # ---------- bestätigter Prüfstand (inkrementelle Prüfung) ----------
 CLOCK_SKEW = dt.timedelta(minutes=5)
+FULL_OVERDUE_FACTOR = 2      # fällige, aber nicht ausgeführte Vollprüfung → ab diesem Vielfachen «überfällig»
 
 
 def full_interval() -> float:
@@ -159,29 +164,46 @@ class Checkpoint:
     full_seq: int
     full_at: str
 
+    def full_age_s(self) -> float:
+        return (dt.datetime.now(dt.UTC) - dt.datetime.fromisoformat(self.full_at)).total_seconds()
+
     def full_due(self) -> bool:
-        age = dt.datetime.now(dt.UTC) - dt.datetime.fromisoformat(self.full_at)
-        return age.total_seconds() > full_interval()
+        return self.full_age_s() > full_interval()
+
+    def full_overdue(self) -> bool:
+        return self.full_age_s() > FULL_OVERDUE_FACTOR * full_interval()
 
 
-def checkpoint_message(slug: str, row: models.VerifyCheckpoint) -> bytes:
+def checkpoint_message(slug: str, row: models.VerifyCheckpoint, version: int = 2) -> bytes:
+    """Signierter Inhalt des Prüfstands. v2 (aktuell) inkl. failed_seq; v1 nur noch zum Erkennen alter Zeilen."""
     fields = {"tenant": slug, "seq": row.seq, "head_hash": row.head_hash, "counts": row.counts,
               "full_seq": row.full_seq, "full_at": row.full_at, "verified_at": row.verified_at}
-    return ("fahrzeugbuch-verified|" + canonical(fields)).encode()
+    if version == 1:
+        return ("fahrzeugbuch-verified|" + canonical(fields)).encode()
+    return ("fahrzeugbuch-verified-v2|" + canonical({**fields, "failed_seq": row.failed_seq})).encode()
 
 
-def _signature_ok(slug: str, row: models.VerifyCheckpoint) -> bool:
-    keys = verification_keys()
-    if not keys:                      # ohne Schlüssel unsigniert (s. Modul-Docstring)
-        return True
-    pub = keys.get(row.key_id or "")
-    if pub is None or not row.signature:
-        return False
+def _verify_sig(pub: Ed25519PublicKey, signature: str, message: bytes) -> bool:
     try:
-        pub.verify(bytes.fromhex(row.signature), checkpoint_message(slug, row))
+        pub.verify(bytes.fromhex(signature), message)
     except (InvalidSignature, ValueError):
         return False
     return True
+
+
+def _signature_problem(slug: str, row: models.VerifyCheckpoint) -> str | None:
+    """None = Signatur gültig (bzw. kein Schlüssel konfiguriert), sonst Grund."""
+    keys = verification_keys()
+    if not keys:                      # ohne Schlüssel unsigniert (s. Modul-Docstring)
+        return None
+    pub = keys.get(row.key_id or "")
+    if pub is None or not row.signature:
+        return "Signatur fehlt oder unbekannter Schlüssel"
+    if _verify_sig(pub, row.signature, checkpoint_message(slug, row)):
+        return None
+    if _verify_sig(pub, row.signature, checkpoint_message(slug, row, version=1)):
+        return "Signatur im alten Format (ohne failed_seq)"
+    return "Signatur ungültig"
 
 
 def load_checkpoint(db: Session, tenant: models.Tenant) -> Checkpoint | None:
@@ -195,8 +217,8 @@ def load_checkpoint(db: Session, tenant: models.Tenant) -> Checkpoint | None:
         counts = {str(k): int(v) for k, v in json.loads(row.counts).items()}
     except (TypeError, ValueError, AttributeError):
         full_at, counts, reason = None, {}, "unlesbar"
-    if reason is None and not _signature_ok(tenant.slug, row):
-        reason = "Signatur fehlt oder ungültig"
+    if reason is None and (sig := _signature_problem(tenant.slug, row)) is not None:
+        reason = sig
     elif reason is None and (full_at.tzinfo is None or full_at > dt.datetime.now(dt.UTC) + CLOCK_SKEW):
         reason = "Vollprüfungszeitpunkt ungültig"
     elif reason is None and row.seq > tenant.seq:
@@ -410,8 +432,12 @@ def verify_all(db: Session, tenant: models.Tenant, full: bool = False) -> dict:
     tenant = db.get(models.Tenant, tenant.id, populate_existing=True)
     started = _utcnow()
     cp = None if full else load_checkpoint(db, tenant)
-    if cp is not None and cp.full_due() and jobs.xact_lock(db, "verify_full", tenant.id, wait=False):
-        cp = None             # Vollprüfung fällig – dieser Worker übernimmt sie (übrige: weiter inkrementell)
+    overdue = False
+    if cp is not None and cp.full_due():
+        if jobs.xact_lock(db, "verify_full", tenant.id, wait=False):
+            cp = None         # Vollprüfung fällig – dieser Worker übernimmt sie (übrige: weiter inkrementell)
+        else:                 # läuft woanders – oder der Lock wird festgehalten: ab 2× Intervall kein «OK» mehr
+            overdue = cp.full_overdue()
     counts: dict[str, int] = {}
     if cp is None:
         chain = verify_chain(db, tenant)
@@ -431,18 +457,25 @@ def verify_all(db: Session, tenant: models.Tenant, full: bool = False) -> dict:
     blobs = verify_blobs(db, tenant, use_cache=not full)
     if blobs["updates"]:
         persist_blob_checks(tenant.id, blobs["updates"])
-    ok = chain["ok"] and not state and not anchors["anchor_problems"] and not blobs["problems"]
-    if not ok:
+    clean = chain["ok"] and not state and not anchors["anchor_problems"] and not blobs["problems"]
+    if not clean:
         first = (chain.get("reason") if not chain["ok"] else None) or \
             next(iter(state + anchors["anchor_problems"] + blobs["problems"]), "")
         security.event("integrity_failed", tenant=tenant.slug, reason=first, broken_at=chain.get("broken_at"),
                        throttle=300)
+    overdue_note = []
+    if overdue:
+        overdue_note = [overdue_message(cp.full_at)]
+        security.event("integrity_full_overdue", tenant=tenant.slug, reason=overdue_note[0],
+                       full_at=cp.full_at, age_h=round(cp.full_age_s() / 3600, 1), throttle=300)
     return {
         **chain,
-        "ok": ok,
+        "ok": clean and not overdue,
         "chain_ok": chain["ok"],
         "state_ok": not state,
-        "problems": state[:MAX_LISTED] + anchors["anchor_problems"][:MAX_LISTED] + blobs["problems"][:MAX_LISTED],
+        "full_overdue": overdue,
+        "problems": state[:MAX_LISTED] + anchors["anchor_problems"][:MAX_LISTED] + blobs["problems"][:MAX_LISTED]
+        + overdue_note,
         **{k: anchors[k] for k in ("signed", "anchors", "anchors_checked")},
         "blobs_checked": blobs["checked"],
         "blobs_missing": blobs["missing"],
@@ -450,6 +483,12 @@ def verify_all(db: Session, tenant: models.Tenant, full: bool = False) -> dict:
         "full_seq": full_seq,
         "full_at": full_at,
     }
+
+
+def overdue_message(full_at: str) -> str:
+    return (f"Vollprüfung überfällig: letzte vollständige Prüfung {full_at} (UTC), fällig alle "
+            f"{full_interval() / 3600:g} h – konnte nicht ausgeführt werden (Sperre «verify_full» belegt); "
+            "Ergebnis nur inkrementell, nicht bestätigt")
 
 
 class VerifyBusy(Exception):
