@@ -183,7 +183,7 @@ function place(t, actor, when, p) {
 }
 
 function vehicleBase(v) {
-  return { make: null, model: null, plate: null, fuel_type: 'benzin', initial_km: 0, purchase_price: null, ownership: null, private_use_method: null, annual_fixed_costs: null, ...v }
+  return { make: null, model: null, plate: null, fuel_type: 'benzin', initial_km: 0, purchase_price: null, ownership: null, private_use_method: null, annual_fixed_costs: null, vin: null, ...v }
 }
 
 function tripRow(vehicleId, driver, start, end, kmStart, kmEnd, extra = {}) {
@@ -359,7 +359,7 @@ export function buildDemo(now = new Date()) {
       t.record('material_article', { id: did(8), name: 'Scheibenwischer-Set', part_number: null, unit: 'Set', unit_price: 39.9, category: 'Verschleiss', vehicle_id: null, note: 'Bosch Aerotwin' }, 'create', actor, start),
     ]
 
-    const skoda = t.record('vehicle', vehicleBase({ id: did(9), name: 'Skoda Octavia', make: 'Skoda', model: 'Octavia Combi', plate: 'ZH 123 456', fuel_type: 'benzin', initial_km: 0, purchase_price: 38900, ownership: 'private', annual_fixed_costs: 2350 }), 'create', actor, start)
+    const skoda = t.record('vehicle', vehicleBase({ id: did(9), name: 'Skoda Octavia', make: 'Skoda', model: 'Octavia Combi', plate: 'ZH 123 456', vin: 'TMBJJ7NE5L0123456', fuel_type: 'benzin', initial_km: 0, purchase_price: 38900, ownership: 'private', annual_fixed_costs: 2350 }), 'create', actor, start)
     const corolla = t.record('vehicle', vehicleBase({ id: did(9), name: 'Toyota Corolla', make: 'Toyota', model: 'Corolla Hybrid', plate: 'ZH 987 654', fuel_type: 'hybrid', initial_km: 0, ownership: 'private', annual_fixed_costs: 1900 }), 'create', anna.name, start)
 
     const tripsFrom = new Date(today.getFullYear(), today.getMonth() - 5, 1)

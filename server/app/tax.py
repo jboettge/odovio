@@ -233,7 +233,7 @@ def year_report(db: Session, tenant: models.Tenant, data: VehicleData, year: int
         warnings.append("Teilweise Default-Parameter verwendet [A] – eigene tax_params erfassen/bestätigen.")
 
     return {
-        "vehicle": {"id": v.id, "name": v.name, "plate": v.plate, "ownership": ownership,
+        "vehicle": {"id": v.id, "name": v.name, "plate": v.plate, "vin": v.vin, "ownership": ownership,
                     "private_use_method": method, "purchase_price": v.purchase_price,
                     "annual_fixed_costs": v.annual_fixed_costs},
         "year": year,

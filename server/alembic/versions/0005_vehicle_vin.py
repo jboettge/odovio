@@ -1,0 +1,38 @@
+"""Fahrzeug-Identifizierungsnummer: vehicles.vin (VIN/Fahrgestellnummer, String(17), nullable, ohne Default).
+
+Altbestand bleibt NULL. Idempotent: Bestände ohne alembic_version rüstet app.migrate.add_missing_columns bereits
+vor dem Stempeln auf 0001 nach → vorhandene Spalte überspringen.
+Teil der Revisions-Snapshots (schemas.VehicleData): Altrevisionen ohne Schlüssel `vin` gelten beim Abgleich
+Datensatz ↔ Journal als gleich, solange der Datensatz vin = NULL hat (integrity._same, wie article_id und
+km_estimated). Bestehende Revisionen und damit die Hash-Kette bleiben unverändert.
+
+Revision ID: 0005
+Revises: 0004
+Create Date: 2026-11-27
+"""
+from collections.abc import Sequence
+
+import sqlalchemy as sa
+from alembic import op
+
+revision: str = '0005'
+down_revision: str | None = '0004'
+branch_labels: str | Sequence[str] | None = None
+depends_on: str | Sequence[str] | None = None
+
+TABLE, COLUMN = 'vehicles', 'vin'
+
+
+def _present() -> bool:
+    return COLUMN in {c['name'] for c in sa.inspect(op.get_bind()).get_columns(TABLE)}
+
+
+def upgrade() -> None:
+    if not _present():
+        op.add_column(TABLE, sa.Column(COLUMN, sa.String(length=17), nullable=True))
+
+
+def downgrade() -> None:
+    if _present():
+        with op.batch_alter_table(TABLE) as batch:
+            batch.drop_column(COLUMN)

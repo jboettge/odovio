@@ -4,7 +4,7 @@ Digitales Fahrzeugbuch: iOS-App (SwiftUI) + REST-Server (FastAPI/PostgreSQL, Doc
 
 ## Funktionen
 
-- **Fahrzeuge**: mehrere, mit Kennzeichen, Treibstoff, Start-km
+- **Fahrzeuge**: mehrere, mit Kennzeichen, VIN/Fahrgestellnummer (optional; normalisiert auf 17 Zeichen ohne I/O/Q, Prüfziffer nur als Hinweis bei nordamerikanischen VINs; in iOS per Kamera scanbar – Strichcode Code 39/Data Matrix/QR oder Texterkennung), Treibstoff, Start-km
 - **Kilometerstände**: manuell; Tankvorgänge und Wartungen zählen ebenfalls → aktueller Stand = Maximum
 - **Tankvorgänge**: Datum, km, Liter, Betrag, voll/teil, Tankstelle → Preis/Liter
 - **Verbrauch** (Voll-zu-voll): l/100 km, l/km, CHF/km je Etappe + Durchschnitt, Diagramm
@@ -212,7 +212,7 @@ POST /api/t/privat/sync
 
 - Tabelle `revisions`: je Änderung Version, Aktion, vollständiger Datenstand, Benutzer (`sub`, Name), Serverzeit (UTC), Erfassungszeit auf dem Gerät, `op_id`, Konfliktflag
 - `hash = SHA256(prev_hash + kanonisches JSON)` je Mandant → Ändern, Löschen, Einfügen oder Umordnen bricht die Kette
-- **Abgleich Datenstand**: jeder Datensatz muss exakt seiner letzten Revision entsprechen – direkte DB-Änderungen an Fachtabellen werden erkannt
+- **Abgleich Datenstand**: jeder Datensatz muss exakt seiner letzten Revision entsprechen – direkte DB-Änderungen an Fachtabellen werden erkannt. Nachgerüstete optionale Felder (z. B. `vehicles.vin`, Alembic 0005; `article_id`, `km_estimated`) fehlen in Altrevisionen: das gilt als gleich, solange der Datensatz dort `NULL`/Default hat (`integrity._same`); bestehende Revisionen und Hashes bleiben unverändert
 - **Signierte Anker** (Ed25519, Schlüssel ausserhalb der DB): erkennen auch ein vollständiges Neuberechnen der Kette; externe Ablage der Anker schützt zusätzlich gegen Löschen
 - **DB-Rollen**: API läuft als `fahrzeugbuch_app` (kein Owner/Superuser): kann Trigger nicht deaktivieren, Journal/Anker nicht ändern, nichts löschen. Trigger sperren `UPDATE/DELETE/TRUNCATE` auf `revisions` und `anchors`
 - `/audit/verify` und jedes PDF zeigen: Kette, Datenstand, Anker; PDF enthält Kettenkopf und letzten signierten Anker

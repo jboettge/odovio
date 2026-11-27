@@ -107,6 +107,31 @@ class VehicleData(Payload):
     ownership: Literal["private", "business"] | None = None
     private_use_method: Literal["flat", "effective"] | None = None
     annual_fixed_costs: float | None = Field(default=None, ge=0, le=1_000_000)
+    # VIN/Fahrgestellnummer: Eingabe mit Leer-/Bindestrichen zulässig, gespeichert normalisiert (17 Zeichen)
+    vin: str | None = Field(default=None, max_length=40)
+
+    @field_validator("vin")
+    @classmethod
+    def _vin(cls, v: str | None) -> str | None:
+        return normalize_vin(v)
+
+
+# ISO 3779: 17 Zeichen, Ziffern und Grossbuchstaben ohne I, O, Q. Prüfziffer (Stelle 9) wird nicht erzwungen –
+# in Europa unüblich; nur die Clients weisen bei nordamerikanischen VINs darauf hin.
+VIN_RE = re.compile(r"[A-HJ-NPR-Z0-9]{17}")
+VIN_STRIP = re.compile(r"[\s\-]+")
+
+
+def normalize_vin(v: str | None) -> str | None:
+    """Leer → None; Leerzeichen/Bindestriche entfernen, Grossbuchstaben; ungültig → ValueError (422/abgelehnt)."""
+    if v is None:
+        return None
+    v = VIN_STRIP.sub("", v).upper()
+    if not v:
+        return None
+    if not VIN_RE.fullmatch(v):
+        raise ValueError("VIN ungültig: genau 17 Zeichen (Ziffern und Buchstaben ohne I, O, Q)")
+    return v
 
 
 class OdometerData(Payload):

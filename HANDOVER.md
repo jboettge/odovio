@@ -6,7 +6,7 @@ Stand: 25.11.2026. Herkunft: `jboettge/DroidSim`, Branch `claude/digitales-fahrz
 
 | Pfad | Inhalt |
 |---|---|
-| `server/` | FastAPI, SQLAlchemy 2, Alembic (0001–0004), PostgreSQL (Prod) / SQLite (Tests), reportlab-PDF. Dockerfile mehrstufig (Web-Build + API), Build-Kontext = Repo-Root |
+| `server/` | FastAPI, SQLAlchemy 2, Alembic (0001–0005), PostgreSQL (Prod) / SQLite (Tests), reportlab-PDF. Dockerfile mehrstufig (Web-Build + API), Build-Kontext = Repo-Root |
 | `web/` | Vue 3 + TS + Vite, oidc-client-ts; wird ins API-Image gebaut und unter `/` ausgeliefert. Mock-Server `web/mock/` |
 | `ios/` | SwiftUI (iOS 17+), XcodeGen (`project.yml`), Unit-Tests `ios/Tests/FahrzeugbuchTests` |
 | `keycloak/setup-client.sh` | Clients `fahrzeugbuch-ios` / `fahrzeugbuch-web`, Gruppen je Mandant (write, `/lesen`, `/admin`), optionale Realm-Härtung |
@@ -21,16 +21,17 @@ Kernprinzipien: local-first App mit Outbox/Sync (`/sync`, `/changes`), revisions
 - **Server**: vollständig (Fahrzeuge, km, Tanken, Wartung+Material, Fahrtenbuch mit Monatsabschluss, Belege fs|s3, PDF/CSV/Jahresbericht, Mitglieder via Keycloak-Admin-API, Aktivität). Security-Härtung (Rate-Limit, Brute-Force, CORS/CSRF, Header, Injection, STRICT_CONFIG). Skalierung: `WEB_CONCURRENCY`, Valkey-State, Advisory-Locks, Probes, Metriken.
 - **Web**: Ansicht + Verwaltung je Rolle, Monatsabschluss, Stammdaten, Mitglieder (admin). Skalierung: Lazy-Routen, vorkomprimierte Assets, virtuelles Scrollen, Web Worker.
 - **iOS**: Betriebsarten „Nur auf diesem iPhone“ (lokales Journal, Berichte, Backup) und „Mit Server“; Fahrtenbuch (CoreLocation/CoreMotion), Scan (Vision), Belege, Mitglieder/Aktivität nur lesend. Demo-Modus für Screenshots (`-demo -screen <name>`).
+- **VIN/Fahrgestellnummer** (27.11.2026): Feld `vin` am Fahrzeug (Server: `models.Vehicle.vin` String(17), Alembic 0005 idempotent, `schemas.normalize_vin` → abgelehnt/422 «VIN ungültig: genau 17 Zeichen …»; Web: Stammdaten-Formular mit Normalisierung beim Verlassen, Fahrzeugdetails, `web/src/lib/vin.ts`; iOS: Formular «Identifikation» mit «VIN scannen» (`Scan/VINScannerView.swift`, VisionKit Code 39/Data Matrix/QR + Text, OCR-Korrektur I/O/Q → 1/0/0, Logik `Shared/VIN.swift`), Anzeige in der Übersicht). PDF/CSV/Jahresbericht zeigen die VIN (CSV: neue Spalte «VIN» vor «ID», auch lokal in iOS). Prüfziffer nur Hinweis (nordamerikanische VINs). Hash-Kette: Altrevisionen ohne `vin` gelten beim Abgleich als gleich, solange der Datensatz `vin = NULL` hat (`integrity._same`, wie `article_id`); iOS kodiert `nil` nicht → lokale Journal-Hashes bestehender Fahrzeuge unverändert. Web-Scan bewusst weggelassen (Permissions-Policy `camera=()`, `BarcodeDetector` auf Desktop-Browsern meist nicht vorhanden).
 - **Helm**: Chart mit HPA/VPA, Valkey optional, Migrations-Hook-Job, NetworkPolicy, ServiceMonitor. Nicht in echtem Cluster installiert (kind lief in der Sandbox nicht); Image mit Chart-Settings in Docker geprüft.
 
 ## Teststatus (letzter Stand)
 
 | Komponente | Ergebnis |
 |---|---|
-| Server SQLite | 326 bestanden, 31 übersprungen (Valkey/S3/PG-spezifisch) |
+| Server SQLite | 351 bestanden, 31 übersprungen (Valkey/S3/PG-spezifisch; Stand 27.11. inkl. VIN) |
 | Server PG 16 + Valkey (ohne S3, lokal 25.11.) | 352 bestanden, 5 übersprungen (S3) |
 | Server PG + Valkey + S3 (RustFS) | 342 bestanden (lokal); in CI als Services |
-| Web | 75 Unit, 22 E2E funktional + 1 Perf (90k Fahrten), `npm audit` 0 |
+| Web | 79 Unit, 24 E2E funktional (27.11. inkl. VIN) + 1 Perf (90k Fahrten), `npm audit` 0 |
 | iOS | 87 XCTests grün (CI macOS-15, Simulator) |
 | Helm | `test-chart.sh` 48/48 (lint, template, kubeconform, 20 Negativtests) |
 | Lint/Security | ruff, bandit, pip-audit sauber |
@@ -61,7 +62,7 @@ Kernprinzipien: local-first App mit Outbox/Sync (`/sync`, `/changes`), revisions
 ## Offene Punkte (priorisiert)
 
 1. **TestFlight**: vorbereitet (`docs/TESTFLIGHT.md`); erster Lauf mit Xcode 26 ausstehend.
-2. **Echte Geräte-Tests**: Hintergrund-Aufzeichnung, Automatik, Kurzbefehle, Akku, Scan mit Kamera.
+2. **Echte Geräte-Tests**: Hintergrund-Aufzeichnung, Automatik, Kurzbefehle, Akku, Scan mit Kamera (inkl. VIN-Scan: Strichcode im Türrahmen, Aufdruck Windschutzscheibe, Fahrzeugausweis). Hinweis VIN: ältere App-/Web-Stände ohne Feld `vin` senden es beim Bearbeiten eines Fahrzeugs nicht mit → Server setzt es auf NULL (Upsert ersetzt alle Felder); nach dem Rollout App/Web aktualisieren.
 3. **PDF-Last** – *umgesetzt (Nutzerentscheid: Semantik darf sich ändern)*: Integritätsprüfung inkrementell ab dem bestätigten Prüfstand je Mandant (Tabelle `verify_checkpoints`, Alembic 0004, signiert mit `ANCHOR_SIGNING_KEY`, gemeinsam für alle Worker). PDF-Integritätsabschnitt 3.7 s (warm) bzw. 8.5 s (erster Bericht je Worker) → 0.04 s bei 67k Fahrten; PDF-only-Lasttest 0.4 → 1.3 PDF/s, p50 14.9 → 4.2 s (Details `server/loadtest/README.md`). Vollprüfung per `?full=1` bzw. automatisch nach `VERIFY_FULL_INTERVAL_S`; das PDF weist «vollständig am … (Revision 1–F), seither inkrementell bis Revision N» aus. Offen: täglichen Vollprüfungs-Aufruf (n8n) einrichten; ohne Signaturschlüssel ist der Prüfstand unsigniert. Rest-Engpass im Mischbetrieb: Rendern (CPU) und Mandantensperre für den Anker vor dem PDF.
 4. **Sync** schreibt je Mandant seriell (Mandantenzeilen-Lock) → p95 hoch unter Last; bewusst wegen Hash-Kette.
 5. **Helm** in echtem Cluster installieren (k3s/Proxmox), Valkey-/S3-Pfad in CI verifizieren.

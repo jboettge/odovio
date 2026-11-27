@@ -67,6 +67,10 @@ struct Vehicle: SyncEntity {
     var privateUseMethod: String?
     /// Fixkosten pro Jahr (Versicherung, Steuer, Abschreibung, Leasing …)
     var annualFixedCosts: Double?
+    /// VIN/Fahrgestellnummer, normalisiert (17 Zeichen, siehe `VIN`); `nil` = nicht erfasst.
+    /// Optional ohne Default → wird bei `nil` nicht kodiert: Journal-Hashes und Server-Nutzdaten bestehender
+    /// Fahrzeuge bleiben unverändert (Server: fehlendes Feld = None).
+    var vin: String?
 
     var isBusiness: Bool { ownership == "business" }
 

@@ -1,5 +1,6 @@
 // Feldgrenzen wie server/app/schemas.py – Validierung vor dem Senden (der Server prüft erneut).
 import type { EntityMap, EntityName, SyncOp } from '../api/types'
+import { VIN_ERROR, VIN_PATTERN } from './vin'
 
 type Spec =
   | { type: 'string'; min?: number; max: number; required?: boolean; pattern?: RegExp; patternMsg?: string }
@@ -27,6 +28,8 @@ export const SCHEMAS: Record<EntityName, Record<string, Spec>> = {
     ownership: { type: 'enum', values: ['private', 'business', null] },
     private_use_method: { type: 'enum', values: ['flat', 'effective', null] },
     annual_fixed_costs: { type: 'number', min: 0, max: 1_000_000 },
+    // Rohlänge wie der Server (40); normalisiert (vinOrNull) muss sie dem Muster entsprechen
+    vin: { type: 'string', max: 40, pattern: VIN_PATTERN, patternMsg: VIN_ERROR },
   },
   odometer: {
     vehicle_id: { type: 'ref', required: true },

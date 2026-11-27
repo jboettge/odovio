@@ -73,6 +73,34 @@ test('Stammdaten: Kunde erfassen mit Validierung (Sync-Op)', async ({ page, prob
   await expect(page.getByRole('cell', { name: 'Velo Kurier GmbH', exact: true })).toBeVisible()
 })
 
+test('Stammdaten: Fahrzeug mit VIN – Normalisierung, Validierung, Prüfziffer-Hinweis', async ({ page, problems: _p }) => {
+  await login(page, 'anna', '/stammdaten/fahrzeuge')
+  await page.getByRole('button', { name: 'Fahrzeug erfassen' }).click()
+  const dlg = page.getByRole('dialog', { name: 'Fahrzeug erfassen' })
+  await dlg.getByLabel('Name').fill('Testwagen')
+  const vin = dlg.getByLabel('VIN / Fahrgestellnummer')
+  await vin.fill('WVWZZZ1KZ6W00000O')
+  await vin.blur()
+  await expect(dlg.getByText('VIN ungültig: genau 17 Zeichen')).toBeVisible()
+  await vin.fill('1m8gdm9a1kp042788')
+  await vin.blur()
+  await expect(vin).toHaveValue('1M8GDM9A1KP042788')
+  await expect(dlg.getByText(/Prüfziffer \(Stelle 9\) passt nicht – erwartet «X»/)).toBeVisible()
+  await vin.fill(' wvw-zzz 1kz6w0 00001 ')
+  await vin.blur()
+  await expect(vin).toHaveValue('WVWZZZ1KZ6W000001')
+  await expect(dlg.getByText('VIN ungültig')).toBeHidden()
+  await dlg.getByRole('button', { name: 'Speichern' }).click()
+  await expect(dlg).toBeHidden()
+  await expect(page.getByRole('row', { name: /Testwagen/ })).toContainText('WVWZZZ1KZ6W000001')
+})
+
+test('Fahrzeugdetails zeigen die VIN', async ({ page, problems: _p }) => {
+  await login(page, 'anna')
+  await page.getByRole('link', { name: 'Skoda Octavia öffnen' }).click()
+  await expect(page.getByTestId('vehicle-vin')).toHaveText('TMBJJ7NE5L0123456')
+})
+
 test('Steuerparameter erfassen (nur Web-Client)', async ({ page, problems: _p }) => {
   await login(page, 'jakob', '/stammdaten/steuerparameter?buch=privat')
   await page.getByRole('button', { name: 'Parameter erfassen' }).click()

@@ -315,7 +315,7 @@ function yearReport(t, v, year) {
   if (unconfirmed) warnings.push(`${unconfirmed} Fahrt(en) nicht bestätigt bzw. ohne Kategorie – Zahlen vorläufig.`)
   if (Object.values(p).some((x) => x.scope === 'default')) warnings.push('Teilweise Default-Parameter verwendet [A] – eigene tax_params erfassen/bestätigen.')
   return {
-    vehicle: { id: v.id, name: v.name, plate: v.plate, ownership: v.ownership ?? 'private', private_use_method: v.private_use_method ?? 'flat', purchase_price: v.purchase_price, annual_fixed_costs: v.annual_fixed_costs },
+    vehicle: { id: v.id, name: v.name, plate: v.plate, vin: v.vin ?? null, ownership: v.ownership ?? 'private', private_use_method: v.private_use_method ?? 'flat', purchase_price: v.purchase_price, annual_fixed_costs: v.annual_fixed_costs },
     year, canton: 'ZH', trips_count: trips.length, unconfirmed, months_used: months.size,
     km: { ...Object.fromEntries(cats.map((c) => [c, +km[c].toFixed(1)])), total: +total.toFixed(1) },
     shares_pct: Object.fromEntries(cats.map((c) => [c, total ? +((km[c] / total) * 100).toFixed(1) : null])),
@@ -423,6 +423,12 @@ function applyOp(t, user, azp, op) {
     if (data.private) return reject('Koordinaten privater Orte bleiben auf dem Gerät')
   }
   if (op.entity === 'tax_param' && !/^(federal|canton:[A-Z]{2}|tenant)$/.test(data.scope)) return reject('scope: String should match pattern')
+  if (op.entity === 'vehicle') {
+    // wie server/app/schemas.normalize_vin: Leer-/Bindestriche weg, Grossbuchstaben, 17 Zeichen ohne I/O/Q
+    const vin = String(data.vin ?? '').replace(/[\s-]+/g, '').toUpperCase()
+    if (vin && !/^[A-HJ-NPR-Z0-9]{17}$/.test(vin)) return reject('vin: Value error, VIN ungültig: genau 17 Zeichen (Ziffern und Buchstaben ohne I, O, Q)')
+    data.vin = vin || null
+  }
   if (op.entity === 'trip' && existing?.status === 'locked') return reject('Monat abgeschlossen')
   const row = t.record(op.entity, { ...data, id: op.id, deleted: false }, existing ? 'update' : 'create', user.name)
   Object.assign(t.revisions.at(-1), { op_id: op.op_id, conflict: Boolean(conflict) })

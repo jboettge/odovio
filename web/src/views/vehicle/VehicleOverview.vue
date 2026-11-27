@@ -117,6 +117,7 @@ const monthlyTotal = computed(() => monthly.value.reduce((a, d) => a + d.values[
         <dl v-if="vehicle" class="dl">
           <dt>Kennzeichen</dt><dd>{{ vehicle.plate || '–' }}</dd>
           <dt>Marke / Modell</dt><dd>{{ [vehicle.make, vehicle.model].filter(Boolean).join(' ') || '–' }}</dd>
+          <dt>VIN</dt><dd><span v-if="vehicle.vin" class="mono" data-testid="vehicle-vin">{{ vehicle.vin }}</span><template v-else>–</template></dd>
           <dt>Treibstoff</dt><dd>{{ FUEL_TYPE_LABELS[vehicle.fuel_type] ?? vehicle.fuel_type }}</dd>
           <dt>Start-km</dt><dd>{{ km(vehicle.initial_km) }}</dd>
           <dt>Halter</dt><dd>{{ vehicle.ownership ? OWNERSHIP_LABELS[vehicle.ownership] : 'nicht erfasst (Privatfahrzeug angenommen)' }}</dd>

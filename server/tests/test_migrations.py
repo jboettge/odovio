@@ -53,7 +53,7 @@ def test_legacy_database_is_stamped_and_upgraded():
             conn.exec_driver_sql("DROP TABLE blob_checks")
             for table, col in (("trips", "customer_name"), ("trips", "km_estimated"),
                                ("trip_periods", "corrections"), ("vehicles", "created_by"),
-                               ("vehicles", "updated_by"), ("trips", "updated_by")):
+                               ("vehicles", "updated_by"), ("trips", "updated_by"), ("vehicles", "vin")):
                 conn.exec_driver_sql(f"ALTER TABLE {table} DROP COLUMN {col}")
             conn.exec_driver_sql("INSERT INTO tenants (id, slug, name, seq, head_hash) VALUES (1, 't', 't', 0, 'x')")
             conn.exec_driver_sql("INSERT INTO vehicles (id, tenant_id, version, deleted, last_seq, name, fuel_type, "
@@ -63,10 +63,11 @@ def test_legacy_database_is_stamped_and_upgraded():
                                  "'2026-01-01T08:00:00+01:00', 'business', 'confirmed', 'manual', false)")
         assert "alembic_version" not in inspect(engine).get_table_names()
         create_schema(engine)
-        assert _version() == _head() == "0004" and BASELINE == "0001"
+        assert _version() == _head() == "0005" and BASELINE == "0001"
         assert _diff() == []
         with engine.connect() as conn:
             row = conn.execute(text("SELECT km_estimated, customer_name FROM trips WHERE id = 't1'")).one()
+            assert conn.execute(text("SELECT vin FROM vehicles WHERE id = 'v1'")).scalar() is None
         assert (bool(row[0]), row[1]) == (False, None)
         create_schema(engine)                                   # danach normaler Upgrade-Pfad
         assert _version() == _head()
@@ -86,7 +87,7 @@ def test_upgrade_0001_to_0002_keeps_data():
             conn.exec_driver_sql("INSERT INTO vehicles (id, tenant_id, version, deleted, last_seq, name, fuel_type, "
                                  "initial_km) VALUES ('v1', 1, 1, false, 1, 'Golf', 'benzin', 0)")
         create_schema(engine)
-        assert _version() == _head() == "0004"
+        assert _version() == _head() == "0005"
         assert _diff() == []
         with engine.connect() as conn:
             row = conn.execute(text("SELECT name, created_by, updated_by FROM vehicles WHERE id = 'v1'")).one()
@@ -97,6 +98,36 @@ def test_upgrade_0001_to_0002_keeps_data():
             assert "updated_by" not in {c["name"] for c in inspect(conn).get_columns("trips")}
         create_schema(engine)
         assert _diff() == []
+    finally:
+        reset_db()
+
+
+def test_upgrade_0004_to_0005_adds_vin():
+    """Bestand auf 0004 (vor vehicles.vin) → upgrade head ergänzt die Spalte (NULL); Downgrade entfernt sie,
+    erneutes Upgrade idempotent (auch wenn die Spalte schon besteht)."""
+    from alembic import command
+    reset_db()
+    try:
+        with engine.begin() as conn:
+            command.upgrade(alembic_config(conn), "0004")
+            assert "vin" not in {c["name"] for c in inspect(conn).get_columns("vehicles")}
+            conn.exec_driver_sql("INSERT INTO tenants (id, slug, name, seq, head_hash) VALUES (1, 't', 't', 0, 'x')")
+            conn.exec_driver_sql("INSERT INTO vehicles (id, tenant_id, version, deleted, last_seq, name, fuel_type, "
+                                 "initial_km) VALUES ('v1', 1, 1, false, 1, 'Golf', 'benzin', 0)")
+        create_schema(engine)
+        assert _version() == _head() == "0005" and _diff() == []
+        with engine.connect() as conn:
+            assert conn.execute(text("SELECT name, vin FROM vehicles WHERE id = 'v1'")).one() == ("Golf", None)
+            col = {c["name"]: c for c in inspect(conn).get_columns("vehicles")}["vin"]
+            assert col["nullable"]
+        with engine.begin() as conn:
+            command.downgrade(alembic_config(conn), "0004")
+            assert "vin" not in {c["name"] for c in inspect(conn).get_columns("vehicles")}
+            command.upgrade(alembic_config(conn), "0005")
+            command.downgrade(alembic_config(conn), "0004")
+            conn.exec_driver_sql("ALTER TABLE vehicles ADD COLUMN vin VARCHAR(17)")     # Spalte schon vorhanden
+            command.upgrade(alembic_config(conn), "0005")
+        assert _version() == "0005" and _diff() == []
     finally:
         reset_db()
 

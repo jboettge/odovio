@@ -113,7 +113,8 @@ def _vehicle_head(tenant: models.Tenant, v: models.Vehicle) -> str:
     own = OWNERSHIP_NAMES[v.ownership or "private"]
     method = METHOD_NAMES[v.private_use_method or "flat"] if (v.ownership == "business") else "–"
     car = " ".join(x for x in [v.make, v.model] if x)
-    return (f"{car + '  ·  ' if car else ''}Kennzeichen: {v.plate or '–'}  ·  Mandant: {tenant.name}  ·  "
+    vin = f"VIN: {v.vin}  ·  " if v.vin else ""
+    return (f"{car + '  ·  ' if car else ''}Kennzeichen: {v.plate or '–'}  ·  {vin}Mandant: {tenant.name}  ·  "
             f"{own}  ·  Methode: {method}")
 
 
@@ -283,7 +284,8 @@ def iter_trips_csv(db: Session, tenant: models.Tenant, data: VehicleData, date_f
     w = csv.writer(buf, delimiter=";", lineterminator="\r\n")
     buf.write("\ufeff")
     w.writerow(["Datum", "Start", "Ende", "km Beginn", "km Ende", "Distanz km", "Startort", "Zielort", "Kategorie",
-                "Zweck", "Kunde", "Fahrer", "Status", "Quelle", "Notiz", "Fahrzeug", "Kennzeichen", "ID"])
+                "Zweck", "Kunde", "Fahrer", "Status", "Quelle", "Notiz", "Fahrzeug", "Kennzeichen", "VIN",
+                "ID"])
     for i, t in enumerate(trips_between(db, tenant.id, v.id, date_from, date_to), 1):
         hide = masked(t, mask_private)
         start, end = _route(t, lk, mask_private)
@@ -296,7 +298,7 @@ def iter_trips_csv(db: Session, tenant: models.Tenant, data: VehicleData, date_f
             PRIVATE if hide else _cell(t.purpose), "" if hide else _cell(lk.customer(t.customer_id, t.customer_name)),
             _cell(t.driver_name or t.driver_sub), STATUS_NAMES.get(t.status, t.status),
             SOURCE_NAMES.get(t.source, t.source), "" if hide else _cell(t.note), _cell(v.name), _cell(v.plate),
-            t.id,
+            _cell(v.vin), t.id,
         ])
         if i % CSV_CHUNK_ROWS == 0:
             yield buf.getvalue().encode("utf-8")

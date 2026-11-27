@@ -29,7 +29,7 @@ export function diffRevisions(prev: Revision | null, cur: Revision): FieldChange
 
 export const FIELD_LABELS: Record<string, string> = {
   name: 'Name', make: 'Marke', model: 'Modell', plate: 'Kennzeichen', fuel_type: 'Treibstoff', initial_km: 'Start-km',
-  purchase_price: 'Kaufpreis', ownership: 'Halter', private_use_method: 'Methode Privatanteil', annual_fixed_costs: 'Fixkosten/Jahr',
+  purchase_price: 'Kaufpreis', ownership: 'Halter', private_use_method: 'Methode Privatanteil', annual_fixed_costs: 'Fixkosten/Jahr', vin: 'VIN',
   vehicle_id: 'Fahrzeug', date: 'Datum', km: 'Kilometerstand', note: 'Notiz', liters: 'Liter', price_total: 'Betrag',
   full_tank: 'Volltankung', station: 'Tankstelle', title: 'Titel', cost: 'Kosten', next_due_km: 'Nächste Fälligkeit km',
   next_due_date: 'Nächste Fälligkeit Datum', label: 'Bezeichnung', done: 'Erledigt', position: 'Position', quantity: 'Menge',

@@ -104,9 +104,33 @@ struct OverviewView: View {
                 LabeledContent("Wartung", value: Fmt.chf(s.totalMaintenanceCost))
                 LabeledContent("Getankt", value: "\(Fmt.num(s.totalLiters, 1)) l")
             }
+
+            vehicleSection(store.vehicle(id: vehicle.id) ?? vehicle)
         }
         .refreshable { await store.sync() }
         .sheet(item: $quick) { $0.form }
+    }
+
+    /// Stammdaten (Kennzeichen, Marke/Modell, VIN); VIN auswählbar zum Kopieren.
+    private func vehicleSection(_ v: Vehicle) -> some View {
+        Section("Fahrzeug") {
+            LabeledContent("Kennzeichen", value: v.plate?.nilIfEmpty ?? "–")
+            let car = [v.make, v.model].compactMap { $0?.nilIfEmpty }.joined(separator: " ")
+            if !car.isEmpty {
+                LabeledContent("Marke / Modell", value: car)
+            }
+            if let vin = v.vin?.nilIfEmpty {
+                LabeledContent("VIN") {
+                    Text(vin)
+                        .font(.body.monospaced())
+                        .textSelection(.enabled)
+                }
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("VIN \(VIN.spoken(vin))")
+            } else {
+                LabeledContent("VIN", value: "–")
+            }
+        }
     }
 
     private func quickButton(_ title: String, _ icon: String, _ color: Color,

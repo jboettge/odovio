@@ -77,10 +77,10 @@ targets:
           Termine werden nur auf dem iPhone gelesen, um zu einer Fahrt den passenden Termin als Zweck
           vorzuschlagen. Kalenderinhalte werden nicht übertragen – übernommen wird höchstens der Termintitel
           als Zweckvorschlag der jeweiligen Fahrt. Der Kalender wird nie verändert.
-        # Scan von Zapfsäule, Quittung und Tacho (ios/Fahrzeugbuch/Scan)
+        # Scan von Zapfsäule, Quittung, Tacho und VIN (ios/Fahrzeugbuch/Scan)
         NSCameraUsageDescription: >-
-          Die Kamera wird nur verwendet, um Zapfsäule, Tankquittung oder Tacho zu fotografieren. Die
-          Texterkennung läuft auf diesem iPhone. Ein Foto verlässt das Gerät nur, wenn du es als Beleg
+          Die Kamera wird nur verwendet, um Zapfsäule, Tankquittung oder Tacho zu fotografieren und die
+          Fahrgestellnummer (VIN) zu scannen. Text- und Strichcode-Erkennung laufen auf diesem iPhone. Ein Foto verlässt das Gerät nur, wenn du es als Beleg
           speicherst (Übertragung auf deinen Fahrzeugbuch-Server) oder ausdrücklich „Mit KI auswerten“ wählst.
         UIBackgroundModes: [location]
   FahrzeugbuchTests:

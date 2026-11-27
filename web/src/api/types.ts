@@ -46,6 +46,8 @@ export interface Vehicle extends EntityMeta {
   ownership: 'private' | 'business' | null
   private_use_method: 'flat' | 'effective' | null
   annual_fixed_costs: number | null
+  /** VIN/Fahrgestellnummer, normalisiert (17 Zeichen) */
+  vin: string | null
 }
 
 export interface OdometerReading extends EntityMeta {
@@ -388,6 +390,7 @@ export interface YearReport {
     id: string
     name: string
     plate: string | null
+    vin?: string | null
     ownership: string
     private_use_method: string
     purchase_price: number | null

@@ -231,7 +231,7 @@ def build_report(
     story = [
         Paragraph(escape(f"Fahrzeugbuch – {v.name}"), STYLES["Title"]),
         _p(f"{' '.join(x for x in [v.make, v.model] if x)}  ·  Kennzeichen: {v.plate or '–'}  ·  "
-           f"Mandant: {tenant.name}", STYLES["Normal"]),
+           f"{'VIN: ' + v.vin + '  ·  ' if v.vin else ''}Mandant: {tenant.name}", STYLES["Normal"]),
         _p(f"Zeitraum: {_day(date_from)} – {_day(date_to)}  ·  erstellt {created}"
            f"{' von ' + user_name if user_name else ''}", STYLES["Normal"]),
         Spacer(1, 4 * mm),

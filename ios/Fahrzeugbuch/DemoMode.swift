@@ -57,6 +57,7 @@ enum Demo {
         octavia.privateUseMethod = "flat"
         octavia.purchasePrice = 38_500
         octavia.annualFixedCosts = 2_400
+        octavia.vin = "TMBJJ7NE5L0123456"
         let bus = Vehicle(id: busId, version: 1, name: "VW California",
                           make: "VW", model: "T6.1 Ocean", plate: "ZH 98 765", fuelType: "diesel", initialKm: 71200)
         let fuel: [(String, Int, Double, Double, Bool, String)] = [

@@ -53,7 +53,7 @@ describe('Store: Indizes', () => {
   it('gecachte Listen sind eingefroren (kein versehentliches Sortieren in place)', async () => {
     const s = await import('../../src/store/data')
     s.reset('privat')
-    const v = { version: 1, deleted: false, make: null, model: null, plate: null, fuel_type: 'benzin', initial_km: 0, purchase_price: null, ownership: null, private_use_method: null, annual_fixed_costs: null } as const
+    const v = { version: 1, deleted: false, make: null, model: null, plate: null, fuel_type: 'benzin', initial_km: 0, purchase_price: null, ownership: null, private_use_method: null, annual_fixed_costs: null, vin: null } as const
     s.applyChanges(page({ vehicles: [{ ...v, id: 'v1', name: 'B' }, { ...v, id: 'v2', name: 'A' }] }, 1))
     const list = s.all('vehicle')
     expect(Object.isFrozen(list)).toBe(true)

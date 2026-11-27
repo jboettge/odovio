@@ -407,7 +407,7 @@ enum LocalReports {
                                        to: f.string(from: to))
         var lines = [row(["Datum", "Start", "Ende", "km Beginn", "km Ende", "Distanz km", "Startort", "Zielort",
                           "Kategorie", "Zweck", "Kunde", "Fahrer", "Status", "Quelle", "Notiz", "Fahrzeug",
-                          "Kennzeichen", "ID"])]
+                          "Kennzeichen", "VIN", "ID"])]
         for t in trips {
             let hide = t.privateMode
             let (start, end) = route(store, t)
@@ -426,7 +426,7 @@ enum LocalReports {
                 cell(start), cell(end), categoryNames[t.category] ?? t.category,
                 hide ? privateText : cell(t.purpose), hide ? "" : cell(customerText(store, t)),
                 cell(t.driverName ?? t.driverSub), statusNames[t.status] ?? t.status, sourceNames[t.source] ?? t.source,
-                hide ? "" : cell(t.note), cell(v.name), cell(v.plate), t.id,
+                hide ? "" : cell(t.note), cell(v.name), cell(v.plate), cell(v.vin), t.id,
             ]))
         }
         return Data(("\u{FEFF}" + lines.joined()).utf8)
@@ -541,8 +541,9 @@ enum LocalReports {
         let own = v.isBusiness ? "Geschäftsfahrzeug" : "Privatfahrzeug"
         let method = v.isBusiness ? (v.privateUseMethod == "effective" ? "Privatanteil effektiv (Fahrtenbuch)"
                                      : "Privatanteil pauschal (0.9 %/Monat)") : "–"
-        return (car.isEmpty ? "" : car + "  ·  ") + "Kennzeichen: \(v.plate?.nilIfEmpty ?? "–")  ·  Lokales Fahrzeugbuch  ·  "
-            + "\(own)  ·  Methode: \(method)"
+        let vin: String = (v.vin?.nilIfEmpty).map { "VIN: \($0)  ·  " } ?? ""
+        return (car.isEmpty ? "" : car + "  ·  ") + "Kennzeichen: \(v.plate?.nilIfEmpty ?? "–")  ·  \(vin)"
+            + "Lokales Fahrzeugbuch  ·  \(own)  ·  Methode: \(method)"
     }
 
     static func footerText(_ store: TenantStore) -> String {

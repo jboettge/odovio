@@ -53,6 +53,8 @@ class Vehicle(Synced, Base):
     ownership: Mapped[str | None] = mapped_column(String(20))            # private | business
     private_use_method: Mapped[str | None] = mapped_column(String(20))   # flat | effective
     annual_fixed_costs: Mapped[float | None] = mapped_column(Float)      # Versicherung, Steuer, Leasing, AfA
+    # Fahrzeug-Identifizierungsnummer (Alembic 0005, nullable; normalisiert: 17 Zeichen ohne I/O/Q)
+    vin: Mapped[str | None] = mapped_column(String(17))
 
 
 class OdometerReading(Synced, Base):
