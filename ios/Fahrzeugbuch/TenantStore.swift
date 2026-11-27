@@ -474,18 +474,23 @@ final class TenantStore {
         reason?.nilIfEmpty.map { String($0.prefix(maxReasonLength)) }
     }
 
-    /// Zuletzt gewähltes Fahrzeug je Mandant (für Start/Automatik); sonst erstes Fahrzeug.
+    /// Standardfahrzeug je Mandant für die Anzeige (Quick Actions, Vorbelegung); ohne Wahl das erste Fahrzeug.
+    /// Automatik/Siri/CarPlay verwenden `explicitDefaultVehicleId` (Q3: nie stillschweigend das erste).
     var defaultVehicleId: String? {
         get {
-            if let id = UserDefaults.standard.string(forKey: defaultVehicleKey),
-               let v = vehicles[id], !v.deleted {
-                return id
-            }
-            return vehicleList.first?.id
+            explicitDefaultVehicleId ?? vehicleList.first?.id
         }
         set {
             UserDefaults.standard.set(newValue, forKey: defaultVehicleKey)
         }
+    }
+
+    /// Ausdrücklich gewähltes Standardfahrzeug (Einstellungen › Fahrtenbuch bzw. zuletzt gestartete Fahrt);
+    /// `nil`, wenn keines gewählt oder es storniert ist.
+    var explicitDefaultVehicleId: String? {
+        guard let id = UserDefaults.standard.string(forKey: defaultVehicleKey),
+              let v = vehicles[id], !v.deleted else { return nil }
+        return id
     }
 
     private var defaultVehicleKey: String { "defaultVehicle-\(tenant.slug)" }

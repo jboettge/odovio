@@ -53,20 +53,49 @@ Team-ID, ohne Namen) und packt die IPA direkt aus dem Archiv.
 
 Mit Mac alternativ: Schlüsselbundverwaltung → Zertifikatsassistent → «Zertifikat einer Zertifizierungsinstanz anfordern» (CSR), Zertifikat laden, doppelklicken, im Schlüsselbund mit privatem Schlüssel als `.p12` exportieren.
 
-## CarPlay (Fahrt starten/beenden, Tanken)
+## CarPlay (nur Fahrt starten/beenden)
 
-- Umsetzung: `ios/Fahrzeugbuch/CarPlay/CarPlaySceneDelegate.swift` – Raster mit drei Kacheln; Start/Stopp mit dem
-  Standardfahrzeug (wie Siri/Kurzbefehle), «Tanken» merkt den Tankvorgang vor (Mitteilung, Formular beim nächsten
-  Öffnen auf dem iPhone – CarPlay erlaubt keine Texteingabe).
+- Umsetzung: `ios/Fahrzeugbuch/CarPlay/CarPlaySceneDelegate.swift` – Raster mit zwei Kacheln «Fahrt starten» /
+  «Fahrt beenden»; der Titel zeigt den Status («Aufzeichnung seit 14:05 · 12.4 km», alle 30 s nachgeführt).
+  «Tanken» wurde entfernt (27.11.2026): CarPlay erlaubt keine Texteingabe, Tanken wird auf dem iPhone erfasst.
+- Fahrzeug: «Fahrzeug für CarPlay» (Einstellungen › Fahrtenbuch › Auto erkennen über › CarPlay), sonst das
+  ausdrücklich gewählte Standardfahrzeug bzw. das einzige Fahrzeug. Bei mehreren Fahrzeugen ohne Wahl startet nichts.
+- Meldungen in CarPlay kurz («Fahrt gestartet», «Fahrt beendet · 12.4 km», «Kein Standardfahrzeug»); was eine
+  Handlung braucht (Tachostand, Bestätigen, Standardfahrzeug wählen), kommt zusätzlich als Mitteilung aufs iPhone.
+- Automatik an: Verbinden der odovio-CarPlay-Szene startet eine Fahrt, Trennen beendet die automatisch gestartete
+  Fahrt nach 2 min Karenz (Ende = letzter Bewegungspunkt). Die Szene verbindet nur, wenn odovio auf dem
+  CarPlay-Bildschirm geöffnet ist bzw. zuletzt war → zuverlässig ergänzend die Kurzbefehle-Automation (unten).
 - Kategorie **Driving Task** (`com.apple.developer.carplay-driving-task`). Die Berechtigung vergibt Apple auf Antrag:
   developer.apple.com/contact/carplay → App «odovio», Bundle-ID `ch.odovio`, Kategorie «Driving Task»,
-  Begründung: Fahrtenbuch – Fahrt starten/beenden und Tankvorgang vormerken während der Fahrt.
+  Begründung: Fahrtenbuch – Fahrt starten/beenden während der Fahrt (gesetzliche Fahrtenbuchführung).
 - Bis zur Freischaltung: Entitlement nur in Debug (`project.yml` → `configs.Debug`), testbar im Simulator
   (Xcode → I/O → External Displays → CarPlay). TestFlight-Builds zeigen in CarPlay noch nichts.
 - Nach der Freischaltung:
   1. developer.apple.com → Identifiers → `ch.odovio` → Capability «CarPlay Driving Task» aktivieren.
   2. App-Store-Profil neu erzeugen → Secret `ASC_PROFILE` ersetzen.
   3. In `ios/project.yml` `CODE_SIGN_ENTITLEMENTS` von `configs.Debug` nach `base` verschieben.
+
+## Auto-Erkennung (CarPlay / Bluetooth) und Kurzbefehle-Automation
+
+- Einstellung: odovio › Einstellungen › Fahrtenbuch › **Auto erkennen über** [Aus / CarPlay / Bluetooth-Gerät(e)].
+  Bluetooth: im Auto «Aktuell verbundenes Gerät als Auto übernehmen» (gelernt werden Name und Port-UID des
+  Audio-Ausgangs aus `AVAudioSession.currentRoute`: A2DP/HFP/LE bzw. CarPlay-Audio), mehrere Geräte möglich, je
+  Gerät optional ein Fahrzeug (Automatik bucht dann auf dieses Fahrzeug).
+- Mit Auto-Erkennung startet die Automatik nur, wenn CoreMotion «automotive» meldet **und** CarPlay bzw. ein
+  gelerntes Gerät verbunden ist (Route bei jedem Weck-Ereignis gelesen) – weniger Fehlalarme in Zug/Tram/Bus.
+  Läuft die App, startet sie zusätzlich direkt beim Verbinden (`routeChangeNotification`), ausser CoreMotion meldet
+  «zu Fuss». Trennen = Stopp-Signal mit 2 min Karenz (Tankstopp); fährt das Auto noch, entscheidet die normale
+  Stopp-Erkennung.
+- **iOS weckt Apps nicht, wenn sich ein Bluetooth-Gerät oder CarPlay verbindet.** Zuverlässig ergänzend (Hinweis
+  auch in der Einstellung): App «Kurzbefehle» › Automation › «+» › **CarPlay** bzw. **Bluetooth** (das Auto) ›
+  «Verbindet» → Aktion **Fahrt starten** (odovio, «Sofort ausführen»); «Trennt» → **Fahrt beenden**. Die Intents
+  nutzen das Standardfahrzeug (Siri/Kurzbefehle wählen kein Fahrzeug je Gerät).
+- Datenschutz: `currentRoute` braucht keine Berechtigung und keinen Usage-String (kein CoreBluetooth); keine neue
+  Required-Reason-API → `PrivacyInfo.xcprivacy` unverändert. Gespeichert werden nur die gelernten Geräte
+  (Name, UID, Fahrzeug) in den UserDefaults, nichts verlässt das Gerät.
+- Gerätetest: Route mit verbundenem Autoradio ohne laufende Wiedergabe (zeigt `currentRoute` A2DP/HFP?), CarPlay
+  kabelgebunden/kabellos (`.carAudio`), Routenwechsel bei laufender Aufzeichnung im Hintergrund, Tankstopp < 2 min
+  und > 2 min, Kurzbefehle-Automation «Verbindet/Trennt».
 
 ## Checkliste Nutzer
 

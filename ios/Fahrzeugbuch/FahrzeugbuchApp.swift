@@ -40,13 +40,14 @@ struct FahrzeugbuchApp: App {
                     Text(settings.modeNotice ?? "")
                 }
                 // Einrichtungslink fahrzeugbuch://setup?server=https://… (Schema in project.yml registrieren)
+                // Ein Link wechselt den Server nie ohne Rückfrage (I1) – Host im Titel deutlich sichtbar
                 .onOpenURL { url in handleOpenURL(url) }
-                .alert("Server übernehmen?", isPresented: Binding(
+                .alert(serverAlertTitle, isPresented: Binding(
                     get: { pendingServer != nil },
                     set: { if !$0 { pendingServer = nil } }), presenting: pendingServer) { server in
                     Button("Abbrechen", role: .cancel) {}
-                    Button("Wechseln", role: .destructive) {
-                        Task { await settings.changeServer(to: server) }
+                    Button(acceptTitle, role: .destructive) {
+                        Task { await acceptServer(server) }
                     }
                 } message: { server in
                     Text(serverChangeText(server))
@@ -59,39 +60,55 @@ struct FahrzeugbuchApp: App {
 }
 
 extension FahrzeugbuchApp {
+    private var acceptTitle: String {
+        settings.serverURL.trimmed.isEmpty ? "Server übernehmen" : "Wechseln"
+    }
+
+    private var serverAlertTitle: String {
+        guard let server = pendingServer else { return "Server übernehmen?" }
+        return "Server «\(ServerLink.host(server))» übernehmen?"
+    }
+
     private func serverChangeText(_ server: String) -> String {
-        let target = ServerLink.host(server)
-        let n = TenantStore.pendingCountOnDisk()
-        var text = "Neuer Server: \(target). Du wirst abgemeldet und die lokalen Daten werden vom Gerät entfernt."
-        if n > 0 { text += " Achtung: \(n) Änderung(en) sind noch nicht synchronisiert und gehen verloren." }
+        var text = "Adresse: \(server)\n\n"
+        let current = settings.serverURL.trimmed
+        if current.isEmpty {
+            text += "Die App verbindet sich mit diesem Server; die Anmeldung erfolgt dort. Nur bestätigen, wenn du "
+                + "den Link vom Betreiber deines Fahrzeugbuchs erhalten hast."
+        } else {
+            text += "Bisher: \(ServerLink.host(current)). Du wirst abgemeldet und die lokalen Daten des bisherigen "
+                + "Servers werden vom Gerät entfernt."
+            let n = TenantStore.pendingCountOnDisk()
+            if n > 0 { text += " Achtung: \(n) Änderung(en) sind noch nicht synchronisiert und gehen verloren." }
+        }
         return text
+    }
+
+    /// Bestätigter Einrichtungslink: abmelden, Daten des bisherigen Servers entfernen, neuen Server setzen
+    /// und (falls noch nicht gewählt) die Betriebsart «Mit Server» wählen.
+    private func acceptServer(_ server: String) async {
+        await settings.changeServer(to: server)
+        if settings.mode != .server { settings.chooseServer() }
     }
 
     private func handleOpenURL(_ url: URL) {
         guard ServerLink.isSetupLink(url) else { return }
-        guard let server = ServerLink.serverURL(from: url.absoluteString) else {
+        switch ServerLink.setupDecision(link: url, mode: settings.mode, currentServer: settings.serverURL) {
+        case .invalid:
             settings.loginNotice = "Der Einrichtungslink enthält keine gültige HTTPS-Serveradresse."
-            return
-        }
-        if settings.mode == nil {
-            // Noch keine Betriebsart gewählt: Link bedeutet „Mit Server“
-            settings.chooseServer()
-            settings.serverURL = server
-            return
-        }
-        if settings.isLocal {
+        case .suggestForTransfer(let server):
             // Lokalmodus: nichts umstellen, Server im Übertragungs-Assistenten vorbelegen
             ModeUIState.shared.suggestedServer = server
             settings.loginNotice = "Die App läuft «Nur auf diesem iPhone». Um deine Daten auf \(ServerLink.host(server)) "
                 + "zu übertragen: Einstellungen › Betriebsart › Auf Server übertragen …"
-            return
-        }
-        if !settings.isConfigured || settings.serverURL.isEmpty {
-            settings.serverURL = server
-        } else if server != settings.serverURL {
+        case .alreadyConfigured:
+            if settings.mode == nil {
+                settings.chooseServer()   // bekannter Server: nur Betriebsart wieder wählen
+            } else {
+                settings.loginNotice = "Dieser Server ist bereits eingerichtet."
+            }
+        case .confirm(let server, _, _):
             pendingServer = server
-        } else {
-            settings.loginNotice = "Dieser Server ist bereits eingerichtet."
         }
     }
 }

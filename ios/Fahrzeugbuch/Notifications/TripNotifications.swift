@@ -7,6 +7,9 @@ import UserNotifications
 /// - (b) Automatisch erkannte Fahrt gespeichert → „18 km erkannt“ mit Aktionen „Geschäftlich“/„Privat“
 ///   (bestätigt mit der Kategorie; Tippen öffnet das Review).
 /// - (c) Wöchentliche Erinnerung (So 18:00) an offene Bestätigungen.
+/// - (d) Hinweis aus CarPlay (CarPlay zeigt nur Kurzmeldungen; Details/Handlung hier auf dem iPhone).
+/// - Aktionen «Fahrt beenden», «Geschäftlich», «Privat» verlangen Entsperren (`.authenticationRequired`, I2):
+///   steuerrelevante Daten nicht am gesperrten iPhone setzbar.
 ///
 /// Registrierung: `TripNotifications.shared.register()` früh beim Start (in `TripCoordinator.configure`
 /// und im `AppDelegate`), damit auch Aktionen nach einem Kaltstart ankommen.
@@ -19,7 +22,7 @@ final class TripNotifications: NSObject, UNUserNotificationCenterDelegate {
         static let idle = "fzb.trip.idle"
         static let detected = "fzb.trip.detected"
         static let review = "fzb.trip.review"
-        static let fuel = "fzb.fuel.reminder"
+        static let info = "fzb.trip.info"
     }
 
     enum Action {
@@ -32,7 +35,7 @@ final class TripNotifications: NSObject, UNUserNotificationCenterDelegate {
         static let prefix = "fzb-trip-"
         static let idle = "fzb-trip-idle"
         static let weekly = "fzb-trip-weekly"
-        static let fuel = "fzb-fuel-reminder"
+        static let info = "fzb-trip-info"
         static func detected(_ tripId: String) -> String { "fzb-trip-detected-\(tripId)" }
     }
 
@@ -50,14 +53,18 @@ final class TripNotifications: NSObject, UNUserNotificationCenterDelegate {
         registered = true
         let center = UNUserNotificationCenter.current()
         center.delegate = self
-        let stop = UNNotificationAction(identifier: Action.stop, title: "Fahrt beenden", options: [])
-        let business = UNNotificationAction(identifier: Action.business, title: "Geschäftlich", options: [])
-        let personal = UNNotificationAction(identifier: Action.personal, title: "Privat", options: [])
+        // Nur entsperrt ausführbar (I2): Fahrtende und Kategorie sind steuerrelevant
+        let stop = UNNotificationAction(identifier: Action.stop, title: "Fahrt beenden",
+                                        options: [.authenticationRequired])
+        let business = UNNotificationAction(identifier: Action.business, title: "Geschäftlich",
+                                            options: [.authenticationRequired])
+        let personal = UNNotificationAction(identifier: Action.personal, title: "Privat",
+                                            options: [.authenticationRequired])
         center.setNotificationCategories([
             UNNotificationCategory(identifier: Category.idle, actions: [stop], intentIdentifiers: []),
             UNNotificationCategory(identifier: Category.detected, actions: [business, personal], intentIdentifiers: []),
             UNNotificationCategory(identifier: Category.review, actions: [], intentIdentifiers: []),
-            UNNotificationCategory(identifier: Category.fuel, actions: [], intentIdentifiers: []),
+            UNNotificationCategory(identifier: Category.info, actions: [], intentIdentifiers: []),
         ])
     }
 
@@ -77,19 +84,18 @@ final class TripNotifications: NSObject, UNUserNotificationCenterDelegate {
             UNNotificationRequest(identifier: Identifier.idle, content: content, trigger: nil))
     }
 
-    /// CarPlay «Tanken»: Erinnerung, den Tankvorgang auf dem iPhone zu erfassen (Tippen öffnet das Formular).
-    func notifyFuelReminder(vehicleId: String?, vehicleName: String?) async {
+    /// (d) Details zu einer CarPlay-Aktion aufs iPhone (CarPlay zeigt nur die Kurzmeldung, U4).
+    /// Tippen öffnet das Review offener Fahrten.
+    func notifyInfo(title: String, body: String) async {
         guard await isAllowed() else { return }
         let content = UNMutableNotificationContent()
-        content.title = "Tankvorgang erfassen"
-        content.body = "Vorgemerkt um \(Self.timeFormatter.string(from: Date()))"
-            + (vehicleName.map { " (\($0))" } ?? "") + ". Liter und Betrag eintragen."
-        content.sound = .default
-        content.categoryIdentifier = Category.fuel
-        content.threadIdentifier = "fzb-fuel"
-        if let vehicleId { content.userInfo = [Key.vehicleId: vehicleId] }
+        content.title = title
+        content.body = body
+        content.sound = nil
+        content.categoryIdentifier = Category.info
+        content.threadIdentifier = "fzb-trip"
         try? await UNUserNotificationCenter.current().add(
-            UNNotificationRequest(identifier: Identifier.fuel, content: content, trigger: nil))
+            UNNotificationRequest(identifier: Identifier.info, content: content, trigger: nil))
     }
 
     /// Stillstands-Mitteilung zurückziehen (Fahrt beendet oder wieder in Bewegung).
@@ -192,10 +198,8 @@ final class TripNotifications: NSObject, UNUserNotificationCenterDelegate {
         case Action.personal:
             if let tripId { await coordinator.classifyFromNotification(tripId: tripId, tenant: tenant, as: .personal) }
         case UNNotificationDefaultActionIdentifier:
-            if category == Category.detected || category == Category.review {
+            if category == Category.detected || category == Category.review || category == Category.info {
                 AppRouter.shared.pending = .review(vehicleId: vehicleId)
-            } else if category == Category.fuel {
-                AppRouter.shared.pending = .addFuel(vehicleId: vehicleId)
             }
         default:
             break
