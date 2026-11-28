@@ -4,7 +4,11 @@ Wartungskosten: `Maintenance.cost` ist der erfasste Rechnungsbetrag. Fehlt er, z
 Materialsumme (Σ Menge × Einzelpreis der nicht stornierten Materialien mit Preis).
 
 Verbrauch einer Etappe = alle seit der letzten Volltankung getankten Liter
-(inkl. Teilbetankungen) / gefahrene km seit der letzten Volltankung.
+(inkl. Teilbetankungen) / gefahrene km seit der letzten Volltankung. Eine weitere Volltankung beim gleichen
+km-Stand (Tank war doch nicht voll, nachgetankt) zählt zur vorigen Etappe (Review S7).
+
+Aktueller km-Stand = höchster Wert aus Anfangs-km, km-Ständen, Tankvorgängen, Wartungen und km-Beginn/-Ende der
+nicht stornierten Fahrten (Review S18; sonst verpasste die Service-Fälligkeit gefahrene km ohne Tankung).
 """
 import datetime as dt
 from dataclasses import dataclass, field
@@ -12,7 +16,7 @@ from dataclasses import dataclass, field
 from sqlalchemy import func, select, union_all
 from sqlalchemy.orm import Session
 
-from . import models
+from . import models, timeutil
 
 
 @dataclass
@@ -23,6 +27,7 @@ class VehicleData:
     maintenance: list[models.Maintenance]
     items: dict[str, list[models.MaintenanceItem]]
     materials: dict[str, list[models.MaintenanceMaterial]] = field(default_factory=dict)
+    trip_km: int | None = None          # höchster km-Beginn/-Ende der Fahrten (None = keine bzw. nicht geladen)
 
     def material_sum(self, maintenance_id: str) -> float:
         return material_sum(self.materials.get(maintenance_id, []))
@@ -36,6 +41,8 @@ class VehicleData:
         kms = [self.vehicle.initial_km]
         kms += [o.km for o in self.odometer] + [f.km for f in self.fuel]
         kms += [m.km for m in self.maintenance if m.km is not None]
+        if self.trip_km is not None:
+            kms.append(self.trip_km)
         return max(kms)
 
 
@@ -71,16 +78,31 @@ def load_vehicle(db: Session, tenant_id: int, vehicle_id: str, *, allow_deleted:
                 out[c.maintenance_id].append(c)
         return out
 
+    trip_km = None
+    if date_from is None and date_to is None:       # nur für den Gesamtstand (Fälligkeiten, Statistik)
+        u = union_all(*_trip_kms(tenant_id, vehicle_id)).subquery()
+        trip_km = db.scalar(select(func.max(u.c.km)))
     return VehicleData(v, rows(models.OdometerReading), rows(models.FuelEntry), maint,
-                       load_children(models.MaintenanceItem), load_children(models.MaintenanceMaterial))
+                       load_children(models.MaintenanceItem), load_children(models.MaintenanceMaterial),
+                       trip_km=trip_km)
+
+
+def _trip_kms(tenant_id: int, vehicle_id: str | None = None) -> list:
+    """Abfragen (vid, km) für km-Beginn und km-Ende der nicht stornierten Fahrten (für UNION ALL), optional
+    je Fahrzeug."""
+    def part(col):
+        q = select(models.Trip.vehicle_id.label("vid"), col.label("km")).where(
+            models.Trip.tenant_id == tenant_id, models.Trip.deleted.is_(False), col.is_not(None))
+        return q if vehicle_id is None else q.where(models.Trip.vehicle_id == vehicle_id)
+    return [part(models.Trip.km_start), part(models.Trip.km_end)]
 
 
 def current_km_by_vehicle(db: Session, tenant_id: int) -> dict[str, int]:
-    """Höchster km-Stand je Fahrzeug (km-Stände, Tankvorgänge, Wartungen) in einer Abfrage."""
+    """Höchster km-Stand je Fahrzeug (km-Stände, Tankvorgänge, Wartungen, Fahrten) in einer Abfrage."""
     parts = [select(m.vehicle_id.label("vid"), m.km.label("km")).where(
         m.tenant_id == tenant_id, m.deleted.is_(False), m.km.is_not(None))
         for m in (models.OdometerReading, models.FuelEntry, models.Maintenance)]
-    u = union_all(*parts).subquery()
+    u = union_all(*parts, *_trip_kms(tenant_id)).subquery()
     return {vid: km for vid, km in db.execute(select(u.c.vid, func.max(u.c.km)).group_by(u.c.vid))}
 
 
@@ -88,10 +110,16 @@ def material_sum(materials: list[models.MaintenanceMaterial]) -> float:
     return sum(t for mat in materials if not mat.deleted and (t := mat.total) is not None)
 
 
+def _point(date: dt.date, km: int, dist: int, liters: float, cost: float) -> dict:
+    return {"date": date, "km": km, "distance": dist, "liters": round(liters, 2), "cost": round(cost, 2),
+            "consumption": round(liters / dist * 100, 2), "cost_per_km": round(cost / dist, 3)}
+
+
 def consumption_points(entries: list[models.FuelEntry]) -> list[dict]:
     points: list[dict] = []
     prev_full = None
     acc_l = acc_c = 0.0
+    last_l = last_c = 0.0          # ungerundete Summen der letzten Etappe (Nachtanken beim gleichen km)
     for e in sorted(entries, key=lambda x: (x.km, x.date, x.id)):
         if prev_full is None:
             if e.full_tank:
@@ -103,12 +131,13 @@ def consumption_points(entries: list[models.FuelEntry]) -> list[dict]:
             continue
         dist = e.km - prev_full.km
         if dist > 0:
-            points.append({
-                "date": e.date, "km": e.km, "distance": dist,
-                "liters": round(acc_l, 2), "cost": round(acc_c, 2),
-                "consumption": round(acc_l / dist * 100, 2),
-                "cost_per_km": round(acc_c / dist, 3),
-            })
+            last_l, last_c = acc_l, acc_c
+            points.append(_point(e.date, e.km, dist, last_l, last_c))
+        elif points and points[-1]["km"] == e.km:
+            # erneute Volltankung beim gleichen km: der Tank war nicht voll → Liter gehören zur vorigen Etappe
+            last_l, last_c = last_l + acc_l, last_c + acc_c
+            prev = points[-1]
+            points[-1] = _point(prev["date"], e.km, prev["distance"], last_l, last_c)
         acc_l = acc_c = 0.0
         prev_full = e
     return points
@@ -116,7 +145,7 @@ def consumption_points(entries: list[models.FuelEntry]) -> list[dict]:
 
 def due_items(data: VehicleData, today: dt.date | None = None) -> list[dict]:
     """Je Wartungstitel die jüngste Wartung mit gesetzter Fälligkeit."""
-    today = today or dt.date.today()
+    today = today or timeutil.today()        # APP_TIMEZONE (S9)
     current = data.current_km
     latest: dict[str, models.Maintenance] = {}
     for m in sorted(data.maintenance, key=lambda x: (x.date, x.id)):

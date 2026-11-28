@@ -11,6 +11,7 @@ import threading
 import time
 import unicodedata
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass
 from typing import Annotated
@@ -20,20 +21,21 @@ import anyio
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, Request, Response, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, StreamingResponse
-from sqlalchemy import select, text
+from sqlalchemy import func, select, text
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 from starlette.middleware.gzip import DEFAULT_EXCLUDED_CONTENT_TYPES, GZipMiddleware
 
 from . import config, geo, intel, logfilter, members, metrics, models, privacy, runtime, schemas, security, state, web
 from .activity import ACTIVITY_LIMIT, ACTIVITY_MAX, activity
-from .attachments import EXTENSIONS, StorageError, content_matches, max_upload, quota_bytes, storage
+from .attachments import EXTENSIONS, StorageError, content_matches, mark_uploaded, max_upload, quota_bytes, storage
 from .auth import TENANT_SLUG, User, can_write, get_config, require_user
 from .db import engine, get_session, snapshot_session
 from .geo import UpstreamError
 from .integrity import VerifyBusy, key_id, maybe_anchor, public_key_b64, signing_key, verify_tenant
+from .jobs import xact_lock
 from .logbook import build_logbook, build_year_report, iter_trips_csv
-from .migrate import create_schema, head_revision
+from .migrate import create_schema, head_revision, known_revisions, schema_state
 from .report import build_report
 from .schemas import is_month
 from .stats import VehicleData, current_km_by_vehicle, load_vehicle, vehicle_stats
@@ -346,12 +348,12 @@ def _vehicle_or_404(db: Session, access: Access, vid: str, **kw) -> VehicleData:
     return data
 
 
-def _rate(access: "Access", name: str, env: str, default: int) -> None:
+def _rate(access: Access, name: str, env: str, default: int) -> None:
     """Rate-Limit je Benutzer (RateLimiter aus intel, 429 mit Retry-After)."""
     intel.limiter.check(f"{name}:{access.user.sub}", intel.env_limit(env, default))
 
 
-def _report_rate(access: "Access") -> None:
+def _report_rate(access: Access) -> None:
     _rate(access, "report", "RATE_REPORTS", 20)
 
 
@@ -426,19 +428,38 @@ def content_disposition(filename: str, disposition: str = "attachment") -> str:
 _pdf_lock = threading.Lock()
 _pdf_slots: threading.BoundedSemaphore | None = None
 _pdf_busy = 0
+_pdf_waiting = 0
+PDF_WAIT_MAX_S = 1.0
+
+
+def _pdf_busy_error() -> HTTPException:
+    return HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Berichtserzeugung ausgelastet – bitte erneut",
+                         headers={"Retry-After": "5"})
 
 
 @contextmanager
 def pdf_slot():
-    """PDF_CONCURRENCY (2) gleichzeitige PDF-Erzeugungen je Worker (Speicherspitzen); weitere warten bis
-    PDF_WAIT_S (20 s), dann 503 mit Retry-After."""
-    global _pdf_slots, _pdf_busy
+    """PDF_CONCURRENCY (2) gleichzeitige PDF-Erzeugungen je Worker (Speicherspitzen). Weitere warten höchstens
+    PDF_WAIT_S (Default 1 s, max. 1 s) und nur, solange höchstens PDF_QUEUE (Default 2 × PDF_CONCURRENCY)
+    Anfragen warten – sonst sofort 503 mit Retry-After. So blockieren wartende PDF-Anfragen nie den Threadpool
+    der übrigen sync-Endpunkte (/sync, /changes …)."""
+    global _pdf_slots, _pdf_busy, _pdf_waiting
+    concurrency = config.env_int("PDF_CONCURRENCY", 2, minimum=1)
     with _pdf_lock:
         if _pdf_slots is None:
-            _pdf_slots = threading.BoundedSemaphore(config.env_int("PDF_CONCURRENCY", 2, minimum=1))
-    if not _pdf_slots.acquire(timeout=config.env_float("PDF_WAIT_S", 20.0)):
-        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Berichtserzeugung ausgelastet – bitte erneut",
-                            headers={"Retry-After": "5"})
+            _pdf_slots = threading.BoundedSemaphore(concurrency)
+    if not _pdf_slots.acquire(blocking=False):
+        with _pdf_lock:
+            if _pdf_waiting >= config.env_int("PDF_QUEUE", 2 * concurrency, minimum=0):
+                raise _pdf_busy_error()
+            _pdf_waiting += 1
+        try:
+            got = _pdf_slots.acquire(timeout=min(config.env_float("PDF_WAIT_S", PDF_WAIT_MAX_S), PDF_WAIT_MAX_S))
+        finally:
+            with _pdf_lock:
+                _pdf_waiting -= 1
+        if not got:
+            raise _pdf_busy_error()
     with _pdf_lock:
         _pdf_busy += 1
     try:
@@ -469,6 +490,7 @@ def _gauges() -> list[tuple[str, str, dict, float]]:
         out.append(("fzb_threadpool_busy", "belegte Threads", {}, float(_thread_limiter.borrowed_tokens)))
         out.append(("fzb_threadpool_size", "Threadpool-Grösse", {}, float(_thread_limiter.total_tokens)))
     out.append(("fzb_pdf_in_progress", "laufende PDF-Erzeugungen", {}, float(_pdf_busy)))
+    out.append(("fzb_pdf_waiting", "auf einen PDF-Platz wartende Anfragen", {}, float(_pdf_waiting)))
     return out
 
 
@@ -476,53 +498,68 @@ metrics.register_gauge(_gauges)
 
 
 # ---------- öffentlich ----------
+# Health-Endpunkte sind async: sie laufen in der Event-Loop und hängen nie vom (evtl. ausgelasteten) Threadpool
+# der sync-Endpunkte ab. Die DB-Prüfung der Readiness läuft in einem eigenen Mini-Pool mit Zeitlimit.
+_health_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="fzb-health")
+
+
 @app.get("/health")
-def health():
+async def health():
     """Leichtgewichtig (keine DB/Netz): "degraded", wenn der gemeinsame Zustand zuletzt nicht erreichbar war."""
     shared = state.shared()
     return {"status": "degraded" if shared is not None and shared.degraded() else "ok"}
 
 
 @app.get("/health/live", include_in_schema=False)
-def health_live():
+async def health_live():
     """Liveness: Prozess antwortet (keine Abhängigkeiten)."""
     return {"status": "ok"}
 
 
 _head: str | None = None
+_known: frozenset[str] | None = None
 
 
-def _schema_ok() -> bool:
-    global _head
+def _schema_state() -> str:
+    """ok | compatible_newer | migration_pending | schema_newer (app.migrate.schema_state)."""
+    global _head, _known
     if _head is None:
-        _head = head_revision()
+        _head, _known = head_revision(), known_revisions()
     with engine.connect() as conn:
         try:
             current = conn.execute(text("SELECT version_num FROM alembic_version")).scalar()
         except SQLAlchemyError:
-            return False
-    return current == _head
+            return "migration_pending"
+        return schema_state(conn, current, _head, _known)
 
 
 @app.get("/health/ready", include_in_schema=False)
-def health_ready():
-    """Readiness: DB erreichbar und Schema = Alembic head, gemeinsamer Zustand erreichbar, kein SIGTERM."""
+async def health_ready():
+    """Readiness: DB erreichbar, Schema = Alembic head oder ein neuerer, als kompatibel markierter Stand
+    (Rolling Update/Rollback, app.migrate), kein SIGTERM. Valkey-Ausfall macht NICHT unbereit (alle Pods teilen
+    Valkey – sonst Totalausfall bei dessen Neustart): 200 mit "degraded": true; Rate-Limits laufen dann
+    lokal mit dem Budget-Anteil je Prozess, Sperren lokal (app.security)."""
     checks = {"shutdown": "ok" if not SHUTTING_DOWN.is_set() else "shutting_down"}
+    loop = asyncio.get_running_loop()
     try:
-        checks["database"] = "ok" if _schema_ok() else "migration_pending"
-    except SQLAlchemyError:
+        checks["database"] = await asyncio.wait_for(loop.run_in_executor(_health_pool, _schema_state),
+                                                    timeout=config.env_float("HEALTH_DB_TIMEOUT_S", 2.0))
+    except (SQLAlchemyError, TimeoutError):
         checks["database"] = "unavailable"
     shared = state.shared()
     if shared is None:
         checks["state"] = "memory"
     else:
         try:
-            shared.ping()
+            await shared.aping()
             checks["state"] = "ok"
         except state.StateUnavailable:
             checks["state"] = "unavailable"
-    ready = all(v in ("ok", "memory") for v in checks.values())
-    return JSONResponse({"status": "ready" if ready else "not_ready", **checks}, status_code=200 if ready else 503)
+    ready = checks["shutdown"] == "ok" and checks["database"] in ("ok", "compatible_newer")
+    body = {"status": "ready" if ready else "not_ready", **checks}
+    if checks["state"] == "unavailable" or checks["database"] == "compatible_newer":
+        body["degraded"] = True
+    return JSONResponse(body, status_code=200 if ready else 503)
 
 
 def _metrics_allowed(request: Request) -> bool:
@@ -554,12 +591,22 @@ def get_metrics(request: Request):
                              headers={"Cache-Control": "no-store"})
 
 
+DEFAULT_SOURCE_URL = "https://github.com/jboettge/odovio"
+
+
+def source_url() -> str:
+    """Quellcode-Link (AGPL-3.0 § 13): SOURCE_URL, nur https; sonst das öffentliche Repository.
+    Wer eine geänderte Fassung betreibt, setzt SOURCE_URL auf deren Quellcode."""
+    v = (os.environ.get("SOURCE_URL") or "").strip()
+    return v if v.startswith("https://") and len(v) <= 300 and not any(c.isspace() for c in v) else DEFAULT_SOURCE_URL
+
+
 @app.get("/auth/config", response_model=schemas.AuthConfig)
 def auth_config():
-    """OIDC-Parameter für die App (nur die Server-URL muss konfiguriert werden)."""
+    """OIDC-Parameter für die App (nur die Server-URL muss konfiguriert werden) und Quellcode-Link."""
     cfg = get_config()
     return {"issuer": cfg.issuer, "client_id": cfg.client_id, "web_client_id": cfg.web_client_id,
-            "scopes": "openid profile offline_access"}
+            "scopes": "openid profile offline_access", "source_url": source_url()}
 
 
 # ---------- Benutzer / Mandanten ----------
@@ -583,10 +630,15 @@ def checklist_templates(_: CurrentUser):
 def get_changes(access: TenantAccess, db: DB, since: Annotated[int, Query(ge=0)] = 0,
                 limit: Annotated[int, Query(ge=1, le=CHANGES_MAX)] = CHANGES_LIMIT):
     """Änderungen seit `since`, seitenweise: solange `has_more`, mit since=cursor erneut abrufen.
-    Leserolle: Privatfahrten und private Orte maskiert."""
+    Leserolle: Privatfahrten und private Orte maskiert.
+    Rate-Limit gestaffelt (Review X7): since=0 (Vollabgleich) RATE_FULL_SYNC; liegt `since` mehr als CHANGES_MAX
+    Revisionen hinter dem Stand (weitere Seiten eines Vollabgleichs bzw. since=1 statt 0) RATE_DEEP_SYNC;
+    inkrementell nur die allgemeinen Limits."""
+    db.refresh(access.tenant)
     if since == 0:
         _rate(access, "changes0", "RATE_FULL_SYNC", 10)
-    db.refresh(access.tenant)
+    elif access.tenant.seq - since > CHANGES_MAX:
+        _rate(access, "changes-deep", "RATE_DEEP_SYNC", 60)
     return changes_since(db, access.tenant, since, limit, mask_private=access.masked)
 
 
@@ -771,8 +823,9 @@ def _storage_unavailable() -> HTTPException:
                          headers={"Retry-After": "30"})
 
 
-def _existing_blob(st, access: Access, att: models.Attachment):
+def _existing_blob(st, db: Session, access: Access, att: models.Attachment):
     if st.sha256(access.tenant.id, att.id) == att.sha256:
+        mark_uploaded(db, access.tenant.id, att.id, att.sha256)
         return JSONResponse({"stored": True, "existing": True}, status_code=status.HTTP_200_OK)
     log.error("Beleg %s: gespeicherte Datei weicht von der Prüfsumme ab – nicht überschrieben", att.id)
     raise _upload_rejected(status.HTTP_409_CONFLICT, "Datei existiert bereits mit anderem Inhalt", "exists")
@@ -811,7 +864,7 @@ def put_attachment_blob(aid: AttachmentId, request: Request, background: Backgro
     try:
         st = storage()
         if st.exists(access.tenant.id, att.id):
-            return _existing_blob(st, access, att)
+            return _existing_blob(st, db, access, att)
         if att.deleted:
             raise _upload_rejected(status.HTTP_409_CONFLICT, "Beleg storniert", "deleted")
         quota = quota_bytes()
@@ -820,12 +873,13 @@ def put_attachment_blob(aid: AttachmentId, request: Request, background: Backgro
                                    f"Speicherkontingent für Belege erschöpft (max. {quota // (1024 * 1024)} MB je "
                                    "Mandant)", "quota")
         if not st.put(access.tenant.id, att.id, body, att.mime, att.sha256):   # parallel gespeichert
-            return _existing_blob(st, access, att)
+            return _existing_blob(st, db, access, att)
     except StorageError as e:
         raise _storage_unavailable() from e
     except OSError as e:
         log.error("Beleg %s: Speichern fehlgeschlagen (%s)", att.id, type(e).__name__)
         raise HTTPException(status.HTTP_507_INSUFFICIENT_STORAGE, "Datei konnte nicht gespeichert werden") from e
+    mark_uploaded(db, access.tenant.id, att.id, att.sha256)    # Existenz belegt → späteres Fehlen ist ein Befund
     if url := webhook_url():
         background.add_task(send_webhook, url, {
             "event": "attachment.uploaded", "tenant": access.tenant.slug, "attachment_id": att.id,
@@ -878,6 +932,19 @@ def get_history(entity: str, eid: str, access: TenantAccess, db: DB):
     return out
 
 
+# ?full=1 → 409 in Folge je Mandant (je Worker); ab VERIFY_BUSY_ALERT als Warnung im Sicherheits-Log: eine
+# Vollprüfung, die nie zustande kommt, kann auf einen festgehaltenen Advisory-Lock hindeuten (s. integrity)
+VERIFY_BUSY_ALERT = 3
+_verify_busy: dict[int, int] = {}
+_verify_busy_lock = threading.Lock()
+
+
+def _verify_busy_count(tenant_id: int, busy: bool) -> int:
+    with _verify_busy_lock:
+        n = _verify_busy[tenant_id] = _verify_busy.get(tenant_id, 0) + 1 if busy else 0
+        return n
+
+
 @app.get("/api/t/{tenant}/audit/verify", response_model=schemas.AuditResult)
 def audit_verify(access: TenantAccess, db: DB, full: Annotated[bool, Query()] = False):
     """Integritätsprüfung in einem konsistenten Snapshot; inkrementell ab dem zuletzt bestätigten Stand,
@@ -885,23 +952,45 @@ def audit_verify(access: TenantAccess, db: DB, full: Annotated[bool, Query()] = 
     _rate(access, "verify", "RATE_VERIFY", 10)
     _release(db)
     try:
-        return verify_tenant(access.tenant.id, full)
+        result = verify_tenant(access.tenant.id, full)
     except VerifyBusy:
+        n = _verify_busy_count(access.tenant.id, True)
+        security.event("verify_full_busy", status=409, reason=f"Vollprüfung läuft bereits ({n}× in Folge)",
+                       count=n, warn=n >= VERIFY_BUSY_ALERT)
         raise HTTPException(status.HTTP_409_CONFLICT, "Vollprüfung dieses Mandanten läuft bereits",
                             headers={"Retry-After": "30"}) from None
+    if full:
+        _verify_busy_count(access.tenant.id, False)
+    return result
+
+
+ANCHORS_PAGE_MAX = 1000
 
 
 @app.get("/api/t/{tenant}/audit/anchors", response_model=schemas.AnchorList)
-def audit_anchors(access: TenantAccess, db: DB):
-    """Signierte Anker zur externen Archivierung (z. B. täglich per n8n → Paperless)."""
+def audit_anchors(access: TenantAccess, db: DB,
+                  after_seq: Annotated[int | None, Query(ge=0)] = None,
+                  limit: Annotated[int | None, Query(ge=1, le=ANCHORS_PAGE_MAX)] = None):
+    """Signierte Anker zur externen Archivierung (z. B. täglich per n8n → Paperless), aufsteigend nach Seq.
+    Paging (Review S15): `after_seq` (nur Anker mit grösserer Seq) und `limit`; ist danach noch mehr vorhanden,
+    nennt `next_after_seq` den Wert für die nächste Seite. Ohne `limit` wie bisher alle (ab `after_seq`).
+    `total` = Anzahl aller Anker des Mandanten."""
     key = signing_key()
-    q = select(models.Anchor).where(models.Anchor.tenant_id == access.tenant.id).order_by(models.Anchor.seq)
+    tenant_q = models.Anchor.tenant_id == access.tenant.id
+    q = select(models.Anchor).where(tenant_q).order_by(models.Anchor.seq)
+    if after_seq is not None:
+        q = q.where(models.Anchor.seq > after_seq)
+    rows = list(db.scalars(q if limit is None else q.limit(limit + 1)))
+    more = limit is not None and len(rows) > limit
+    rows = rows[:limit] if more else rows
     return {
         "tenant": access.tenant.slug,
         "public_key": public_key_b64(key) if key else None,
         "key_id": key_id(key) if key else None,
         "message_format": "fahrzeugbuch-anchor|<tenant>|<seq>|<head_hash>|<created_at>",
-        "anchors": [{c: getattr(a, c) for c in schemas.AnchorOut.model_fields} for a in db.scalars(q)],
+        "anchors": [{c: getattr(a, c) for c in schemas.AnchorOut.model_fields} for a in rows],
+        "total": db.scalar(select(func.count()).select_from(models.Anchor).where(tenant_q)),
+        "next_after_seq": rows[-1].seq if more else None,
     }
 
 
@@ -929,55 +1018,73 @@ def get_members(access: TenantAccess, db: DB):
             "manageable": _manageable(access)}
 
 
-def _member_admin(access: Access, db: Session) -> tuple[members.KeycloakAdmin, models.Tenant]:
-    """Verwalter im Web-Frontend + Keycloak konfiguriert; Mandantenzeile sperren (Änderungen je Mandant
-    nacheinander → „letzter Verwalter“ sicher geprüft, Journal sequenziell)."""
+def _member_admin(access: Access, db: Session) -> members.KeycloakAdmin:
+    """Verwalter im Web-Frontend + Keycloak konfiguriert; Änderungen je Mandant nacheinander („letzter Verwalter“
+    sicher geprüft): PostgreSQL per Advisory-Lock "members" – die Mandantenzeile wird erst fürs Journal gesperrt,
+    Syncs warten so nicht auf Keycloak; SQLite (ein Schreiber) sperrt wie bisher sofort."""
     _require_admin_web(access)
     _rate(access, "members-write", "RATE_MEMBERS", 30)
     kc = members.admin_client()
     if kc is None:
         raise HTTPException(status.HTTP_501_NOT_IMPLEMENTED, members.NOT_CONFIGURED)
-    return kc, _locked_tenant(db, access)
+    if db.get_bind().dialect.name == "postgresql":
+        xact_lock(db, "members", access.tenant.id)
+    else:
+        _locked_tenant(db, access)
+    return kc
 
 
-def _member_change(db: Session, tenant: models.Tenant, fn):
-    """Keycloak ändern, dann Journal (Revision „membership“) committen; Fehler → nichts im Journal."""
+def _member_change(db: Session, access: Access, fn):
+    """Keycloak ändern, dann Journal (Revision „membership“) unter der Mandantensperre committen. Scheitert ein
+    Schritt (Keycloak, Journal, Commit), werden ausgeführte Keycloak-Schritte zurückgenommen (Kompensation) und
+    nichts erscheint im Journal."""
+    change = members.Change()
     try:
-        out = fn(tenant)
+        out = fn(access.tenant, change)
+        tenant = _locked_tenant(db, access)
+        for entry in change.entries:
+            entry(tenant)
+        maybe_anchor(db, tenant)
+        db.commit()
     except (UpstreamError, members.KeycloakDenied) as e:
+        change.compensate()
         db.rollback()
         raise members.upstream_error(e) from e
     except HTTPException:
+        change.compensate()
         db.rollback()
         raise
-    maybe_anchor(db, tenant)
-    db.commit()
+    except Exception:
+        change.compensate()
+        db.rollback()
+        log.exception("Mitgliederänderung fehlgeschlagen – Keycloak-Schritte zurückgenommen")
+        raise
     return out
 
 
 @app.post("/api/t/{tenant}/members", response_model=schemas.Member, status_code=status.HTTP_201_CREATED)
 def add_member(req: schemas.MemberCreate, access: TenantAccess, db: DB):
     """Benutzer (Benutzername oder E-Mail, muss in Keycloak existieren) mit genau einer Rolle aufnehmen."""
-    kc, tenant = _member_admin(access, db)
-    out = _member_change(db, tenant, lambda t: members.add_member(db, t, access.user, kc, req.user, req.role,
-                                                                  is_admin=True))
+    kc = _member_admin(access, db)
+    out = _member_change(db, access, lambda t, ch: members.add_member(db, t, access.user, kc, req.user, req.role,
+                                                                      is_admin=True, change=ch))
     security.event("admin_action", status=201, reason="member_add", target=out["id"], role=req.role)
     return out
 
 
 @app.patch("/api/t/{tenant}/members/{member_id}", response_model=schemas.Member)
 def patch_member(member_id: MemberId, req: schemas.MemberUpdate, access: TenantAccess, db: DB):
-    kc, tenant = _member_admin(access, db)
-    out = _member_change(db, tenant, lambda t: members.change_role(db, t, access.user, kc, member_id, req.role,
-                                                                   is_admin=True))
+    kc = _member_admin(access, db)
+    out = _member_change(db, access, lambda t, ch: members.change_role(db, t, access.user, kc, member_id,
+                                                                       req.role, is_admin=True, change=ch))
     security.event("admin_action", status=200, reason="member_role", target=member_id, role=req.role)
     return out
 
 
 @app.delete("/api/t/{tenant}/members/{member_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_member(member_id: MemberId, access: TenantAccess, db: DB):
-    kc, tenant = _member_admin(access, db)
-    _member_change(db, tenant, lambda t: members.remove_member(db, t, access.user, kc, member_id))
+    kc = _member_admin(access, db)
+    _member_change(db, access, lambda t, ch: members.remove_member(db, t, access.user, kc, member_id, change=ch))
     security.event("admin_action", status=204, reason="member_remove", target=member_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 

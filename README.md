@@ -4,7 +4,7 @@ Digitales Fahrzeugbuch: iOS-App (SwiftUI) + REST-Server (FastAPI/PostgreSQL, Doc
 
 ## Funktionen
 
-- **Fahrzeuge**: mehrere, mit Kennzeichen, Treibstoff, Start-km
+- **Fahrzeuge**: mehrere, mit Kennzeichen, VIN/Fahrgestellnummer (optional; normalisiert auf 17 Zeichen ohne I/O/Q, Prüfziffer nur als Hinweis bei nordamerikanischen VINs; in iOS per Kamera scanbar – Strichcode Code 39/Data Matrix/QR oder Texterkennung), Treibstoff, Start-km
 - **Kilometerstände**: manuell; Tankvorgänge und Wartungen zählen ebenfalls → aktueller Stand = Maximum
 - **Tankvorgänge**: Datum, km, Liter, Betrag, voll/teil, Tankstelle → Preis/Liter
 - **Verbrauch** (Voll-zu-voll): l/100 km, l/km, CHF/km je Etappe + Durchschnitt, Diagramm
@@ -49,21 +49,21 @@ Auf echtem Gerät zu testen: Hintergrund-Aufzeichnung, Automatik, Wecken nach Be
 
 ## Web-Frontend
 
-Ansicht und Verwaltung je Rolle: Übersicht, Fahrzeuge (Fahrten, Tanken, Wartungen, km-Stände, Berichte), Monatsabschluss, Aktivität, Integrität, Stammdaten; Mitglieder nur für *Verwalten*. Keycloak-Client `fahrzeugbuch-web` (public, PKCE) legt `setup-client.sh` mit `WEB_URL=https://fahrzeugbuch.j-mb.net` an. Tokens nur in `sessionStorage`, Abmeldung nach 30 min Inaktivität. Entwicklung, Mock-Server und Tests: [web/README.md](web/README.md), Screenshots: `docs/screenshots/web/`.
+Ansicht und Verwaltung je Rolle: Übersicht, Fahrzeuge (Fahrten, Tanken, Wartungen, km-Stände, Berichte – Tanken, Wartungen inkl. Material/Checkliste/Belege und km-Stände auch im Web erfassbar), Monatsabschluss, Aktivität, Integrität, Stammdaten; Mitglieder nur für *Verwalten*. Keycloak-Client `fahrzeugbuch-web` (public, PKCE) legt `setup-client.sh` mit `WEB_URL=https://www.odovio.ch` an. Tokens nur in `sessionStorage`, Abmeldung nach 30 min Inaktivität. Entwicklung, Mock-Server und Tests: [web/README.md](web/README.md), Screenshots: `docs/screenshots/web/`.
 
 ## Sicherheit
 
 | Massnahme | Umsetzung / Env |
 |---|---|
 | Rate-Limiting | Token-Bucket je IP (`RATE_IP_PER_MIN` 600, öffentlich 120, Web 3000) und je Benutzer (`RATE_USER_PER_MIN` 1200); 429 + `Retry-After`; dazu spezifische Limits (Sync, Scan, KI) |
-| Brute-Force | gehäufte 401 je IP bzw. 403/404 je IP+Benutzer → IP-Sperre 5/15/60 min (`BRUTE_*`); Ausnahmen `SECURITY_ALLOWLIST` |
-| Sicherheits-Log | JSON-Zeilen `fahrzeugbuch.security` (auth_failed, rate_limited, brute_force_block, forbidden_tenant, admin_action …) → CrowdSec/fail2ban (`deploy/`) |
+| Brute-Force | gehäufte 401 (gefälschtes/abgelaufenes Token; fehlendes oder kaputtes Token zählt nicht) je IP bzw. 403/404 je IP+Benutzer → IP-Sperre 5/15/60 min (`BRUTE_*`), nur für `/api/*` – Web-Frontend und `/health*` bleiben erreichbar; Ausnahmen `SECURITY_ALLOWLIST` |
+| Sicherheits-Log | JSON-Zeilen `fahrzeugbuch.security` (auth_failed, auth_missing, rate_limited, brute_force_block, forbidden_tenant, admin_action, integrity_failed, integrity_full_overdue, verify_full_busy …; Pfade URL-kodiert) → CrowdSec/fail2ban (`deploy/`, Jail nur auf den API-Container) |
 | CORS / CSRF | Default keine Cross-Origin-Freigabe; `CORS_ORIGINS` = exakte Allowlist; schreibende Requests mit fremder `Origin` → 403 |
 | Host / Transport | `ALLOWED_HOSTS`, HSTS hinter TLS (`FORCE_HSTS`), CSP fürs Web, nosniff/CORP/no-store, `X-Request-ID`, kein `Server`-Header |
 | Eingaben | Body-Limits, JSON-Tiefe/-Elemente (`JSON_MAX_*`), Header-/Token-Längen, Unicode-NFC, Steuer-/Bidi-Zeichen entfernt, strikte Pfadparameter |
 | Injection | nur ORM/gebundene Parameter; CSV-Formelschutz (inkl. Unicode-Varianten), PDF-Escaping, RFC-6266-Dateinamen, URL-kodierte Keycloak-Admin-Aufrufe, Log-Bereinigung |
 | Tokens | Signatur/Issuer/azp, `exp`/`iat`/`nbf`, max. Lebensdauer (`MAX_TOKEN_LIFETIME_S`), JWKS nur HTTPS |
-| Konfiguration | Startprüfung unsicherer Werte (Warnung; `STRICT_CONFIG=1` → Abbruch) |
+| Konfiguration | Startprüfung unsicherer Werte (Warnung; `STRICT_CONFIG=1`, Standard in Compose → Abbruch); X-Forwarded-For von nicht vertrautem Peer → `config_warning` |
 | Container | read-only, `cap_drop: ALL`, `init`, ulimits, Healthcheck, uvicorn 1 Worker + `--limit-concurrency` |
 | Lieferkette | Lock-Dateien mit Hashes, gepinnte Images/Actions, `pip-audit`, `bandit`, `npm audit` in der CI |
 | Keycloak (realmweit, nur per Flag) | `ENABLE_BRUTE_FORCE=1`, `SET_PASSWORD_POLICY=1`, `REQUIRE_ADMIN_OTP=1` |
@@ -106,10 +106,11 @@ Dienste: `db` (PostgreSQL), `migrate` (einmalig je Deploy: Schema, Trigger, App-
 |---|---|---|
 | `DB_PASSWORD` | ja | Owner-Rolle (nur Migration/Backup) |
 | `APP_DB_PASSWORD` | ja | App-Rolle `fahrzeugbuch_app`: kein Owner/Superuser, kein DELETE, Journal nur SELECT/INSERT |
-| `ANCHOR_SIGNING_KEY` | empfohlen | Ed25519-Seed (Base64) für signierte Kettenanker – nicht in der DB, sichern! |
+| `ANCHOR_SIGNING_KEY` | ja | Ed25519-Seed (Base64) für signierte Kettenanker und den Prüfstand – nicht in der DB, sichern! |
 | `ANCHOR_INTERVAL_MIN` | – | `60` (Anker nach Änderungen höchstens stündlich, zusätzlich bei jedem PDF) |
 | `API_BIND` | – | `127.0.0.1`; für Caddy auf OPNsense: IP der Docker-VM + Firewall nur OPNsense |
-| `FORWARDED_ALLOW_IPS` | – | IP des Reverse Proxy |
+| `FORWARDED_ALLOW_IPS` | – | IP des Reverse Proxy, wie der Container sie sieht (Docker: meist Gateway des Netzes) |
+| `STRICT_CONFIG` | – | `1` (Standard): unsichere Konfiguration verhindert den Start |
 | `OIDC_ALLOWED_AZP` | – | weitere Clients, z. B. für n8n-Skripte |
 | `MAX_BODY_BYTES` | – | `1048576` |
 | `DOCS_ENABLED` | – | `0` (API-Doku `/docs` nur bei Bedarf) |
@@ -123,7 +124,7 @@ Dienste: `db` (PostgreSQL), `migrate` (einmalig je Deploy: Schema, Trigger, App-
 
 3. Prüfen: `curl http://<docker-vm>:8085/health` und `/auth/config`
    Der Container muss den Issuer erreichen (Discovery/JWKS).
-4. **HTTPS** über Reverse Proxy (z. B. Caddy auf OPNsense), z. B. `fahrzeugbuch.j-mb.net → <docker-vm>:8085`. Die App akzeptiert nur HTTPS.
+4. **HTTPS** über Reverse Proxy (z. B. Caddy auf OPNsense), z. B. `www.odovio.ch → <docker-vm>:8085`, Apex `odovio.ch` → Weiterleitung auf `https://www.odovio.ch` (`deploy/Caddyfile.example`). Die App akzeptiert nur HTTPS.
    - Request-Grössen: `…/blob` bis 8 MiB (Belege), `…/scan` bis ~3 MB, sonst 1 MiB
    - Access-Logs des Proxys ohne Query-Strings (Datenschutz)
 5. **Backup**: Datenbank **und** Volume `fahrzeugbuch-files` (Belege) gemeinsam sichern; `ANCHOR_SIGNING_KEY` separat aufbewahren.
@@ -212,16 +213,16 @@ POST /api/t/privat/sync
 
 - Tabelle `revisions`: je Änderung Version, Aktion, vollständiger Datenstand, Benutzer (`sub`, Name), Serverzeit (UTC), Erfassungszeit auf dem Gerät, `op_id`, Konfliktflag
 - `hash = SHA256(prev_hash + kanonisches JSON)` je Mandant → Ändern, Löschen, Einfügen oder Umordnen bricht die Kette
-- **Abgleich Datenstand**: jeder Datensatz muss exakt seiner letzten Revision entsprechen – direkte DB-Änderungen an Fachtabellen werden erkannt
+- **Abgleich Datenstand**: jeder Datensatz muss exakt seiner letzten Revision entsprechen – direkte DB-Änderungen an Fachtabellen werden erkannt. Nachgerüstete optionale Felder (z. B. `vehicles.vin`, Alembic 0005; `article_id`, `km_estimated`) fehlen in Altrevisionen: das gilt als gleich, solange der Datensatz dort `NULL`/Default hat (`integrity._same`); bestehende Revisionen und Hashes bleiben unverändert
 - **Signierte Anker** (Ed25519, Schlüssel ausserhalb der DB): erkennen auch ein vollständiges Neuberechnen der Kette; externe Ablage der Anker schützt zusätzlich gegen Löschen
 - **DB-Rollen**: API läuft als `fahrzeugbuch_app` (kein Owner/Superuser): kann Trigger nicht deaktivieren, Journal/Anker nicht ändern, nichts löschen. Trigger sperren `UPDATE/DELETE/TRUNCATE` auf `revisions` und `anchors`
-- `/audit/verify` und jedes PDF zeigen: Kette, Datenstand, Anker; PDF enthält Kettenkopf und letzten signierten Anker
-- **Inkrementelle Prüfung** (Tabelle `verify_checkpoints`, Alembic 0004): je Mandant gilt der zuletzt bestätigte Stand (Seq + Kettenkopf, mit `ANCHOR_SIGNING_KEY` Ed25519-signiert) für alle Worker. PDFs und `/audit/verify` prüfen nur neue Revisionen (Kette), seither geänderte Datensätze, die Anzahl Datensätze je Typ und neue Anker. Vollprüfung mit `?full=1`, ohne gültigen Prüfstand und sobald die letzte älter als `VERIFY_FULL_INTERVAL_S` (24 h) ist. Das PDF nennt Zeitpunkt/Stand der letzten Vollprüfung und den inkrementellen Bereich. Bis zur nächsten Vollprüfung unentdeckt bleiben direkte DB-Änderungen an bereits bestätigten Revisionen (ohne Neuberechnen der Kette) und an seither unveränderten Datensätzen – Empfehlung: täglich `GET /audit/verify?full=1` (z. B. n8n) zusätzlich zur Anker-Archivierung
+- `/audit/verify` und jedes PDF zeigen: Kette, Datenstand, Anker, Belegdateien; PDF enthält Kettenkopf und letzten signierten Anker. Eine Belegdatei, die nachweislich vorhanden war (Upload bzw. frühere Prüfung, Tabelle `blob_checks`) und jetzt fehlt, ist ein Befund «Datei fehlt»; nur nie hochgeladene Belege gelten als ausstehend
+- **Inkrementelle Prüfung** (Tabelle `verify_checkpoints`, Alembic 0004): je Mandant gilt der zuletzt bestätigte Stand (Seq + Kettenkopf, mit `ANCHOR_SIGNING_KEY` Ed25519-signiert) für alle Worker. PDFs und `/audit/verify` prüfen nur neue Revisionen (Kette), seither geänderte Datensätze, die Anzahl Datensätze je Typ und neue Anker. Vollprüfung mit `?full=1`, ohne gültigen Prüfstand und sobald die letzte älter als `VERIFY_FULL_INTERVAL_S` (24 h) ist. Kann eine fällige Vollprüfung länger als 2 × `VERIFY_FULL_INTERVAL_S` nicht laufen (Sperre belegt), melden API und PDF «Vollprüfung überfällig» (nicht OK, Sicherheits-Log `integrity_full_overdue`); wiederholte 409 auf `?full=1` → `verify_full_busy`. Das PDF nennt Zeitpunkt/Stand der letzten Vollprüfung und den inkrementellen Bereich. Bis zur nächsten Vollprüfung unentdeckt bleiben direkte DB-Änderungen an bereits bestätigten Revisionen (ohne Neuberechnen der Kette) und an seither unveränderten Datensätzen – Empfehlung: täglich `GET /audit/verify?full=1` (z. B. n8n) zusätzlich zur Anker-Archivierung
 - Grenzen: Wer Owner-Passwort **und** Signaturschlüssel besitzt, kann weiterhin manipulieren – erkennbar nur über extern archivierte Anker/PDFs. Keine zertifizierte GeBüV-/GoBD-Lösung.
 
 ## Verbrauchsberechnung
 
-Voll-zu-voll: Liter aller Tankvorgänge nach einer Volltankung bis inkl. der nächsten Volltankung ÷ gefahrene km dazwischen. Teilbetankungen werden mitgezählt, ergeben aber keinen eigenen Wert. Die erste Volltankung ist der Startpunkt.
+Voll-zu-voll: Liter aller Tankvorgänge nach einer Volltankung bis inkl. der nächsten Volltankung ÷ gefahrene km dazwischen. Teilbetankungen werden mitgezählt, ergeben aber keinen eigenen Wert. Die erste Volltankung ist der Startpunkt. Eine weitere Volltankung beim gleichen km-Stand (nachgetankt) zählt zur vorigen Etappe. Der aktuelle km-Stand (Fälligkeiten) berücksichtigt auch km-Beginn/-Ende der Fahrten.
 
 ## Entwicklung
 
@@ -235,3 +236,12 @@ OIDC_ISSUER=https://id.j-mb.net/realms/<realm> OIDC_CLIENT_ID=fahrzeugbuch-ios u
 ```
 
 CI (`.github/workflows/fahrzeugbuch.yml`, liegt im Repo-Root unter `.github/` – beim Umzug mitnehmen und Pfade `fahrzeugbuch/` anpassen): Tests gegen SQLite + PostgreSQL, Docker-Build, iOS-Simulator-Build.
+
+## Lizenz
+
+Copyright (C) 2026 odovio-Mitwirkende.
+
+odovio ist freie Software: Du kannst es unter den Bedingungen der **GNU Affero General Public License** Version 3
+oder (nach deiner Wahl) jeder späteren Version weitergeben und/oder ändern (SPDX: `AGPL-3.0-or-later`, Text in
+[`LICENSE`](LICENSE)). Wer eine geänderte Fassung als Netzdienst anbietet, muss den Nutzern den Quellcode dieser
+Fassung zugänglich machen (§ 13 AGPL).

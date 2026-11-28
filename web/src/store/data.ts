@@ -252,6 +252,7 @@ export function reset(tenant: string | null): void {
   dataState.loading = false
   dataState.error = null
   dataState.received = 0
+  lastAuto = 0
   store = emptyStore()
   memo.clear()
   statsCache.clear()
@@ -334,6 +335,22 @@ export function load(tenant: string, opts: { force?: boolean } = {}): Promise<vo
 
 export async function refresh(): Promise<void> {
   if (dataState.tenant) await load(dataState.tenant, { force: true })
+}
+
+/** Mindestabstand für das automatische Nachladen (Tab wieder sichtbar / Fenster wieder im Fokus). */
+export const STALE_MS = 60_000
+let lastAuto = 0
+
+/**
+ * Nachladen, wenn der Stand älter als `minAgeMs` ist (z. B. nach Rückkehr in den Tab: Änderungen aus der App).
+ * Gedrosselt: höchstens ein Versuch je `minAgeMs`, auch wenn das Laden fehlschlägt. Rückgabe null = nichts zu tun.
+ */
+export function refreshIfStale(minAgeMs = STALE_MS, now = Date.now()): Promise<void> | null {
+  const tenant = dataState.tenant
+  if (!tenant || !dataState.loaded || dataState.loading) return null
+  if (now - (dataState.loadedAt?.getTime() ?? 0) < minAgeMs || now - lastAuto < minAgeMs) return null
+  lastAuto = now
+  return load(tenant, { force: true })
 }
 
 // ---------- Kennzahlen (Server) ----------

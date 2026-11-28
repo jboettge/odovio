@@ -40,7 +40,7 @@ final class TripCoordinator {
     /// (Standort „Beim Verwenden“ → „Immer“, Bewegung & Fitness, Mitteilungen).
     var autoDetectEnabled: Bool {
         didSet {
-            guard oldValue != autoDetectEnabled else { return }
+            guard !restoringDefaults, oldValue != autoDetectEnabled else { return }
             UserDefaults.standard.set(autoDetectEnabled, forKey: Keys.autoDetect)
             refreshDetector()
             if autoDetectEnabled && configured {
@@ -51,24 +51,47 @@ final class TripCoordinator {
 
     /// Automatisch erkannte Fahrten im Privatmodus aufzeichnen (Default aus)
     var autoPrivateMode: Bool {
-        didSet { UserDefaults.standard.set(autoPrivateMode, forKey: Keys.autoPrivate) }
+        didSet { if !restoringDefaults { UserDefaults.standard.set(autoPrivateMode, forKey: Keys.autoPrivate) } }
     }
 
     /// Privatmodus: Gemeinde als Start/Ziel speichern (Default an; aus = nur km + Zeit)
     var privateMunicipalityEnabled: Bool {
-        didSet { UserDefaults.standard.set(privateMunicipalityEnabled, forKey: Keys.privateMunicipality) }
+        didSet {
+            if !restoringDefaults { UserDefaults.standard.set(privateMunicipalityEnabled, forKey: Keys.privateMunicipality) }
+        }
     }
 
-    var lastError: String?
+    var lastError: String? {
+        didSet { lastErrorOpensSettings = false }
+    }
+    /// `lastError` verweist auf die iOS-Einstellungen → UI zeigt «Einstellungen öffnen» (U2)
+    private(set) var lastErrorOpensSettings = false
 
     /// Standortberechtigung „Immer“ erteilt (für Hinweise in der UI)
     var hasAlwaysLocationAccess: Bool { authorizer.status == .authorizedAlways }
+
+    /// Der Dialog «Immer» wurde schon einmal gezeigt – iOS zeigt ihn nicht erneut, nur noch die
+    /// iOS-Einstellungen helfen (U3).
+    var alwaysPromptUsed: Bool { UserDefaults.standard.bool(forKey: Keys.askedAlways) }
+
+    /// Ergebnis von Start/Stopp für CarPlay (kurz) bzw. Siri/Kurzbefehle und Mitteilung (ausführlich).
+    struct ActionOutcome {
+        var ok: Bool
+        /// Kurz für CarPlay («Fahrt gestartet», «Kein Standardfahrzeug»)
+        var short: String
+        /// Ausführlich (Siri-Dialog, Mitteilung auf dem iPhone)
+        var detail: String
+        /// Details auch als Mitteilung aufs iPhone (z. B. Handlung nötig)
+        var notify: Bool
+    }
 
     private enum Keys {
         static let autoDetect = "tripAutoDetect"
         static let autoPrivate = "tripAutoPrivate"
         static let privateMunicipality = "tripPrivateMunicipality"
         static let askedAlways = "tripAskedAlwaysLocation"
+        /// Orte der Weck-Regionen (Q7): im Hintergrund ohne geöffneten Mandanten aus diesem Cache
+        static let monitoredPlaces = "tripMonitoredPlaces"
     }
 
     /// Auto-Fahrten unter dieser Distanz/Dauer gelten als Fehlalarm (Bus, Umparkieren)
@@ -78,6 +101,8 @@ final class TripCoordinator {
     static let maxResumeAge: TimeInterval = 12 * 3600
     /// Begründung für automatisch erfasste Fahrten in bereits abgeschlossenen Monaten (Server verlangt ≥ 10 Zeichen)
     static let lateEntryReason = "Nachtrag nach Monatsabschluss (automatisch aufgezeichnet)"
+    /// Auto-Erkennung getrennt (Bluetooth/CarPlay) → automatische Fahrt nach dieser Karenz beenden (Tankstopp)
+    static let disconnectGrace: TimeInterval = 120
 
     @ObservationIgnored private weak var settings: AppSettings?
     @ObservationIgnored private let recorder = TripRecorder()
@@ -94,6 +119,15 @@ final class TripCoordinator {
     @ObservationIgnored private var lastHousekeeping: (slug: String, at: Date)?
     @ObservationIgnored private var isSuggesting = false
     @ObservationIgnored private var backgroundTask: UIBackgroundTaskIdentifier = .invalid
+    /// Laufende Aufzeichnung gesperrt (Datei vorhanden, aber nicht lesbar) → beim Entsperren fortsetzen (Q1)
+    @ObservationIgnored private var activeLocked = false
+    @ObservationIgnored private var gapCheckRunning = false
+    @ObservationIgnored private var finishingParked = false
+    @ObservationIgnored private var disconnectStopTask: Task<Void, Never>?
+    /// Nachprüfen der Auto-Verbindung nach «im Auto» ohne Verbindung (Bluetooth verbindet verzögert)
+    @ObservationIgnored private var connectionRecheckTask: Task<Void, Never>?
+    /// Einstellungen werden nach der ersten Entsperrung nachgeladen (didSet schreibt nicht zurück, Q6)
+    @ObservationIgnored private var restoringDefaults = false
 
     private init() {
         let defaults = UserDefaults.standard
@@ -110,6 +144,17 @@ final class TripCoordinator {
         detector.onIdleDetected = { [weak self] in
             Task { await self?.handleIdle() }
         }
+        recorder.onStationary = { [weak self] stationary in
+            self?.detector.noteStationary(stationary)
+        }
+        CarConnectionMonitor.shared.onEvent = { [weak self] event in
+            Task { await self?.handleCarEvent(event) }
+        }
+        // Gesperrte Aufzeichnung (Q1) bzw. zurückgestellte Fahrten nach dem Entsperren abschliessen
+        _ = NotificationCenter.default.addObserver(
+            forName: UIApplication.protectedDataDidBecomeAvailableNotification, object: nil, queue: .main) { _ in
+            Task { @MainActor in TripCoordinator.shared.protectedDataBecameAvailable() }
+        }
     }
 
     // MARK: Öffentliche API
@@ -122,16 +167,30 @@ final class TripCoordinator {
             return
         }
         #endif
-        if !settings.auth.isLoggedIn && !settings.isLocal && !isRecording
+        if !settings.auth.isLoggedIn && !settings.isLocal && !isRecording && !settings.awaitingFirstUnlock
             && UIApplication.shared.isProtectedDataAvailable {
             tracks.deleteAll()   // keine Rohdaten ohne angemeldeten Benutzer
         }
         configured = true
         TripNotifications.shared.register()
         resumeIfNeeded()
+        finalizeParked()
         housekeeping(force: true)
         refreshDetector()
         refreshReminders()
+    }
+
+    /// Start vor der ersten Entsperrung (Q6): Einstellungen (Automatik, Privatmodus) waren nicht lesbar und
+    /// galten als «aus». Nach der Entsperrung laden und das Fahrtenbuch neu einrichten.
+    func reloadAfterFirstUnlock(settings: AppSettings) {
+        let defaults = UserDefaults.standard
+        restoringDefaults = true
+        autoDetectEnabled = defaults.bool(forKey: Keys.autoDetect)
+        autoPrivateMode = defaults.bool(forKey: Keys.autoPrivate)
+        privateMunicipalityEnabled = defaults.object(forKey: Keys.privateMunicipality) as? Bool ?? true
+        restoringDefaults = false
+        CarConnectionMonitor.shared.reloadAfterFirstUnlock()
+        configure(settings: settings)
     }
 
     func start(vehicle: Vehicle, privateMode: Bool) async {
@@ -142,8 +201,10 @@ final class TripCoordinator {
     /// (`nil`, wenn nichts lief, eine Auto-Fahrt zu kurz war oder kein Mandant verfügbar ist).
     func stop() async -> Trip? {
         guard isRecording, var a = active else { return nil }
-        let track = recorder.stop()
+        let track = recorder.stop()   // Ende = letzter Bewegungspunkt (Q2)
         detector.recordingEnded()
+        disconnectStopTask?.cancel()
+        disconnectStopTask = nil
         a.finished = track
         a.points = []
         a.distanceMeters = track.distanceKm * 1000
@@ -164,6 +225,7 @@ final class TripCoordinator {
         recordingStore = nil
         isFinishing = false
         endBackgroundWork()
+        finalizeParked()
         return trip
     }
 
@@ -183,7 +245,7 @@ final class TripCoordinator {
         var llmBudget = 20   // Server/LLM nicht fluten
         for trip in allTrips(store) where trip.status == "draft" && !trip.deleted {
             if let d = TripTime.parse(trip.startAt),
-               store.isMonthClosed(vehicleId: trip.vehicleId, month: TripTime.month(d)) { continue }
+               store.isMonthClosed(vehicleId: trip.vehicleId, month: LogbookRules.month(d)) { continue }
             guard let s = await suggestion(for: trip, store: store, endPoint: tracks.meta(tripId: trip.id)?.end,
                                            allowLLM: llmBudget > 0) else { continue }
             if s.source == "llm" { llmBudget -= 1 }
@@ -265,12 +327,12 @@ final class TripCoordinator {
         switch status {
         case .authorizedAlways:
             if !MotionPermission.isAuthorized {
-                lastError = "Für die automatische Erkennung „Bewegung & Fitness“ erlauben (Einstellungen › Fahrzeugbuch)."
+                setSettingsError("Für die automatische Erkennung «Bewegung & Fitness» erlauben (Einstellungen › odovio).")
             }
         case .denied, .restricted:
-            lastError = "Standortzugriff ist nicht erlaubt – Einstellungen › Fahrzeugbuch › Standort."
+            setSettingsError("Standortzugriff ist nicht erlaubt – Einstellungen › odovio › Standort.")
         default:
-            lastError = "Für die automatische Erkennung „Standort: Immer“ erlauben (Einstellungen › Fahrzeugbuch › Standort)."
+            setSettingsError("Für die automatische Erkennung «Standort: Immer» erlauben (Einstellungen › odovio › Standort).")
         }
         refreshDetector()
         refreshReminders()
@@ -291,16 +353,22 @@ final class TripCoordinator {
         await NotificationPermission.request()
         switch status {
         case .denied, .restricted:
-            lastError = "Standortzugriff ist nicht erlaubt – Einstellungen › Fahrzeugbuch › Standort."
+            setSettingsError("Standortzugriff ist nicht erlaubt – Einstellungen › odovio › Standort.")
         case .authorizedWhenInUse:
             if autoDetectEnabled {
-                lastError = "Für die automatische Erkennung „Standort: Immer“ erlauben (Einstellungen › Fahrzeugbuch)."
+                setSettingsError("Für die automatische Erkennung «Standort: Immer» erlauben (Einstellungen › odovio › Standort).")
             }
         default:
             break
         }
         refreshDetector()
         refreshReminders()
+    }
+
+    /// Fehlertext mit Verweis auf die iOS-Einstellungen (UI bietet «Einstellungen öffnen» an).
+    private func setSettingsError(_ text: String) {
+        lastError = text
+        lastErrorOpensSettings = true
     }
 
     // MARK: Mitteilungen, Hinweise
@@ -384,6 +452,9 @@ final class TripCoordinator {
     func resetLocalData() {
         recorder.cancel()
         detector.recordingEnded()
+        disconnectStopTask?.cancel()
+        disconnectStopTask = nil
+        activeLocked = false
         active = nil
         recordingStore = nil
         isRecording = false
@@ -397,31 +468,62 @@ final class TripCoordinator {
         tracks.deleteAll()
         lastHousekeeping = nil
         refreshDetector()
+        UserDefaults.standard.removeObject(forKey: Keys.monitoredPlaces)   // Orte des bisherigen Benutzers (Q7)
     }
 
     /// Für App-Intents: Fahrt mit dem Standardfahrzeug starten; Rückgabe = Text für Siri/Kurzbefehle.
     func startFromIntent(privateMode: Bool) async -> String {
-        guard configured, settings != nil else { return "Bitte die Fahrzeugbuch-App einmal öffnen." }
-        if isRecording { return "Es läuft bereits eine Fahrt." }
-        guard let store = await currentStore() else { return "Kein Fahrzeugbuch-Mandant verfügbar – bitte anmelden." }
-        guard let vehicle = defaultVehicle(store) else {
-            return "Kein Standardfahrzeug festgelegt – bitte in der App ein Fahrzeug wählen."
-        }
-        await startRecording(vehicle: vehicle, privateMode: privateMode, source: "manual")
-        if isRecording {
-            return privateMode ? "Privatfahrt mit \(vehicle.name) gestartet." : "Fahrt mit \(vehicle.name) gestartet."
-        }
-        return lastError ?? "Die Fahrt konnte nicht gestartet werden."
+        await startAction(privateMode: privateMode).detail
     }
 
     /// Für App-Intents: Fahrt beenden; Rückgabe = Text für Siri/Kurzbefehle.
     func stopFromIntent() async -> String {
-        guard isRecording else { return "Es läuft keine Fahrt." }
-        guard let trip = await stop() else {
-            return lastError ?? "Fahrt beendet – zu kurz, nichts gespeichert."
+        await stopAction().detail
+    }
+
+    /// Fahrt starten (Siri, Kurzbefehle, Quick Action, CarPlay). Fahrzeug: `preferredVehicleId` (z. B. «Fahrzeug
+    /// für CarPlay»), sonst das ausdrücklich gewählte Standardfahrzeug bzw. das einzige Fahrzeug (Q3).
+    func startAction(privateMode: Bool, preferredVehicleId: String? = nil) async -> ActionOutcome {
+        guard configured, settings != nil else {
+            return ActionOutcome(ok: false, short: "App öffnen", detail: "Bitte die odovio-App einmal öffnen.",
+                                 notify: true)
         }
-        let km = trip.distanceGps.map { $0.formatted(.number.precision(.fractionLength(1))) } ?? "0"
-        return "Fahrt beendet (ca. \(km) km). Bitte im Fahrtenbuch prüfen, Tachostand eintragen und bestätigen."
+        if isRecording {
+            return ActionOutcome(ok: false, short: "Fahrt läuft bereits", detail: "Es läuft bereits eine Fahrt.",
+                                 notify: false)
+        }
+        guard let store = await currentStore() else {
+            return ActionOutcome(ok: false, short: "Nicht angemeldet",
+                                 detail: "Kein Fahrzeugbuch verfügbar – bitte in der odovio-App anmelden.", notify: true)
+        }
+        guard let vehicle = automationVehicle(store, preferredId: preferredVehicleId) else {
+            return ActionOutcome(ok: false, short: "Kein Standardfahrzeug", detail: DefaultVehicleChoice.missingText,
+                                 notify: true)
+        }
+        await startRecording(vehicle: vehicle, privateMode: privateMode, source: "manual")
+        if isRecording {
+            let text = privateMode ? "Privatfahrt mit \(vehicle.name) gestartet." : "Fahrt mit \(vehicle.name) gestartet."
+            return ActionOutcome(ok: true, short: privateMode ? "Privatfahrt gestartet" : "Fahrt gestartet",
+                                 detail: text, notify: false)
+        }
+        return ActionOutcome(ok: false, short: "Start nicht möglich",
+                             detail: lastError ?? "Die Fahrt konnte nicht gestartet werden.", notify: true)
+    }
+
+    /// Fahrt beenden (Siri, Kurzbefehle, CarPlay).
+    func stopAction() async -> ActionOutcome {
+        guard isRecording else {
+            return ActionOutcome(ok: false, short: "Keine Fahrt aktiv", detail: "Es läuft keine Fahrt.", notify: false)
+        }
+        guard let trip = await stop() else {
+            let detail = lastError ?? "Fahrt beendet – zu kurz, nichts gespeichert."
+            return ActionOutcome(ok: false, short: "Fahrt beendet", detail: detail, notify: lastError != nil)
+        }
+        let km = TripNotifications.kmText(trip.distanceGps ?? 0)
+        return ActionOutcome(ok: true, short: "Fahrt beendet · \(km)",
+                             detail: "Fahrt beendet (ca. \(km)). Bitte im Fahrtenbuch prüfen, Tachostand eintragen "
+                                + "und bestätigen.",
+                             notify: true)
     }
 
     #if DEBUG
@@ -461,17 +563,23 @@ final class TripCoordinator {
         var status = authorizer.status
         if status == .notDetermined { status = await authorizer.requestWhenInUse() }
         guard status == .authorizedAlways || status == .authorizedWhenInUse else {
-            lastError = "Standortzugriff fehlt – Einstellungen › Fahrzeugbuch › Standort."
+            setSettingsError("Standortzugriff fehlt – Einstellungen › odovio › Standort.")
             return
         }
         guard !isRecording else { return }   // während der Abfrage gestartet
         let now = Date()
+        recorder.splitsOnGap = source == "auto"
         recorder.start(at: now, keepPoints: !privateMode)
         let a = TrackStore.ActiveRecording(tenant: store.tenant.slug, vehicleId: vehicle.id, startedAt: now,
                                            privateMode: privateMode, source: source, distanceMeters: 0,
                                            points: [], first: nil, last: nil, finished: nil)
         active = a
         recordingStore = store
+        if case .unreadable = tracks.loadActiveState() {
+            // Gesperrte frühere Aufzeichnung nicht löschen (Q1): zurückstellen, beim Entsperren abschliessen
+            tracks.parkActive()
+            activeLocked = false
+        }
         tracks.clearActive()   // alte Segmente entfernen
         tracks.saveActive(a)
         checkpointedPoints = 0
@@ -494,6 +602,7 @@ final class TripCoordinator {
             stopSuggested = false   // fährt wieder
             TripNotifications.shared.clearIdle()
         }
+        if recorder.pendingGap != nil { scheduleGapCheck() }
         checkpoint()
     }
 
@@ -505,6 +614,7 @@ final class TripCoordinator {
         guard now.timeIntervalSince(lastCheckpoint) >= 30 else { return }
         lastCheckpoint = now
         a.distanceMeters = recorder.distanceMeters
+        a.lastMovingAt = recorder.lastPoint.map { Date(timeIntervalSince1970: $0.ts) }
         if !a.privateMode {
             let points = recorder.points
             if points.count > checkpointedPoints {
@@ -520,8 +630,21 @@ final class TripCoordinator {
     }
 
     /// Nach Neustart: laufende Aufzeichnung fortsetzen bzw. gestoppte Fahrt fertigstellen.
+    /// Gesperrte Datei (Q1): nichts verwerfen, beim Entsperren (`protectedDataDidBecomeAvailable`) erneut.
     private func resumeIfNeeded() {
-        guard !isRecording, !isFinishing, let a = tracks.loadActive() else { return }
+        guard !isRecording, !isFinishing else { return }
+        let a: TrackStore.ActiveRecording
+        switch tracks.loadActiveState() {
+        case .none:
+            activeLocked = false
+            return
+        case .unreadable:
+            activeLocked = true
+            return
+        case .recording(let loaded):
+            activeLocked = false
+            a = loaded
+        }
         if let finished = a.finished {
             isFinishing = true
             Task {
@@ -532,11 +655,11 @@ final class TripCoordinator {
             return
         }
         let now = Date()
-        if now.timeIntervalSince(a.startedAt) > Self.maxResumeAge {
-            // App lange beendet: mit dem Stand des letzten Zwischenspeichers abschliessen
-            let end = a.last.map { Date(timeIntervalSince1970: $0.ts) } ?? a.startedAt
-            let track = TripRecorder.makeTrack(points: a.points, distanceMeters: a.distanceMeters, startAt: a.startedAt,
-                                               endAt: end, first: a.first, last: a.last, privateMode: a.privateMode)
+        if now.timeIntervalSince(a.startedAt) > Self.maxResumeAge
+            || RecordingGap.endsOnResume(source: a.source, lastMovingAt: a.lastMovement, now: now) {
+            // App lange beendet bzw. automatische Fahrt seit > 10 min ohne Bewegung (geparkt, Q2): am letzten
+            // Bewegungspunkt abschliessen statt fortsetzen – fährt man weiter, beginnt die Automatik eine neue Fahrt
+            let track = Self.staleTrack(a, now: now)
             var stale = a
             stale.finished = track
             let done = stale
@@ -549,6 +672,7 @@ final class TripCoordinator {
             }
             return
         }
+        recorder.splitsOnGap = a.source == "auto"
         recorder.resume(a)
         checkpointedPoints = a.privateMode ? 0 : a.points.count
         var resumed = a
@@ -564,19 +688,171 @@ final class TripCoordinator {
         detector.recordingStarted(auto: a.source == "auto")
     }
 
+    /// Abgebrochene Aufzeichnung ohne gespeichertes Ende: Track bis zum letzten Bewegungspunkt.
+    private static func staleTrack(_ a: TrackStore.ActiveRecording, now: Date) -> RecordedTrack {
+        let end = TripTiming.endDate(lastMovingTs: a.lastMovement.timeIntervalSince1970, startedAt: a.startedAt, now: now)
+        return TripRecorder.makeTrack(points: a.points, distanceMeters: a.distanceMeters, startAt: a.startedAt,
+                                      endAt: end, first: a.first, last: a.last, privateMode: a.privateMode)
+    }
+
+    /// Entsperrt: gesperrte Aufzeichnung fortsetzen/abschliessen, zurückgestellte Fahrten speichern.
+    private func protectedDataBecameAvailable() {
+        guard configured else { return }
+        #if DEBUG
+        if Demo.isActive { return }
+        #endif
+        if activeLocked { resumeIfNeeded() }
+        finalizeParked()
+    }
+
+    /// Zurückgestellte Aufzeichnungen (gesperrt beim Start einer neuen Fahrt bzw. an einer Lücke abgetrennt)
+    /// als Entwurf speichern.
+    private func finalizeParked() {
+        guard configured, !finishingParked else { return }
+        #if DEBUG
+        if Demo.isActive { return }
+        #endif
+        let parked = tracks.parkedRecordings()
+        guard !parked.isEmpty else { return }
+        finishingParked = true
+        Task {
+            for item in parked {
+                let track = item.recording.finished ?? Self.staleTrack(item.recording, now: Date())
+                _ = await self.finalize(item.recording, track: track)
+                self.tracks.removeParked(item.directory)
+            }
+            self.finishingParked = false
+        }
+    }
+
+    // MARK: Lücken (Q2)
+
+    /// Bewegung nach > 10 min Lücke: CoreMotion-Historie der Lücke prüfen – Stau (überwiegend «automotive»)
+    /// bleibt eine Fahrt, sonst endet die alte Fahrt am letzten Punkt und die neue beginnt.
+    private func scheduleGapCheck() {
+        guard !gapCheckRunning, let gap = recorder.pendingGap else { return }
+        gapCheckRunning = true
+        let gapStart = Date(timeIntervalSince1970: gap.lastBefore.ts)
+        let gapEnd = Date(timeIntervalSince1970: gap.firstAfter.ts)
+        Task {
+            let samples = await self.detector.motionHistory(from: gapStart, to: gapEnd)
+            self.gapCheckRunning = false
+            guard self.isRecording, self.recorder.pendingGap != nil else { return }
+            if RecordingGap.shouldSplit(gapStart: gapStart, gapEnd: gapEnd, samples: samples) {
+                self.splitAtGap()
+            } else {
+                self.recorder.acceptGap()
+            }
+        }
+    }
+
+    /// Fahrt an der Lücke teilen: erster Teil wird zurückgestellt und gespeichert, die Aufzeichnung läuft als
+    /// neue Fahrt (gleiches Fahrzeug, gleiche Quelle) ohne Unterbruch weiter.
+    private func splitAtGap() {
+        guard isRecording, var old = active, let split = recorder.splitAtGap() else { return }
+        old.finished = split.track
+        old.points = []
+        old.distanceMeters = split.track.distanceKm * 1000
+        old.lastMovingAt = split.track.endAt
+        tracks.park(old)   // zuerst sichern, dann die laufende Aufzeichnung ersetzen
+
+        var next = TrackStore.ActiveRecording(tenant: old.tenant, vehicleId: old.vehicleId, startedAt: split.newStart,
+                                              privateMode: old.privateMode, source: old.source,
+                                              distanceMeters: recorder.distanceMeters, points: [], first: nil,
+                                              last: nil, finished: nil)
+        next.lastMovingAt = recorder.lastPoint.map { Date(timeIntervalSince1970: $0.ts) }
+        if !next.privateMode {
+            next.first = recorder.firstPoint
+            next.last = recorder.lastPoint
+        }
+        tracks.clearActive()
+        if !next.privateMode && !recorder.points.isEmpty { tracks.appendActivePoints(recorder.points) }
+        checkpointedPoints = next.privateMode ? 0 : recorder.points.count
+        active = next
+        tracks.saveActive(next)
+        lastCheckpoint = Date()
+        recordingStartedAt = split.newStart
+        liveDistanceKm = (recorder.distanceMeters / 10).rounded() / 100
+        stopSuggested = false
+        detector.recordingStarted(auto: next.source == "auto")
+        finalizeParked()
+    }
+
     // MARK: Automatik
 
-    private func autoStart() async {
+    /// Start der Automatik (CoreMotion «automotive» bzw. Verbindung zum Auto). Mit Auto-Erkennung startet
+    /// «automotive» nur, wenn CarPlay bzw. ein gelerntes Bluetooth-Gerät verbunden ist (Route bei jedem
+    /// Weck-Ereignis neu gelesen); `known` = Verbindung, die den Start ausgelöst hat.
+    private func autoStart(connection known: CarConnection? = nil) async {
         guard autoDetectEnabled, !isRecording, !isFinishing else { return }
         #if DEBUG
         if Demo.isActive { return }
         #endif
+        let car = CarConnectionMonitor.shared
+        let connection = known ?? car.connectionNow()
+        guard known != nil || CarRouteMatcher.motionStartAllowed(mode: car.mode, connection: connection) else {
+            // iOS meldet «im Auto», aber (noch) keine Verbindung: Autoradio/CarPlay verbindet oft erst nach
+            // dem Losfahren → Route kurz nachprüfen; eine neue Verbindung startet über handleCarEvent.
+            scheduleConnectionRecheck()
+            return
+        }
         guard let store = await currentStore(), store.canWrite else { return }
-        guard let vehicle = defaultVehicle(store) else {
-            lastError = "Automatik: kein Standardfahrzeug festgelegt."
+        guard let vehicle = automationVehicle(store, preferredId: connection?.vehicleId) else {
+            lastError = "Automatik: " + DefaultVehicleChoice.missingText
             return
         }
         await startRecording(vehicle: vehicle, privateMode: autoPrivateMode, source: "auto")
+    }
+
+    /// CarPlay/Bluetooth verbunden bzw. getrennt (`CarConnectionMonitor`).
+    private func handleCarEvent(_ event: CarConnectionEvent) async {
+        guard configured else { return }
+        #if DEBUG
+        if Demo.isActive { return }
+        #endif
+        switch event {
+        case .connected(let connection):
+            disconnectStopTask?.cancel()
+            disconnectStopTask = nil
+            guard autoDetectEnabled, !isRecording, !isFinishing,
+                  CarRouteMatcher.connectStartAllowed(mode: CarConnectionMonitor.shared.mode, connection: connection,
+                                                      lastCarMotionAt: detector.lastCarMotionAt) else { return }
+            connectionRecheckTask?.cancel()
+            connectionRecheckTask = nil
+            await autoStart(connection: connection)
+        case .disconnected:
+            // Starkes Stopp-Signal, aber mit Karenz (Tankstopp, kurz unterbrochene Verbindung)
+            guard isRecording, recordingSource == "auto" else { return }
+            disconnectStopTask?.cancel()
+            disconnectStopTask = Task { [weak self] in
+                try? await Task.sleep(nanoseconds: UInt64(TripCoordinator.disconnectGrace * 1_000_000_000))
+                guard !Task.isCancelled else { return }
+                await self?.stopAfterDisconnect()
+            }
+        }
+    }
+
+    /// Route nach 15 s, 45 s und 90 s erneut lesen (solange die App wach ist). Kommt eine Verbindung hinzu,
+    /// meldet der Monitor `.connected` und `handleCarEvent` startet die Fahrt (Fenster `pairingWindow`).
+    private func scheduleConnectionRecheck() {
+        guard connectionRecheckTask == nil, !CarConnectionMonitor.shared.mode.isOff else { return }
+        connectionRecheckTask = Task { [weak self] in
+            for delay in [15.0, 30.0, 45.0] {
+                try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                guard !Task.isCancelled, let self else { return }
+                if self.isRecording { break }
+                CarConnectionMonitor.shared.refresh()
+            }
+            self?.connectionRecheckTask = nil
+        }
+    }
+
+    private func stopAfterDisconnect() async {
+        disconnectStopTask = nil
+        guard isRecording, recordingSource == "auto", CarConnectionMonitor.shared.connectionNow() == nil else { return }
+        // Fährt noch (Verbindung nur weg)? Dann regulär über die Bewegungserkennung beenden
+        guard !detector.movedRecently(within: 60) else { return }
+        _ = await stop()   // Ende = letzter Bewegungspunkt
     }
 
     private func autoStop() async {
@@ -598,11 +874,21 @@ final class TripCoordinator {
         }
     }
 
+    /// Orte für die Weck-Regionen. Ohne geöffneten (bzw. noch gesperrten) Mandanten – z. B. Start im
+    /// Hintergrund im Servermodus – die zuletzt bekannten Orte aus dem Cache, damit die Regionen nicht
+    /// entfernt werden (Q7).
     private func monitoredPlaces() -> [MonitoredPlace] {
-        (settings?.store?.placeList ?? []).compactMap { p in
+        let defaults = UserDefaults.standard
+        guard let store = settings?.store, !store.isPersistenceBlocked else {
+            return defaults.data(forKey: Keys.monitoredPlaces)
+                .flatMap { try? JSONDecoder().decode([MonitoredPlace].self, from: $0) } ?? []
+        }
+        let list: [MonitoredPlace] = store.placeList.compactMap { p in
             guard !p.deleted, let lat = p.lat, let lon = p.lon else { return nil }
             return MonitoredPlace(id: p.id, lat: lat, lon: lon, radius: Double(p.radiusM))
         }
+        defaults.set(try? JSONEncoder().encode(list), forKey: Keys.monitoredPlaces)
+        return list
     }
 
     // MARK: Entwurf erstellen
@@ -715,7 +1001,7 @@ final class TripCoordinator {
         }
 
         var reason: String?
-        if let store, store.isMonthClosed(vehicleId: a.vehicleId, month: TripTime.month(track.startAt)) {
+        if let store, store.isMonthClosed(vehicleId: a.vehicleId, month: LogbookRules.month(track.startAt)) {
             trip.note = "Nachtrag nach Monatsabschluss"
             reason = Self.lateEntryReason
         }
@@ -735,7 +1021,7 @@ final class TripCoordinator {
             tracks.save(track, tripId: trip.id, tenant: a.tenant, vehicleId: a.vehicleId,
                         confirmed: trip.status == "confirmed")
             if a.source == "auto", let saved = store.trip(id: trip.id) {
-                await TripNotifications.shared.notifyDetected(saved, tenant: a.tenant, route: store.routeText(saved))
+                await TripNotifications.shared.notifyDetected(saved, tenant: a.tenant)
             }
             refreshReminders()
             return trip
@@ -745,7 +1031,7 @@ final class TripCoordinator {
             tracks.addPending(trip, tenant: a.tenant)
             tracks.save(track, tripId: trip.id, tenant: a.tenant, vehicleId: a.vehicleId,
                         confirmed: trip.status == "confirmed")
-            lastError = "Fahrt gespeichert – erscheint beim Öffnen von Mandant „\(a.tenant)“."
+            lastError = "Fahrt gespeichert – erscheint beim Öffnen von Mandant «\(a.tenant)»."
             return trip
         }
         lastError = "Fahrt konnte nicht gespeichert werden (nicht angemeldet oder keine Schreibberechtigung)."
@@ -844,10 +1130,13 @@ final class TripCoordinator {
         return nil
     }
 
-    private func defaultVehicle(_ store: TenantStore) -> Vehicle? {
-        if let id = store.defaultVehicleId, let v = store.vehicle(id: id), !v.deleted { return v }
-        let list = store.vehicleList
-        return list.count == 1 ? list.first : nil
+    /// Fahrzeug für Automatik/Siri/CarPlay (Q3): Zuordnung der Auto-Erkennung, sonst ausdrücklich gewähltes
+    /// Standardfahrzeug, sonst das einzige Fahrzeug – nie stillschweigend das alphabetisch erste.
+    private func automationVehicle(_ store: TenantStore, preferredId: String? = nil) -> Vehicle? {
+        let ids = store.vehicleList.map(\.id)
+        guard let id = DefaultVehicleChoice.automation(preferredId: preferredId, storedId: store.explicitDefaultVehicleId,
+                                                       activeIds: ids) else { return nil }
+        return store.vehicle(id: id)
     }
 
     private func allTrips(_ store: TenantStore) -> [Trip] {

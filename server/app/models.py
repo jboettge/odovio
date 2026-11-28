@@ -53,6 +53,8 @@ class Vehicle(Synced, Base):
     ownership: Mapped[str | None] = mapped_column(String(20))            # private | business
     private_use_method: Mapped[str | None] = mapped_column(String(20))   # flat | effective
     annual_fixed_costs: Mapped[float | None] = mapped_column(Float)      # Versicherung, Steuer, Leasing, AfA
+    # Fahrzeug-Identifizierungsnummer (Alembic 0005, nullable; normalisiert: 17 Zeichen ohne I/O/Q)
+    vin: Mapped[str | None] = mapped_column(String(17))
 
 
 class OdometerReading(Synced, Base):
@@ -334,8 +336,8 @@ class VerifyCheckpoint(Base):
     Hash-Kette und Abgleich Datensatz ↔ Journal sind bis `seq` (Kettenkopf `head_hash`) bestätigt; die letzte
     Vollprüfung lief am `full_at` auf dem Stand `full_seq`. Kein Teil des Journals (veränderlich, eine Zeile je
     Mandant); mit ANCHOR_SIGNING_KEY Ed25519-signiert. Fehlend, ungültig oder `full_at` NULL → Vollprüfung.
-    `failed_seq`: Stand des letzten Befunds – danach gilt erst wieder eine fehlerfreie Vollprüfung mit
-    grösserem Stand."""
+    `failed_seq`: Stand des letzten Befunds (`verified_at` dann = Zeitpunkt des Befunds) – danach gilt erst wieder
+    eine fehlerfreie Vollprüfung mit grösserem Stand oder eine, die nach dem Befund begonnen hat."""
 
     __tablename__ = "verify_checkpoints"
 

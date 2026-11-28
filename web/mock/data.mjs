@@ -183,7 +183,7 @@ function place(t, actor, when, p) {
 }
 
 function vehicleBase(v) {
-  return { make: null, model: null, plate: null, fuel_type: 'benzin', initial_km: 0, purchase_price: null, ownership: null, private_use_method: null, annual_fixed_costs: null, ...v }
+  return { make: null, model: null, plate: null, fuel_type: 'benzin', initial_km: 0, purchase_price: null, ownership: null, private_use_method: null, annual_fixed_costs: null, vin: null, ...v }
 }
 
 function tripRow(vehicleId, driver, start, end, kmStart, kmEnd, extra = {}) {
@@ -359,7 +359,7 @@ export function buildDemo(now = new Date()) {
       t.record('material_article', { id: did(8), name: 'Scheibenwischer-Set', part_number: null, unit: 'Set', unit_price: 39.9, category: 'Verschleiss', vehicle_id: null, note: 'Bosch Aerotwin' }, 'create', actor, start),
     ]
 
-    const skoda = t.record('vehicle', vehicleBase({ id: did(9), name: 'Skoda Octavia', make: 'Skoda', model: 'Octavia Combi', plate: 'ZH 123 456', fuel_type: 'benzin', initial_km: 0, purchase_price: 38900, ownership: 'private', annual_fixed_costs: 2350 }), 'create', actor, start)
+    const skoda = t.record('vehicle', vehicleBase({ id: did(9), name: 'Skoda Octavia', make: 'Skoda', model: 'Octavia Combi', plate: 'ZH 123 456', vin: 'TMBJJ7NE5L0123456', fuel_type: 'benzin', initial_km: 0, purchase_price: 38900, ownership: 'private', annual_fixed_costs: 2350 }), 'create', actor, start)
     const corolla = t.record('vehicle', vehicleBase({ id: did(9), name: 'Toyota Corolla', make: 'Toyota', model: 'Corolla Hybrid', plate: 'ZH 987 654', fuel_type: 'hybrid', initial_km: 0, ownership: 'private', annual_fixed_costs: 1900 }), 'create', anna.name, start)
 
     const tripsFrom = new Date(today.getFullYear(), today.getMonth() - 5, 1)
@@ -431,9 +431,9 @@ export function buildDemo(now = new Date()) {
     }
 
     t.members = [
-      { id: 'm-jakob', username: 'jakob', name: jakob.name, email: jakob.email, role: 'admin', source: 'keycloak', last_activity_at: new Date(now.getTime() - 3_600_000).toISOString() },
-      { id: 'm-anna', username: 'anna', name: anna.name, email: anna.email, role: 'write', source: 'keycloak', last_activity_at: addDays(today, -2).toISOString() },
-      { id: 'm-treuhand', username: 'treuhand', name: USERS.treuhand.name, email: USERS.treuhand.email, role: 'read', source: 'keycloak', last_activity_at: addDays(today, -21).toISOString() },
+      { id: 'u-jakob', username: 'jakob', name: jakob.name, email: jakob.email, role: 'admin', source: 'keycloak', last_activity_at: new Date(now.getTime() - 3_600_000).toISOString() },
+      { id: 'u-anna', username: 'anna', name: anna.name, email: anna.email, role: 'write', source: 'keycloak', last_activity_at: addDays(today, -2).toISOString() },
+      { id: 'u-treuhand', username: 'treuhand', name: USERS.treuhand.name, email: USERS.treuhand.email, role: 'read', source: 'keycloak', last_activity_at: addDays(today, -21).toISOString() },
     ]
   }
 
@@ -458,9 +458,9 @@ export function buildDemo(now = new Date()) {
     for (const e of sim.events.sort((a, b) => a.when - b.when)) t.record(e.kind, e.row, 'create', lea.name, e.when)
     t.record('maintenance', { id: did(11), vehicle_id: caddy.id, date: isoDate(addDays(today, -60)), km: 18230 - 2300, title: 'Service', cost: 512.4, note: null, next_due_km: 18230 + 12000, next_due_date: null }, 'create', actor, addDays(today, -60))
     t.members = [
-      { id: 'm-jakob', username: 'jakob', name: jakob.name, email: jakob.email, role: 'admin', source: 'keycloak', last_activity_at: new Date(now.getTime() - 7_200_000).toISOString() },
-      { id: 'm-lea', username: 'lea', name: lea.name, email: lea.email, role: 'write', source: 'keycloak', last_activity_at: addDays(today, -1).toISOString() },
-      { id: 'm-treuhand', username: 'treuhand', name: USERS.treuhand.name, email: USERS.treuhand.email, role: 'read', source: 'keycloak', last_activity_at: null },
+      { id: 'u-jakob', username: 'jakob', name: jakob.name, email: jakob.email, role: 'admin', source: 'keycloak', last_activity_at: new Date(now.getTime() - 7_200_000).toISOString() },
+      { id: 'u-lea', username: 'lea', name: lea.name, email: lea.email, role: 'write', source: 'keycloak', last_activity_at: addDays(today, -1).toISOString() },
+      { id: 'u-treuhand', username: 'treuhand', name: USERS.treuhand.name, email: USERS.treuhand.email, role: 'read', source: 'keycloak', last_activity_at: null },
     ]
   }
 

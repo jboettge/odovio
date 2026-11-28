@@ -111,6 +111,8 @@ struct VehicleListView: View {
             .task(id: dataKey) { await refreshStats() }
             .onAppear { handleRoute() }
             .onChange(of: AppRouter.shared.pending) { _, _ in handleRoute() }
+            // Route wartet, bis das offene Blatt geschlossen ist (U5)
+            .onChange(of: isPresentingSheet) { _, open in if !open { handleRoute() } }
         }
     }
 
@@ -189,7 +191,8 @@ struct VehicleListView: View {
                 parts.append("\(v.id)|\(d.id)|\(d.nextDueDate?.timeIntervalSince1970 ?? 0)|\(d.overdue)")
             }
         }
-        let signature = parts.joined(separator: ",")
+        // Mit Tagesdatum: täglich neu planen (iOS-Grenze 64 – spätere Erinnerungen rücken nach, Q14)
+        let signature = LogbookRules.day(Date()) + "|" + parts.joined(separator: ",")
         if signature != lastDueSignature {
             lastDueSignature = signature
             await DueNotifications.reschedule(store)
@@ -215,8 +218,15 @@ struct VehicleListView: View {
         return store.defaultVehicleId.flatMap { store.vehicle(id: $0) }
     }
 
+    /// Ein Blatt dieser Ansicht ist offen – ein weiteres liesse sich nicht präsentieren.
+    private var isPresentingSheet: Bool {
+        form != nil || quick != nil || showSettings || sharedRoute != nil
+    }
+
+    /// Route (Quick Action, CarPlay, Mitteilung) öffnen. Ist schon ein Blatt offen, bleibt sie bestehen und wird
+    /// nach dessen Schliessen geöffnet – erst dann geleert (U5).
     private func handleRoute() {
-        guard let route = AppRouter.shared.pending else { return }
+        guard let route = AppRouter.shared.pending, !isPresentingSheet else { return }
         AppRouter.shared.pending = nil
         switch route {
         case .addFuel(let id):
@@ -315,10 +325,29 @@ struct VehicleFormView: View {
     @State private var method = "flat"
     @State private var purchasePrice = ""
     @State private var fixedCosts = ""
+    @State private var vin = ""
+    @State private var showVINScanner = false
+    @FocusState private var vinFocused: Bool
     @State private var initial = ""
 
     private var snapshot: String {
-        FormSnapshot.make([name, make, model, plate, fuelType, initialKm, ownership, method, purchasePrice, fixedCosts])
+        FormSnapshot.make([name, make, model, plate, fuelType, initialKm, ownership, method, purchasePrice, fixedCosts,
+                           VIN.normalize(vin)])
+    }
+
+    /// Leer oder 17 gültige Zeichen (nach Normalisierung)
+    private var vinValid: Bool { VIN.isAcceptable(vin) }
+
+    @ViewBuilder
+    private var vinFooter: some View {
+        let normalized = VIN.normalize(vin)
+        if !vinValid && !vinFocused {
+            Text(VIN.errorText).foregroundStyle(Color.dangerText)
+        } else if let warning = VIN.warning(normalized) {
+            Text(warning).foregroundStyle(Color.warningText)
+        } else {
+            Text(VIN.hintText)
+        }
     }
 
     private var hasChanges: Bool { snapshot != initial }
@@ -352,6 +381,31 @@ struct VehicleFormView: View {
                     }
                 }
                 Section {
+                    TextField("VIN / Fahrgestellnummer", text: $vin)
+                        .font(.body.monospaced())
+                        .textInputAutocapitalization(.characters)
+                        .autocorrectionDisabled()
+                        .keyboardType(.asciiCapable)
+                        .focused($vinFocused)
+                        .onSubmit { vin = VIN.normalize(vin) }
+                        .onChange(of: vinFocused) { _, focused in
+                            if !focused { vin = VIN.normalize(vin) }
+                        }
+                    if store.canWrite {
+                        Button {
+                            vinFocused = false
+                            showVINScanner = true
+                        } label: {
+                            Label("VIN scannen", systemImage: "barcode.viewfinder")
+                        }
+                        .accessibilityHint("Strichcode oder Aufdruck mit der Kamera erkennen")
+                    }
+                } header: {
+                    Text("Identifikation")
+                } footer: {
+                    vinFooter
+                }
+                Section {
                     UnitField("Kilometerstand", text: $initialKm, unit: "km", keyboard: .numberPad)
                 } header: {
                     Text("Startkilometerstand")
@@ -382,8 +436,12 @@ struct VehicleFormView: View {
                 }
             }
             .navigationTitle(titleText)
-            .formToolbar(canSave: store.canWrite && !name.trimmed.isEmpty && costsValid, hasChanges: hasChanges,
-                         save: save)
+            .keyboardDoneToolbar()   // Zahlentastatur ohne Eingabetaste (U7)
+            .formToolbar(canSave: store.canWrite && !name.trimmed.isEmpty && costsValid && vinValid,
+                         hasChanges: hasChanges, save: save)
+            .fullScreenCover(isPresented: $showVINScanner) {
+                VINScannerSheet { found in vin = found }
+            }
             .onAppear {
                 defer { if initial.isEmpty { initial = snapshot } }
                 guard let v = vehicle, initial.isEmpty else { return }
@@ -397,6 +455,7 @@ struct VehicleFormView: View {
                 method = v.privateUseMethod ?? "flat"
                 purchasePrice = v.purchasePrice.map { Fmt.edit($0) } ?? ""
                 fixedCosts = v.annualFixedCosts.map { Fmt.edit($0) } ?? ""
+                vin = v.vin ?? ""
             }
         }
     }
@@ -416,6 +475,7 @@ struct VehicleFormView: View {
         }
         v.purchasePrice = purchasePrice.asDouble
         v.annualFixedCosts = fixedCosts.asDouble
+        v.vin = VIN.normalized(vin)          // leer → nil (Feld wird dann nicht kodiert)
         store.save(v)
     }
 }

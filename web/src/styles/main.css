@@ -3,6 +3,8 @@
   color-scheme: light;
   --bg: #f3f4f7;
   --surface: #ffffff;
+  --brand-ink: #12213a;
+  --brand-amber: #f2a541;
   --surface-2: #f0f2f5;
   --surface-3: #e5e8ed;
   --border: #d5dae1;
@@ -52,6 +54,7 @@
     color-scheme: dark;
     --bg: #0e1014;
     --surface: #171a20;
+    --brand-ink: #eef0f4;
     --surface-2: #1e222a;
     --surface-3: #282d37;
     --border: #2f3541;
@@ -204,14 +207,19 @@ a:hover {
   color: var(--text);
   text-decoration: none;
 }
-.brand-logo {
-  width: 30px;
-  height: 30px;
-  border-radius: 8px;
-  background: var(--accent);
-  color: var(--on-accent);
-  display: grid;
-  place-items: center;
+/* odovio-Bildmarke: Linien in Textfarbe, Nadeln im Marken-Akzent (Tankwarnleuchte) */
+.brand-mark {
+  flex: none;
+  color: var(--brand-ink);
+}
+.brand-needle {
+  stroke: var(--brand-amber);
+}
+.brand-knockout {
+  fill: var(--surface);
+}
+.brand {
+  letter-spacing: -0.02em;
 }
 
 .topbar {
@@ -313,33 +321,64 @@ a:hover {
     padding: 20px 20px 48px;
   }
 }
+/* Menü-Knopf nur auf schmalen Bildschirmen */
+.topbar .nav-toggle {
+  display: none;
+}
 @media (max-width: 760px) {
   .shell {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
     grid-template-rows: auto auto 1fr;
     grid-template-areas: 'header' 'nav' 'main';
   }
   .brand {
     display: none;
   }
+  /* Navigation als Ausklappmenü unter der Kopfzeile; Kopfzeile scrollt mit (nicht sticky) */
+  .topbar .nav-toggle {
+    display: inline-flex;
+  }
   .sidenav {
+    display: none;
     position: static;
     height: auto;
     border-right: 0;
     border-bottom: 1px solid var(--border);
-    padding: 8px 12px;
+    padding: 4px 12px 12px;
+  }
+  .sidenav.is-open {
+    display: block;
   }
   .sidenav ul {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 4px;
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(min(100%, 10.5rem), 1fr));
+    gap: 2px 8px;
   }
   .sidenav-section {
-    display: none;
+    margin: 12px 10px 4px;
   }
   .topbar {
-    padding: 0 16px;
+    position: static;
+    padding: 8px 16px;
+    gap: 8px 12px;
     flex-wrap: wrap;
+    min-height: var(--header-h);
+  }
+  .topbar .tenant-switch {
+    min-width: 0;
+  }
+  .topbar .tenant-switch .select {
+    max-width: 56vw;
+  }
+  /* Beschriftung «Fahrzeugbuch» und Name des Kontos nur für Screenreader (Konto ist auch im Menü) */
+  .topbar .tenant-switch > .muted,
+  .topbar-user .topbar-user-name {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
   }
   .main {
     padding: 16px 16px 40px;
@@ -398,7 +437,14 @@ a:hover {
 .card-header .actions {
   margin-left: auto;
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
+  min-width: 0;
+}
+/* Auswahl in der Kopfzeile nur so breit wie nötig (sonst rutscht der Knopf daneben in eine neue Zeile) */
+.card-header .actions .select {
+  width: auto;
+  max-width: 100%;
 }
 .card-flush {
   padding: 0;
@@ -430,10 +476,10 @@ a:hover {
   grid-template-columns: repeat(4, minmax(0, 1fr));
 }
 .grid-tiles {
-  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(320px, 100%), 1fr));
 }
 .grid-kpi {
-  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(180px, 100%), 1fr));
 }
 @media (max-width: 1100px) {
   .grid-4 {
@@ -447,7 +493,8 @@ a:hover {
   .grid-2,
   .grid-3,
   .grid-4 {
-    grid-template-columns: 1fr;
+    /* minmax(0, …): breite Inhalte (Tabellen, lange Werte) dürfen die Spalte nicht über 390 px aufweiten */
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 .stack {
@@ -476,6 +523,11 @@ a:hover {
 .mono {
   font-family: var(--mono);
   font-size: 0.85em;
+  /* lange Schlüssel/Hashes umbrechen statt die Seite zu verbreitern (in Tabellen scrollt der Container) */
+  overflow-wrap: anywhere;
+}
+.table .mono {
+  overflow-wrap: normal;
 }
 .nowrap {
   white-space: nowrap;
@@ -574,7 +626,7 @@ a:hover {
 }
 .dl {
   display: grid;
-  grid-template-columns: minmax(140px, max-content) 1fr;
+  grid-template-columns: minmax(min(140px, 40%), max-content) minmax(0, 1fr);
   gap: 8px 20px;
   margin: 0;
 }
@@ -583,6 +635,8 @@ a:hover {
 }
 .dl dd {
   margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .plate {
@@ -883,6 +937,10 @@ a:hover {
 .form-grid .span-2 {
   grid-column: span 2;
 }
+/* Von/Bis in schmalen Karten: Datumsfelder nicht abschneiden, bei Platzmangel untereinander */
+.form-grid.date-range {
+  grid-template-columns: repeat(auto-fit, minmax(10.5rem, 1fr));
+}
 @media (max-width: 640px) {
   .form-grid {
     grid-template-columns: 1fr;
@@ -896,6 +954,8 @@ a:hover {
   border-radius: var(--radius-sm);
   padding: 12px 14px;
   margin: 0;
+  /* Standard min-width:min-content würde breite Inhalte (lange Auswahllisten) über den Dialog hinausschieben */
+  min-width: 0;
 }
 .fieldset legend {
   font-weight: 650;
@@ -919,6 +979,8 @@ a:hover {
 
 /* ---------- Tabellen ---------- */
 .table-wrap {
+  /* position: hält absolut positionierte .sr-only-Labels im scrollenden Container (sonst Seitenbreite > 390 px) */
+  position: relative;
   overflow-x: auto;
   border: 1px solid var(--border);
   border-radius: var(--radius);
@@ -973,6 +1035,15 @@ table.table {
 .table td.actions {
   white-space: nowrap;
   text-align: right;
+}
+.role-edit {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.role-edit .select {
+  width: auto;
 }
 .table tfoot td {
   font-weight: 650;
@@ -1395,6 +1466,11 @@ details.data-table summary {
   padding: 8px;
   font-size: 0.85rem;
 }
+.thumb-error {
+  display: grid;
+  gap: 6px;
+  justify-items: center;
+}
 .thumb-cap {
   padding: 6px 8px;
   font-size: 0.8rem;
@@ -1454,14 +1530,8 @@ details.data-table summary {
   padding: 32px;
 }
 .start-logo {
-  width: 52px;
-  height: 52px;
-  border-radius: 14px;
-  background: var(--accent);
-  color: var(--on-accent);
-  display: grid;
-  place-items: center;
-  margin-bottom: 18px;
+  display: flex;
+  margin-bottom: 14px;
 }
 .tenant-list {
   list-style: none;
@@ -1659,4 +1729,91 @@ dl.stack dd {
 }
 .data-table-note {
   margin: 6px 0 0;
+}
+
+/* Quellcode-Link (AGPL-3.0 § 13) */
+.source-link {
+  margin: 18px 10px 0;
+  color: var(--text-3);
+}
+.sidenav .source-link a {
+  display: inline;
+  padding: 0;
+  color: var(--text-3);
+  text-decoration: underline;
+}
+
+/* Belege im Formular */
+.receipt-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.receipt-list li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.receipt-list li > span:first-of-type {
+  flex: 1 1 200px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.file-input:focus-visible + label {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+.mb-1 {
+  margin-bottom: 8px;
+}
+/* Unterpositionen im Formular (Checkliste, Material) */
+.subrows {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.subrow {
+  display: grid;
+  gap: 8px;
+  align-items: end;
+}
+.subrow-check {
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: start;
+}
+.subrow-check > .check,
+.subrow-check > .btn {
+  min-height: 36px;
+}
+.subrow-material {
+  grid-template-columns: minmax(0, 2fr) minmax(0, 1fr) minmax(0, 0.7fr) minmax(0, 0.6fr) minmax(0, 0.8fr) minmax(76px, auto) auto;
+}
+.subrow-total {
+  min-height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  font-variant-numeric: tabular-nums;
+}
+@media (max-width: 640px) {
+  .subrow-material {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    align-items: end;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--border);
+  }
+}
+.field-warn {
+  color: var(--warn);
+  font-size: 0.82rem;
+}
+.select-inline {
+  width: auto;
+  max-width: 100%;
+  min-width: 0;
+  flex: 0 1 auto;
 }

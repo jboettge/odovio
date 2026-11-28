@@ -19,6 +19,9 @@ revision: str = '0004'
 down_revision: str | None = '0003'
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
+# Läuft der Code der Vorgängerrevision unverändert auf diesem Stand? (neue Tabelle, die Code von 0003 nicht kennt und nicht braucht)
+# → app.migrate: Readiness/Rollback eines älteren Images
+compatible_with_previous = True
 
 TABLE = 'verify_checkpoints'
 

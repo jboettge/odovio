@@ -72,7 +72,7 @@ struct SettingsView: View {
 
             if settings.isLocal, let store = settings.store {
                 catalogSection(store)
-                tripSection
+                tripSection(store)
                 geocodingSection
                 backupSection(store)
                 localIntegritySection(store)
@@ -92,7 +92,7 @@ struct SettingsView: View {
                 if let store = settings.store {
                     sharedSection(store)
                     catalogSection(store)
-                    tripSection
+                    tripSection(store)
                     dataSection(store)
                 }
             }
@@ -103,8 +103,20 @@ struct SettingsView: View {
                 } label: {
                     Label("Begriffe", systemImage: "character.book.closed")
                 }
+                NavigationLink {
+                    CrashReportsView()
+                } label: {
+                    Label("Absturzberichte", systemImage: "ladybug")
+                }
+                // AGPL-3.0: Quellcode der App frei zugänglich
+                Link(destination: AppInfo.sourceURL) {
+                    Label("Quellcode (AGPL-3.0)", systemImage: "chevron.left.forwardslash.chevron.right")
+                }
+                .accessibilityHint("Öffnet das öffentliche Repository im Browser")
             } header: {
                 Text("Hilfe")
+            } footer: {
+                Text("odovio ist freie Software unter der GNU Affero General Public License 3.0 oder später.")
             }
         }
         .navigationTitle("Einstellungen")
@@ -483,12 +495,22 @@ struct SettingsView: View {
     // MARK: Fahrtenbuch
 
     /// Fahrtenbuch: Einrichtung, Automatik, Datenschutz.
-    private var tripSection: some View {
+    private func tripSection(_ store: TenantStore) -> some View {
         Section {
             NavigationLink {
                 TripSetupView(forAutomation: coordinator.autoDetectEnabled)
             } label: {
                 Label("Fahrtenbuch einrichten", systemImage: "checklist")
+            }
+            DefaultVehiclePicker(store: store)
+            NavigationLink {
+                CarDetectionSettingsView(store: store)
+            } label: {
+                LabeledContent {
+                    Text(CarConnectionMonitor.shared.mode.label)
+                } label: {
+                    Label("Auto erkennen über", systemImage: "antenna.radiowaves.left.and.right")
+                }
             }
             Toggle(isOn: Binding(
                 get: { coordinator.autoDetectEnabled },
@@ -513,6 +535,9 @@ struct SettingsView: View {
                 Label(err, systemImage: "exclamationmark.triangle")
                     .font(.footnote)
                     .foregroundStyle(Color.warningText)
+                if coordinator.lastErrorOpensSettings {
+                    OpenSystemSettingsButton()
+                }
             }
         } header: {
             Text("Fahrtenbuch")
@@ -711,4 +736,50 @@ private struct SettingsDialogs: ViewModifier {
                 Text(resetModeText)
             }
     }
+}
+
+
+/// Von MetricKit gelieferte Absturz-/Hänger-Berichte ansehen, teilen, löschen.
+struct CrashReportsView: View {
+    @State private var reports: [URL] = []
+    @State private var confirmDelete = false
+
+    var body: some View {
+        List {
+            Section {
+                if reports.isEmpty {
+                    Text("Keine Absturzberichte vorhanden.").foregroundStyle(.secondary)
+                }
+                ForEach(reports, id: \.self) { url in
+                    ShareLink(item: url) {
+                        Label(CrashReporter.title(of: url), systemImage: "doc.text")
+                    }
+                }
+            } footer: {
+                Text("iOS liefert einen Bericht beim nächsten Start der App nach einem Absturz, manchmal mit "
+                     + "einigen Minuten Verzögerung. Er enthält nur technische Angaben (Stacktrace, Gerät, iOS-Version), "
+                     + "keine Fahrten oder Standorte, und bleibt auf diesem iPhone, bis du ihn teilst.")
+            }
+            if !reports.isEmpty {
+                Section {
+                    Button("Alle löschen", role: .destructive) { confirmDelete = true }
+                }
+            }
+        }
+        .navigationTitle("Absturzberichte")
+        .onAppear { reports = CrashReporter.reports() }
+        .refreshable { reports = CrashReporter.reports() }
+        .confirmationDialog("Alle Absturzberichte löschen?", isPresented: $confirmDelete, titleVisibility: .visible) {
+            Button("Löschen", role: .destructive) {
+                CrashReporter.deleteAll()
+                reports = CrashReporter.reports()
+            }
+        }
+    }
+}
+
+/// Feste App-Angaben.
+enum AppInfo {
+    /// Öffentliches Repository (AGPL-3.0); konstante, gültige URL
+    static let sourceURL = URL(string: "https://github.com/jboettge/odovio")!
 }

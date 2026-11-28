@@ -1,15 +1,17 @@
 """Vertikale Skalierung ohne externe Dienste: Worker-Zahl/cgroup, Startprüfungen, uvicorn-Argumente, Secrets aus
 Dateien, Health/Ready/Live, /metrics-Zugriff, GZip, CSV-Streaming, PDF-Gleichzeitigkeit, Advisory-Locks (PG)."""
+import inspect
 import threading
 import time
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import func, select
 
-from app import config, integrity, jobs, main, metrics, models, runtime, security, serve
+from app import config, integrity, jobs, main, metrics, migrate, models, runtime, security, serve
 from app.db import SessionLocal
 
-from .conftest import T, new_vehicle, op, sync, uid
+from .conftest import IS_PG, T, new_vehicle, op, sync, uid
 
 
 # ---------- Worker / cgroup ----------
@@ -152,6 +154,102 @@ def test_health_live_ready(client):
     assert client.get("/health/ready", headers={"Authorization": ""}).status_code == 200   # ohne Anmeldung
 
 
+def _set_version(version: str) -> None:
+    from app.db import engine
+    with engine.begin() as conn:
+        conn.exec_driver_sql(f"UPDATE alembic_version SET version_num = '{version}'")   # nosec B608 – Testwert
+    main._head = None
+
+
+@pytest.fixture
+def restore_head():
+    yield
+    _set_version(main.head_revision())
+    if IS_PG:
+        from app.db import engine
+        with engine.begin() as conn:
+            migrate.write_compat_comment(conn)
+
+
+def test_ready_schema_newer_needs_compat_mark(client, monkeypatch, restore_head):
+    """S1: unbekannter neuerer Stand (Rollback nach Migration) → nur 503, wenn nicht als kompatibel markiert."""
+    monkeypatch.delenv("SCHEMA_COMPATIBLE_NEWER", raising=False)
+    _set_version("0099")
+    r = client.get("/health/ready")
+    assert r.status_code == 503 and r.json()["database"] == "schema_newer"
+    for value in ("0099", "0098, 0099", "*"):
+        monkeypatch.setenv("SCHEMA_COMPATIBLE_NEWER", value)
+        r = client.get("/health/ready")
+        assert r.status_code == 200 and r.json()["database"] == "compatible_newer" and r.json()["degraded"], value
+    monkeypatch.setattr(migrate, "COMPATIBLE_NEWER", frozenset({"0099"}))
+    monkeypatch.delenv("SCHEMA_COMPATIBLE_NEWER")
+    assert client.get("/health/ready").status_code == 200
+    monkeypatch.setattr(migrate, "COMPATIBLE_NEWER", frozenset())
+    # älterer Stand bleibt «migration_pending», auch mit "*"
+    monkeypatch.setenv("SCHEMA_COMPATIBLE_NEWER", "*")
+    _set_version("0001")
+    assert client.get("/health/ready").json()["database"] == "migration_pending"
+
+
+def test_migrate_never_touches_newer_schema(client, monkeypatch, restore_head):
+    from app.db import engine
+    monkeypatch.delenv("SCHEMA_COMPATIBLE_NEWER", raising=False)
+    _set_version("0099")
+    with pytest.raises(migrate.SchemaNewer):
+        migrate.create_schema(engine)
+    monkeypatch.setenv("SCHEMA_COMPATIBLE_NEWER", "0099")
+    assert migrate.create_schema(engine) is False
+    with engine.connect() as conn:
+        assert migrate.current_revision(conn) == "0099"                 # unverändert
+    assert migrate.main(["--check"]) == 0
+
+
+@pytest.mark.requires_pg
+def test_ready_compatible_via_marker_of_newer_image(client, monkeypatch, restore_head):
+    """Neueres Image (Migration mit compatible_with_previous) vermerkt die kompatiblen älteren Stände an
+    alembic_version → das ältere Image bleibt ohne Env bereit (Rolling Update, Rollback)."""
+    from app.db import engine
+    monkeypatch.delenv("SCHEMA_COMPATIBLE_NEWER", raising=False)
+    head = main.head_revision()
+    _set_version("0099")
+    with engine.begin() as conn:
+        migrate.write_compat_comment(conn, ["0042"])
+    assert client.get("/health/ready").json()["database"] == "schema_newer"
+    with engine.begin() as conn:
+        migrate.write_compat_comment(conn, [head, "0001"])
+    r = client.get("/health/ready")
+    assert r.status_code == 200 and r.json()["database"] == "compatible_newer"
+
+
+def test_compatible_previous_walks_marked_migrations():
+    def rev(r, down, flag):
+        return SimpleNamespace(revision=r, down_revision=down, module=SimpleNamespace(compatible_with_previous=flag))
+    script = SimpleNamespace(walk_revisions=lambda: iter([rev("0007", "0006", True), rev("0006", "0005", True),
+                                                          rev("0005", "0004", False), rev("0004", "0003", True)]))
+    assert migrate.compatible_previous(script) == ["0006", "0005"]
+    script = SimpleNamespace(walk_revisions=lambda: iter([rev("0007", "0006", False)]))
+    assert migrate.compatible_previous(script) == []
+    assert all(isinstance(x, str) for x in migrate.compatible_previous())   # echte Revisionen
+
+
+def test_health_endpoints_async_and_off_threadpool(client, monkeypatch):
+    """S2: Health hängt nie vom Threadpool der sync-Endpunkte ab; DB-Prüfung mit Zeitlimit."""
+    for fn in (main.health, main.health_live, main.health_ready):
+        assert inspect.iscoroutinefunction(fn), fn.__name__
+    seen = []
+    real = main._schema_state
+
+    def spy():
+        seen.append(threading.current_thread().name)
+        return real()
+    monkeypatch.setattr(main, "_schema_state", spy)
+    assert client.get("/health/ready").status_code == 200 and seen[0].startswith("fzb-health")
+    monkeypatch.setattr(main, "_schema_state", lambda: time.sleep(0.5) or "ok")
+    monkeypatch.setenv("HEALTH_DB_TIMEOUT_S", "0.1")
+    r = client.get("/health/ready")
+    assert r.status_code == 503 and r.json()["database"] == "unavailable"
+
+
 def test_ready_requires_migration_head(client):
     from app.db import engine
     with engine.begin() as conn:
@@ -214,7 +312,7 @@ def test_gzip_api_json_only(client):
                                             "note": "x" * 50}))
     r = client.get(f"{T}/changes", headers={"Accept-Encoding": "gzip"})
     assert r.headers.get("content-encoding") == "gzip" and "accept-encoding" in r.headers["vary"].lower()
-    assert r.json()["odometer"]                                       # httpx dekomprimiert
+    assert r.json()["odometer"]                                       # httpx2 dekomprimiert
     small = client.get("/api/me", headers={"Accept-Encoding": "gzip"})
     assert "content-encoding" not in small.headers                    # < 1 KiB
     pdf = client.get(f"{T}/vehicles/{vid}/report.pdf", headers={"Accept-Encoding": "gzip"})
@@ -243,6 +341,24 @@ def test_pdf_concurrency_limit(client, monkeypatch):
     with main.pdf_slot():                     # einziger Platz belegt
         r = client.get(f"{T}/vehicles/{vid}/report.pdf")
     assert r.status_code == 503 and r.headers["retry-after"] == "5"
+    assert client.get(f"{T}/vehicles/{vid}/report.pdf").status_code == 200
+
+
+def test_pdf_wait_short_and_queue_bounded(client, monkeypatch):
+    """S2: Wartezeit höchstens 1 s (auch mit grösserem PDF_WAIT_S), volle Warteschlange → sofort 503."""
+    monkeypatch.setattr(main, "_pdf_slots", threading.BoundedSemaphore(1))
+    monkeypatch.setenv("PDF_WAIT_S", "20")
+    vid = new_vehicle(client)
+    with main.pdf_slot():
+        t = time.monotonic()
+        r = client.get(f"{T}/vehicles/{vid}/report.pdf")
+        waited = time.monotonic() - t
+        assert r.status_code == 503 and 0.9 <= waited < 3, waited
+        monkeypatch.setenv("PDF_QUEUE", "0")
+        t = time.monotonic()
+        assert client.get(f"{T}/vehicles/{vid}/report.pdf").status_code == 503
+        assert time.monotonic() - t < 0.5
+    assert main._pdf_waiting == 0
     assert client.get(f"{T}/vehicles/{vid}/report.pdf").status_code == 200
 
 

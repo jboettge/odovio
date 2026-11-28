@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, ref } from 'vue'
 import Field from '../../components/Field.vue'
 import Icon from '../../components/Icon.vue'
 import Modal from '../../components/Modal.vue'
@@ -11,42 +11,45 @@ import { ApiError } from '../../api/client'
 import type { CloseConflictDetail, TripCheck, TripMismatch } from '../../api/types'
 import { byId, dataState, refresh, tick } from '../../store/data'
 import { notify, errorText } from '../../store/toasts'
-import { currentMonth, date, km, month as monthLabel, num, previousMonth, time, weekdayDate, byCode } from '../../lib/format'
+import { currentMonth, date, km, month as monthLabel, monthOf, num, previousMonth, time, weekdayDate, byCode } from '../../lib/format'
+import { STATUS_LABELS } from '../../lib/labels'
 import { routeText } from '../../lib/privacy'
 import { MIN_REASON } from '../../lib/trips'
 import { analytics } from '../../lib/analyticsClient'
 import { useAsync } from '../../use/async'
 import type { Trip } from '../../api/types'
 
-const { vid, periods, tenant } = useVehicle()
+const { vid, periods, trips, tenant } = useVehicle()
 const cur = currentMonth()
+/** Auswählbare Monate: vom ersten Monat mit Fahrten (oder Abschluss) bis heute, mindestens 13, höchstens 10 Jahre. */
+const MIN_MONTHS = 13
+const MAX_MONTHS = 120
 const months = computed(() => {
+  let earliest: string | null = null
+  for (const t of trips.value) if (!t.deleted && t.start_at && (earliest === null || t.start_at < earliest)) earliest = t.start_at
+  let first = earliest ? monthOf(earliest) : cur
+  for (const p of periods.value) if (byCode(p.month, first) < 0) first = p.month
   const out: string[] = []
   let m = cur
-  for (let i = 0; i < 13; i++) {
+  for (let i = 0; i < MAX_MONTHS && (i < MIN_MONTHS || byCode(m, first) >= 0); i++) {
     out.push(m)
     m = previousMonth(m)
   }
   return out
 })
 const month = ref(previousMonth(cur))
-const check = ref<TripCheck | null>(null)
-const loading = ref(false)
-const error = ref<string | null>(null)
-
-async function loadCheck() {
-  loading.value = true
-  error.value = null
-  try {
-    check.value = await endpoints.tripCheck(tenant.value, vid.value, month.value)
-  } catch (e) {
-    check.value = null
-    error.value = errorText(e)
-  } finally {
-    loading.value = false
-  }
-}
-watch([month, vid, () => dataState.loadedAt], loadCheck, { immediate: true })
+// Prüfung vom Server; bei schnellem Monatswechsel zählt nur die Antwort zum gewählten Monat
+const checkKey = () => `${vid.value}:${month.value}`
+const checkRes = useAsync(
+  () => ({ tenant: tenant.value, vid: vid.value, month: month.value, key: checkKey(), at: dataState.loadedAt }),
+  async (a, signal) => ({ key: a.key, check: await endpoints.tripCheck(a.tenant, a.vid, a.month, signal) }),
+  null as { key: string; check: TripCheck } | null,
+  { resetOnError: true },
+)
+const check = computed(() => checkRes.data.value?.check ?? null)
+// Ladeanzeige nur beim Wechsel von Monat/Fahrzeug; nach Datenänderung bleibt die bisherige Prüfung bis zur neuen sichtbar
+const loading = computed(() => checkRes.pending.value && checkRes.data.value?.key !== checkKey())
+const error = checkRes.error
 
 const lookup = (id: string) => byId('place', id)
 function tripLabel(id: string): string {
@@ -85,11 +88,14 @@ const reason = ref('')
 const busy = ref(false)
 const closeError = ref<string | null>(null)
 const conflict = ref<CloseConflictDetail | null>(null)
-const reasonError = computed(() => (force.value && reason.value.trim().length < MIN_REASON ? `Begründung mit mindestens ${MIN_REASON} Zeichen erforderlich` : undefined))
+const reasonTried = ref(false)
+const reasonLeft = computed(() => Math.max(0, MIN_REASON - reason.value.trim().length))
+const reasonError = computed(() => (force.value && reasonLeft.value > 0 ? `Begründung mit mindestens ${MIN_REASON} Zeichen erforderlich (noch ${reasonLeft.value})` : undefined))
 
 function openDialog() {
   force.value = false
   reason.value = ''
+  reasonTried.value = false
   closeError.value = null
   conflict.value = null
   dlg.value = true
@@ -100,7 +106,10 @@ async function doClose() {
     closeError.value = 'Es gibt Lücken oder unvollständige Fahrten. Zum Abschliessen «Trotzdem abschliessen» wählen und begründen.'
     return
   }
-  if (reasonError.value) return
+  if (reasonError.value) {
+    reasonTried.value = true
+    return
+  }
   busy.value = true
   closeError.value = null
   conflict.value = null
@@ -135,7 +144,10 @@ async function doClose() {
         </div>
       </div>
       <Loading v-if="loading" text="Prüfung läuft …" />
-      <AlertBox v-else-if="error" kind="danger" live>{{ error }}</AlertBox>
+      <AlertBox v-else-if="error" kind="danger" live>
+        <p>{{ error }}</p>
+        <button type="button" class="btn btn-sm" @click="checkRes.reload()"><Icon name="refresh" size="sm" />Erneut versuchen</button>
+      </AlertBox>
       <template v-else-if="check">
         <p class="row"><strong>{{ check.trips }} Fahrten</strong><span class="muted">im {{ monthLabel(check.month) }}</span>
           <span v-if="check.closed" class="badge badge-info"><Icon name="lock" size="sm" />abgeschlossen</span>
@@ -234,7 +246,7 @@ async function doClose() {
           <p>{{ check?.gaps.length ?? 0 }} Lücke(n), {{ blocking.length }} unvollständige Angabe(n).</p>
         </AlertBox>
         <label class="check"><input v-model="force" type="checkbox" />Trotzdem abschliessen (erzwingen)</label>
-        <Field v-if="force" v-slot="f" label="Begründung" required :error="reason && reasonError ? reasonError : undefined" hint="Wird im Änderungsprotokoll gespeichert.">
+        <Field v-if="force" v-slot="f" label="Begründung" required :error="reasonTried ? reasonError : undefined" :hint="`Mindestens ${MIN_REASON} Zeichen${reasonLeft ? ` (noch ${reasonLeft})` : ''}, wird im Änderungsprotokoll gespeichert.`">
           <textarea :id="f.id" v-model="reason" class="textarea" maxlength="500" :aria-invalid="f.invalid" :aria-describedby="f.describedby"></textarea>
         </Field>
       </template>
@@ -242,12 +254,12 @@ async function doClose() {
         <p>{{ closeError }}</p>
         <ul v-if="conflict?.gaps?.length"><li v-for="g in conflict.gaps" :key="g.after_trip_id">Lücke {{ num(g.km_from) }} → {{ num(g.km_to) }} ({{ num(g.km) }} km)</li></ul>
         <ul v-if="conflict?.mismatches?.length"><li v-for="m in conflict.mismatches" :key="m.trip_id + m.reason">{{ tripLabel(m.trip_id) }}: {{ m.reason }}</li></ul>
-        <ul v-if="conflict?.trips?.length"><li v-for="t in conflict.trips" :key="t.id">{{ tripLabel(t.id) }} ({{ t.status }})</li></ul>
+        <ul v-if="conflict?.trips?.length"><li v-for="t in conflict.trips" :key="t.id">{{ tripLabel(t.id) }} ({{ STATUS_LABELS[t.status as keyof typeof STATUS_LABELS] ?? t.status }})</li></ul>
       </AlertBox>
     </form>
     <template #footer>
       <button type="button" class="btn" @click="dlg = false">Abbrechen</button>
-      <button type="submit" form="close-form" class="btn btn-primary" :disabled="busy || (force && Boolean(reasonError))">{{ busy ? 'Wird abgeschlossen …' : 'Verbindlich abschliessen' }}</button>
+      <button type="submit" form="close-form" class="btn btn-primary" :disabled="busy">{{ busy ? 'Wird abgeschlossen …' : 'Verbindlich abschliessen' }}</button>
     </template>
   </Modal>
 </template>

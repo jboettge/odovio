@@ -64,6 +64,17 @@ Legende: **[Q n]** Quelle (Liste am Ende) · **[A]** Annahme · **[P]** vor Umse
 
 Hinweis: Es gibt am Markt digitale Fahrtenbücher, die nach Herstellerangabe von der Schweizerischen Steuerkonferenz geprüft wurden (autoSense, [Q23]); ein öffentliches Prüfraster der SSK wurde nicht gefunden → **[P]**.
 
+#### Lösch- und Aufbewahrungskonzept (Stand Server, Review X15)
+
+| Daten | Aufbewahrung | Löschung |
+|---|---|---|
+| Journal (`revisions`, `anchors`), Fachdaten, Belegdateien | mind. 10 Jahre ab Ende des Geschäftsjahres (Art. 958f OR) | keine technische Löschung: App-Rolle ohne `DELETE`, Trigger sperren das Journal; Stornos bleiben sichtbar. Nach Ablauf der Frist nur durch den Betreiber (Owner) und nur mandantenweise: vorher PDF/CSV je Jahr und die signierten Anker (`/audit/anchors`) archivieren – eine Teil-Löschung einzelner Jahre bräche die Hash-Kette. Bewusst nicht automatisiert. |
+| GPS-Rohdaten / Tracks | Gerät: 30 Tage nach Bestätigung (Endpunkte 90 Tage) | Server speichert keine Tracks (nur `track_hash`); Map-Matching verwirft sie nach der Anfrage |
+| Zugriffs- und Sicherheitslogs | empfohlen höchstens 90 Tage | Rotation beim Betreiber: Caddy `roll_size`/`roll_keep`, Docker `json-file` `max-size`/`max-file` bzw. journald `MaxRetentionSec=90day`. Logs enthalten keine Query-Strings (Koordinaten), keine SQL-Parameter, keine Tokens; Reverse-Geocoding nur per POST (Koordinaten nie in der URL) |
+| Valkey (Rate-Limits, Sperren, Metriken) | flüchtig, jeder Schlüssel mit TTL | ohne Persistenz; Neustart löscht alles |
+| Belegfotos der Bildauswertung (`/scan`) | nicht gespeichert | Metadaten (Exif/GPS) entfernt der Server vor der Weitergabe an das selbst gehostete Vision-LLM |
+| Backups (DB, Belege) | Frist wie Journal, Rotation beim Betreiber | abgelaufene Sicherungen löschen; `ANCHOR_SIGNING_KEY` getrennt aufbewahren |
+
 ### 3.3 Abgeleitete Muss-Felder je Fahrt
 
 Das Schweizer Recht schreibt kein Feldraster vor. Die folgenden Felder sind aus der Praxis (effektive Methode, Spesen, Fahrkostenabzug) abgeleitet **[A]** und mit Treuhand zu bestätigen **[P]**.

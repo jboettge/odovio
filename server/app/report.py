@@ -12,7 +12,7 @@ from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, Tabl
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from . import models
+from . import models, timeutil
 from .attachments import fuel_with_receipt
 from .integrity import full_interval, verify_all
 from .stats import VehicleData, consumption_points, summarize
@@ -159,12 +159,18 @@ def integrity_section(db: Session, tenant: models.Tenant) -> tuple[list, dict, m
     scope, note = checked_scope(audit)
     anchor = db.scalar(select(models.Anchor).where(models.Anchor.tenant_id == tenant.id)
                        .order_by(models.Anchor.seq.desc()).limit(1))
+    findings = [p for p in audit["problems"] if not (audit.get("full_overdue") and p.startswith("Vollprüfung"))]
     if audit["ok"]:
         status = "OK"
     elif not audit["chain_ok"]:
         status = f"FEHLER ab Seq {audit['broken_at']}: {audit['reason']}"
+    elif findings:
+        status = "FEHLER: " + "; ".join(findings[:3])
     else:
-        status = "FEHLER: " + "; ".join(audit["problems"][:3])
+        status = "NICHT BESTÄTIGT – Vollprüfung überfällig"
+    if audit.get("full_overdue"):
+        status += (f" (letzte Vollprüfung am {_when(audit.get('full_at'))}, fällig alle {full_interval() / 3600:g} h,"
+                   " nicht ausgeführt)")
     story = [
         Paragraph("Integrität", H2),
         _p(f"Geprüft: {scope} – {status}. Revisionen: {audit['count']}."),
@@ -226,12 +232,12 @@ def build_report(
     maint_cost = sum(data.maintenance_cost(m) for m in maint)
 
     integrity, audit, _ = integrity_section(db, tenant)
-    created = dt.datetime.now().strftime("%d.%m.%Y %H:%M")
+    created = timeutil.now().strftime("%d.%m.%Y %H:%M")   # APP_TIMEZONE, nicht Server-Zone (S9)
 
     story = [
         Paragraph(escape(f"Fahrzeugbuch – {v.name}"), STYLES["Title"]),
         _p(f"{' '.join(x for x in [v.make, v.model] if x)}  ·  Kennzeichen: {v.plate or '–'}  ·  "
-           f"Mandant: {tenant.name}", STYLES["Normal"]),
+           f"{'VIN: ' + v.vin + '  ·  ' if v.vin else ''}Mandant: {tenant.name}", STYLES["Normal"]),
         _p(f"Zeitraum: {_day(date_from)} – {_day(date_to)}  ·  erstellt {created}"
            f"{' von ' + user_name if user_name else ''}", STYLES["Normal"]),
         Spacer(1, 4 * mm),

@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 // Mock-Server für Entwicklung und E2E-Tests: OIDC-Issuer (Code + PKCE), Fahrzeugbuch-API, statische SPA mit CSP.
 //   node mock/server.mjs [--port 8787] [--static dist] [--seed large]
-// Teststeuerung: POST /__mock/reset, POST /__mock/config {members501, rate429, tokenTtl}, POST /__mock/expire-tokens
+// Teststeuerung: POST /__mock/reset, POST /__mock/config {members501, rate429, tokenTtl, dropResponseOnce}, POST /__mock/expire-tokens
+// dropResponseOnce: nächsten POST /sync anwenden, aber die Verbindung ohne Antwort schliessen (verlorene Antwort)
+// failUploadOnce: nächster PUT …/attachments/{id}/blob antwortet 503 (Upload erneut versuchen)
 // --seed large: Lasttest-Bestand (Mandant «privat»: 3 Fahrzeuge × 30k Fahrten, 5k Tankvorgänge, > 90k Journal-Einträge).
 // --static: liefert vorkomprimierte Varianten (<datei>.br/.gz aus scripts/compress.mjs) bei passendem Accept-Encoding.
 import { createServer } from 'node:http'
@@ -30,7 +32,7 @@ const APP_CLIENT = 'fahrzeugbuch-ios'
 // ---------- Zustand ----------
 let tenants = build()
 // Seitengrösse /changes: Demo klein (Paging wird getestet), grosser Bestand wie der Server (CHANGES_MAX 5000)
-let cfg = { members501: false, rate429: null, tokenTtl: Number(process.env.MOCK_TOKEN_TTL ?? 300), pageMax: Number(process.env.MOCK_PAGE_MAX ?? (SEED === 'large' ? 5000 : 400)) }
+let cfg = { members501: false, rate429: null, dropResponseOnce: false, failUploadOnce: false, tokenTtl: Number(process.env.MOCK_TOKEN_TTL ?? 300), pageMax: Number(process.env.MOCK_PAGE_MAX ?? (SEED === 'large' ? 5000 : 400)) }
 const codes = new Map() // code -> {user, client_id, challenge, redirect_uri, nonce}
 const tokens = new Map() // access -> {user, azp, exp}
 const refreshTokens = new Map() // refresh -> {user, azp}
@@ -38,7 +40,7 @@ const refreshTokens = new Map() // refresh -> {user, azp}
 function reset() {
   // grosser Bestand: nur Steuerung zurücksetzen (Neuaufbau dauert Sekunden; Perf-Tests schreiben nicht)
   if (SEED !== 'large') tenants = build()
-  cfg = { ...cfg, members501: false, rate429: null }
+  cfg = { ...cfg, members501: false, rate429: null, dropResponseOnce: false, failUploadOnce: false }
   for (const u of Object.values(USERS)) u.tenants = { ...ORIGINAL_TENANTS[u.username] }
 }
 const ORIGINAL_TENANTS = Object.fromEntries(Object.values(USERS).map((u) => [u.username, { ...u.tenants }]))
@@ -52,6 +54,17 @@ function send(res, status, body, headers = {}) {
 }
 const json = (res, status, body, headers = {}) => send(res, status, body, { 'Content-Type': 'application/json', ...headers })
 const fail = (res, status, detail, headers = {}) => json(res, status, { detail }, headers)
+
+async function readRaw(req, max = 9 * 1024 * 1024) {
+  const chunks = []
+  let n = 0
+  for await (const c of req) {
+    n += c.length
+    if (n > max) return null
+    chunks.push(c)
+  }
+  return Buffer.concat(chunks)
+}
 
 async function readBody(req) {
   const chunks = []
@@ -315,7 +328,7 @@ function yearReport(t, v, year) {
   if (unconfirmed) warnings.push(`${unconfirmed} Fahrt(en) nicht bestätigt bzw. ohne Kategorie – Zahlen vorläufig.`)
   if (Object.values(p).some((x) => x.scope === 'default')) warnings.push('Teilweise Default-Parameter verwendet [A] – eigene tax_params erfassen/bestätigen.')
   return {
-    vehicle: { id: v.id, name: v.name, plate: v.plate, ownership: v.ownership ?? 'private', private_use_method: v.private_use_method ?? 'flat', purchase_price: v.purchase_price, annual_fixed_costs: v.annual_fixed_costs },
+    vehicle: { id: v.id, name: v.name, plate: v.plate, vin: v.vin ?? null, ownership: v.ownership ?? 'private', private_use_method: v.private_use_method ?? 'flat', purchase_price: v.purchase_price, annual_fixed_costs: v.annual_fixed_costs },
     year, canton: 'ZH', trips_count: trips.length, unconfirmed, months_used: months.size,
     km: { ...Object.fromEntries(cats.map((c) => [c, +km[c].toFixed(1)])), total: +total.toFixed(1) },
     shares_pct: Object.fromEntries(cats.map((c) => [c, total ? +((km[c] / total) * 100).toFixed(1) : null])),
@@ -423,7 +436,16 @@ function applyOp(t, user, azp, op) {
     if (data.private) return reject('Koordinaten privater Orte bleiben auf dem Gerät')
   }
   if (op.entity === 'tax_param' && !/^(federal|canton:[A-Z]{2}|tenant)$/.test(data.scope)) return reject('scope: String should match pattern')
+  if (op.entity === 'vehicle') {
+    // wie server/app/schemas.normalize_vin: Leer-/Bindestriche weg, Grossbuchstaben, 17 Zeichen ohne I/O/Q
+    const vin = String(data.vin ?? '').replace(/[\s-]+/g, '').toUpperCase()
+    if (vin && !/^[A-HJ-NPR-Z0-9]{17}$/.test(vin)) return reject('vin: Value error, VIN ungültig: genau 17 Zeichen (Ziffern und Buchstaben ohne I, O, Q)')
+    data.vin = vin || null
+  }
   if (op.entity === 'trip' && existing?.status === 'locked') return reject('Monat abgeschlossen')
+  if (['fuel', 'odometer', 'maintenance'].includes(op.entity) && (closedMonth(data) || closedMonth(existing)) && reason.length < 10) {
+    return reject('Begründung erforderlich: Änderung im abgeschlossenen Monat (reason, mind. 10 Zeichen)')
+  }
   const row = t.record(op.entity, { ...data, id: op.id, deleted: false }, existing ? 'update' : 'create', user.name)
   Object.assign(t.revisions.at(-1), { op_id: op.op_id, conflict: Boolean(conflict) })
   return { ...base, status: conflict ? 'conflict' : 'applied', version: row.version }
@@ -476,6 +498,14 @@ async function api(req, res, url) {
     if (rateLimited('sync')) return
     const body = await readBody(req)
     const results = (body.ops ?? []).map((op) => applyOp(t, user, tok.azp, op))
+    if (cfg.dropResponseOnce) {
+      // angewendet, aber die Antwort bricht nach den Headern ab: der Client sieht nur einen Netzwerkfehler.
+      // (Ein Abbruch ganz ohne Antwort würde Chromium auf einer Keep-alive-Verbindung still wiederholen lassen.)
+      cfg.dropResponseOnce = false
+      res.writeHead(200, { 'Content-Type': 'application/json', 'Content-Length': '4096' })
+      res.write('{"results":[', () => res.socket?.destroy())
+      return
+    }
     return json(res, 200, { results, cursor: t.seq })
   }
   if (rest[0] === 'vehicles' && rest[1]) {
@@ -528,12 +558,33 @@ async function api(req, res, url) {
     }
     return fail(res, 404, 'Nicht gefunden')
   }
+  if (rest[0] === 'attachments' && rest[2] === 'blob' && req.method === 'PUT') {
+    // wie server/app/main.put_attachment_blob: Metadaten zuerst, Typ/Magic Bytes/Grösse/Prüfsumme müssen passen
+    if (!write) return fail(res, 403, 'Nur Lesezugriff auf diesen Mandanten')
+    const a = t.get('attachment', rest[1])
+    if (!a) return fail(res, 404, 'Beleg nicht gefunden')
+    const body = await readRaw(req)
+    if (!body) return fail(res, 413, 'Anfrage zu gross')
+    if (cfg.failUploadOnce) {
+      cfg.failUploadOnce = false
+      return fail(res, 503, 'Speicher vorübergehend nicht verfügbar')
+    }
+    if ((req.headers['content-type'] ?? '').split(';')[0].trim() !== a.mime) return fail(res, 415, 'Content-Type entspricht nicht dem Beleg (mime)')
+    const magic = { 'image/jpeg': (b) => b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff, 'application/pdf': (b) => b.subarray(0, 4).toString('latin1') === '%PDF', 'image/heic': (b) => b.subarray(4, 8).toString('latin1') === 'ftyp' }[a.mime]
+    if (!magic?.(body)) return fail(res, 415, 'Dateiinhalt passt nicht zum Typ (Magic Bytes)')
+    if (body.length !== a.size) return fail(res, 422, 'Grösse stimmt nicht')
+    if (createHash('sha256').update(body).digest('hex') !== a.sha256) return fail(res, 422, 'Prüfsumme stimmt nicht')
+    if (t.blobs.has(a.id)) return json(res, 200, { stored: true, existing: true })
+    if (a.deleted) return fail(res, 409, 'Beleg storniert')
+    t.blobs.set(a.id, body)
+    return json(res, 201, { stored: true, existing: false })
+  }
   if (rest[0] === 'attachments' && rest[2] === 'blob' && req.method === 'GET') {
     const a = t.get('attachment', rest[1])
     if (!a) return fail(res, 404, 'Beleg nicht gefunden')
     const file = t.blobs.get(a.id)
     if (!file) return fail(res, 404, 'Datei nicht vorhanden')
-    const body = await readFile(join(here, 'assets', file))
+    const body = Buffer.isBuffer(file) ? file : await readFile(join(here, 'assets', file))
     return send(res, 200, body, { 'Content-Type': a.mime, 'Content-Disposition': `inline; filename="Beleg_${a.kind}_${a.id.slice(0, 8)}.${a.mime === 'application/pdf' ? 'pdf' : 'jpg'}"`, 'X-Content-Type-Options': 'nosniff', 'Content-Security-Policy': "default-src 'none'; sandbox" })
   }
   if (rest[0] === 'history' && rest[1] && rest[2]) {
@@ -579,7 +630,7 @@ async function api(req, res, url) {
       if (!u) return fail(res, 404, 'Benutzer in Keycloak nicht gefunden')
       if (!['admin', 'write', 'read'].includes(body.role)) return fail(res, 422, 'Rolle ungültig')
       if (t.members.some((m) => m.username === u.username)) return fail(res, 409, 'Bereits Mitglied')
-      const m = { id: `m-${u.username}`, username: u.username, name: u.name, email: u.email, role: body.role, source: 'keycloak', last_activity_at: null }
+      const m = { id: u.sub, username: u.username, name: u.name, email: u.email, role: body.role, source: 'keycloak', last_activity_at: null }
       t.members.push(m)
       u.tenants[slug] = body.role
       return json(res, 201, m)
@@ -676,7 +727,7 @@ const server = createServer(async (req, res) => {
       return json(res, 200, { ok: true, cfg })
     }
     if (url.pathname === '/auth/config') {
-      return json(res, 200, { issuer: `${originOf(req)}${REALM}`, client_id: APP_CLIENT, scopes: 'openid profile offline_access', web_client_id: WEB_CLIENT }, { 'Cache-Control': 'no-store' })
+      return json(res, 200, { issuer: `${originOf(req)}${REALM}`, client_id: APP_CLIENT, scopes: 'openid profile offline_access', web_client_id: WEB_CLIENT, source_url: 'https://github.com/jboettge/odovio' }, { 'Cache-Control': 'no-store' })
     }
     if (url.pathname.startsWith(REALM)) return await oidc(req, res, url)
     if (url.pathname.startsWith('/api/')) {

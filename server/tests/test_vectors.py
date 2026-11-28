@@ -36,6 +36,15 @@ def _ids(name: str) -> list[str]:
     return [c["name"] for c in _load(name)["cases"]]
 
 
+def test_ios_vector_copy_matches():
+    """Die App-Tests lesen eine Kopie (ios/Tests/FahrzeugbuchTests/vectors) – muss identisch sein."""
+    ios = Path(__file__).resolve().parents[2] / "ios" / "Tests" / "FahrzeugbuchTests" / "vectors"
+    if not ios.is_dir():
+        pytest.skip("iOS-Verzeichnis nicht vorhanden")
+    for f in VECTORS.glob("*.json"):
+        assert (ios / f.name).read_bytes() == f.read_bytes(), f"{f.name}: iOS-Kopie veraltet"
+
+
 @pytest.mark.parametrize("case_name", _ids("consumption"))
 def test_consumption_vectors(case_name):
     data = _load("consumption")
@@ -74,3 +83,29 @@ def test_year_report_vectors(client, monkeypatch, case_name):
                                "warnings")}
     got["items"] = {k: {"value": v["value"], "applicable": v["applicable"]} for k, v in rep["items"].items()}
     _check("year_report", data, case, got)
+
+
+@pytest.mark.parametrize("case_name", _ids("current_km"))
+def test_current_km_vectors(client, case_name):
+    """S18: aktueller km-Stand inkl. km-Beginn/-Ende der Fahrten (Statistik, Fälligkeit, Fahrzeugliste)."""
+    data = _load("current_km")
+    case = next(c for c in data["cases"] if c["name"] == case_name)
+    vid = uid()
+    ops = [op("vehicle", vid, case["vehicle"])]
+    ops += [op(kind, uid(), {"vehicle_id": vid, **row}) for kind in ("odometer", "fuel", "maintenance")
+            for row in case[kind]]
+    trip_ids = [uid() for _ in case["trips"]]
+    ops += [op("trip", i, {"vehicle_id": vid, **{k: v for k, v in t.items() if k != "deleted"}})
+            for i, t in zip(trip_ids, case["trips"], strict=True)]
+    res = sync(client, *ops, headers=web_headers())
+    assert all(r["status"] == "applied" for r in res["results"]), res
+    gone = [op("trip", i, action="delete", base=1) for i, t in zip(trip_ids, case["trips"], strict=True)
+            if t.get("deleted")]
+    if gone:
+        assert all(r["status"] == "applied" for r in sync(client, *gone, headers=web_headers())["results"])
+    stats = client.get(f"{T}/vehicles/{vid}/stats").json()
+    listed = {v["id"]: v["current_km"] for v in client.get(f"{T}/vehicles").json()}
+    assert listed[vid] == stats["current_km"]
+    got = {"current_km": stats["current_km"], "driven_km": stats["driven_km"],
+           "overdue": sorted(d["title"] for d in stats["due"] if d["overdue"])}
+    _check("current_km", data, case, got)

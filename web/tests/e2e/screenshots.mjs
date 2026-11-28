@@ -58,7 +58,7 @@ try {
     await page.keyboard.press('Escape')
     await go('/tanken')
     await shot(page, '06-tankvorgaenge', scheme)
-    await page.getByRole('button', { name: /Belege vom/ }).first().click()
+    await page.getByRole('button', { name: /Belege? vom .* anzeigen/ }).first().click()
     await page.getByRole('dialog').locator('img').first().waitFor()
     await shot(page, '07-belege', scheme)
     await page.keyboard.press('Escape')

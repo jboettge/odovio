@@ -1,13 +1,14 @@
 // Gemeinsame Logik der Fahrzeug- und Stammdaten-Ansichten.
-import { computed, reactive, ref } from 'vue'
+import { computed, reactive, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
-import type { EntityMap, EntityName, FuelEntry, Maintenance, OdometerReading, Trip } from './api/types'
-import { all, byId, ofVehicle, sync, SyncRejected } from './store/data'
+import type { EntityMap, EntityName, FuelEntry, Maintenance, OdometerReading, SyncOp, Trip } from './api/types'
+import { ApiError } from './api/client'
+import { all, byId, ofVehicle, sync, SyncRejected, type SyncOutcome } from './store/data'
 import { role, session } from './store/session'
 import { notify, errorText } from './store/toasts'
 import { canWrite } from './lib/roles'
-import { deleteOp, upsertOp, validate, type FieldErrors } from './lib/schema'
-import { stornoNeedsReason } from './lib/trips'
+import { deleteOp, upsertOp, uuid, validate, type FieldErrors } from './lib/schema'
+import { closedPeriod, stornoNeedsReason } from './lib/trips'
 import { ENTITY_LABELS } from './lib/labels'
 
 export function useVehicle() {
@@ -79,8 +80,20 @@ export function useStorno() {
   return { state, ask, confirm, close: () => (state.open = false) }
 }
 
-/** Formular-Editor für Stammdaten (Neu/Bearbeiten → Sync-Op, danach neu laden). */
-export function useEditor<E extends EntityName>(entity: E, defaults: () => Record<string, unknown>) {
+/** Vergleichbarer Stand von Formularwerten (Änderungserkennung); Dateien zählen nur über ihre Anzahl. */
+function snapshot(v: unknown): string {
+  return JSON.stringify(v, (_k, x: unknown) => (typeof Blob !== 'undefined' && x instanceof Blob ? `blob:${x.size}` : x))
+}
+
+/** Gleicher Formularwert? (Zahlenfeld: 5 und «5» gelten als gleich) */
+const sameValue = (a: unknown, b: unknown) => a === b || (a ?? '') === (b ?? '') || String(a ?? '') === String(b ?? '')
+
+/**
+ * Formular-Editor für Stammdaten und Erfassen (Neu/Bearbeiten → Sync-Op, danach neu laden).
+ * `opts.track`: weitere Formularteile ausserhalb von `state.form` (Positionen, Belege, Begründung) für «ungespeicherte
+ * Änderungen» (Rückfrage beim Schliessen).
+ */
+export function useEditor<E extends EntityName>(entity: E, defaults: () => Record<string, unknown>, opts: { track?: () => unknown } = {}) {
   const state = reactive({
     open: false,
     id: null as string | null,
@@ -92,38 +105,142 @@ export function useEditor<E extends EntityName>(entity: E, defaults: () => Recor
     error: null as string | null,
   })
 
+  /*
+   * Idempotenz: id (bei Neuanlage) und op_id werden beim Öffnen festgelegt. Ein erneutes «Speichern» nach einem
+   * Fehler ohne Antwort (Verbindung weg, Antwort verloren) sendet dieselbe Op – hatte der Server sie schon
+   * angewendet, meldet er «duplicate» statt einen zweiten Datensatz anzulegen. Wurde der Inhalt seither geändert,
+   * gibt es eine neue op_id (sonst würde der Server die Änderung als Duplikat verwerfen), aber dieselbe id.
+   */
+  let attempt = { id: '', opId: '', sent: null as string | null, extra: [] as SyncOp[] }
+
+  /* Ungespeicherte Änderungen: Stand beim Öffnen (Formular + weitere Teile) gegen den aktuellen Stand */
+  const current = () => snapshot([state.form, opts.track?.() ?? null])
+  const opened = ref('')
+  const dirty = computed(() => state.open && current() !== opened.value)
+  const markClean = () => (opened.value = current())
+
+  /*
+   * Feldfehler verschwinden, sobald das Feld geändert wird (nicht erst beim nächsten Speichern). Verglichen wird mit
+   * dem Wert bei der Prüfung; die allgemeine Meldung «Bitte die markierten Felder prüfen» geht mit dem letzten Fehler.
+   */
+  let checked: Record<string, unknown> = {}
+  watch(
+    () => Object.keys(state.errors).map((k) => [k, state.form[k]] as const),
+    (pairs) => {
+      // Fehler, die nicht aus save() stammen (z. B. Prüfung beim Verlassen des Feldes): Wert jetzt merken
+      for (const [k, v] of pairs) if (!(k in checked)) checked[k] = v
+      const stale = pairs.filter(([k, v]) => k in checked && !sameValue(v, checked[k])).map(([k]) => k)
+      if (!stale.length) return
+      const next = { ...state.errors }
+      for (const k of stale) delete next[k]
+      state.errors = next
+      if (!Object.keys(next).length && state.error === INVALID) state.error = null
+    },
+  )
+
+  function openWith(form: Record<string, unknown>, id: string | null, version: number | null) {
+    Object.assign(state, { open: true, id, version, form, errors: {}, error: null })
+    checked = {}
+    markClean()
+  }
+
   function create(extra: Record<string, unknown> = {}) {
-    Object.assign(state, { open: true, id: null, version: null, form: { ...defaults(), ...extra }, errors: {}, error: null })
+    attempt = { id: uuid(), opId: uuid(), sent: null, extra: [] }
+    openWith({ ...defaults(), ...extra }, null, null)
   }
 
-  function edit(rec: EntityMap[E]) {
-    Object.assign(state, { open: true, id: rec.id, version: rec.version, form: { ...rec }, errors: {}, error: null })
+  function edit(rec: EntityMap[E], extra: Record<string, unknown> = {}) {
+    attempt = { id: rec.id, opId: uuid(), sent: null, extra: [] }
+    openWith({ ...rec, ...extra }, rec.id, rec.version)
   }
 
-  async function save(transform?: (f: Record<string, unknown>) => Record<string, unknown>): Promise<boolean> {
+  /** Feste ID des Datensatzes (auch vor dem ersten Speichern, z. B. für Kind-Datensätze und Belege). */
+  const recordId = () => (attempt.id ||= state.id ?? uuid())
+
+  /**
+   * Speichern. `opts.reason`: Begründung (Änderung im abgeschlossenen Monat). `opts.extra`: weitere Ops im selben
+   * Sync (Checkliste, Material, Belege) – nach der Haupt-Op. `opts.after`: nach erfolgreichem Sync (z. B. Upload).
+   */
+  async function save(
+    transform?: (f: Record<string, unknown>) => Record<string, unknown>,
+    opts: { reason?: string; extra?: (id: string) => SyncOp[]; after?: (id: string, res: SyncOutcome) => Promise<void> | void } = {},
+  ): Promise<boolean> {
     if (!session.tenant) return false
     const data = transform ? transform({ ...state.form }) : { ...state.form }
-    state.errors = validate(entity, data)
-    if (Object.keys(state.errors).length) {
-      state.error = 'Bitte die markierten Felder prüfen.'
+    const errors = validate(entity, data)
+    checked = { ...state.form }
+    state.errors = errors
+    if (Object.keys(errors).length) {
+      state.error = INVALID
       return false
     }
+    if (state.busy) return false
     state.busy = true
     state.error = null
+    const id = recordId()
+    if (!attempt.opId) attempt.opId = uuid()
+    const op = upsertOp(entity, id, data, state.version, opts.reason, attempt.opId)
+    let extra = opts.extra?.(id) ?? []
+    const fingerprint = JSON.stringify([op.base_version, op.data, op.reason ?? null, extra.map((x) => [x.entity, x.id, x.action, x.base_version, x.data, x.reason ?? null])])
+    if (attempt.sent !== null && attempt.sent !== fingerprint) op.op_id = attempt.opId = uuid()
+    else if (attempt.sent === fingerprint) extra = attempt.extra // gleiche Wiederholung → gleiche op_ids (Server dedupliziert)
+    attempt.sent = fingerprint
+    attempt.extra = extra
     try {
-      const res = await sync(session.tenant, [upsertOp(entity, state.id, data, state.version)])
+      const res = await sync(session.tenant, [op, ...extra])
+      attempt = { id, opId: uuid(), sent: null, extra: [] }
+      await opts.after?.(id, res)
       notify(res.conflicts ? 'Gespeichert – gleichzeitige Änderung überschrieben (im Verlauf sichtbar)' : 'Gespeichert', res.conflicts ? 'info' : 'ok')
       state.open = false
       return true
     } catch (e) {
-      state.error = e instanceof SyncRejected ? `Vom Server abgelehnt: ${e.message}` : errorText(e)
+      const unclear = e instanceof ApiError && (e.status === 0 || e.status >= 500)
+      if (e instanceof SyncRejected) {
+        // Teilweise angewendet? Dann weiter als Bearbeitung mit aktueller Version (nächstes Speichern = Korrektur)
+        const saved = byId(entity, id) as { version: number } | undefined
+        if (saved) Object.assign(state, { id, version: saved.version })
+        attempt = { id, opId: uuid(), sent: null, extra: [] }
+      }
+      state.error =
+        e instanceof SyncRejected
+          ? `Vom Server abgelehnt: ${e.message}`
+          : unclear
+            ? `${errorText(e)} Erneutes Speichern legt nichts doppelt an.`
+            : errorText(e)
       return false
     } finally {
       state.busy = false
     }
   }
 
-  return { state, create, edit, save, close: () => (state.open = false) }
+  return {
+    state,
+    create,
+    edit,
+    save,
+    recordId,
+    close: () => (state.open = false),
+    /** Formular seit dem Öffnen geändert (Rückfrage vor dem Verwerfen) */
+    get dirty() {
+      return dirty.value
+    },
+    /** aktuellen Stand als «unverändert» übernehmen (z. B. nachdem weitere Teile geladen wurden) */
+    markClean,
+  }
+}
+
+/** Allgemeine Meldung bei Feldfehlern (verschwindet mit dem letzten korrigierten Feld). */
+export const INVALID = 'Bitte die markierten Felder prüfen.'
+
+/**
+ * Erfassen/Ändern im abgeschlossenen Monat braucht eine Begründung (wie der Server: nur Einträge mit km-Stand).
+ * Geprüft werden neuer und bisheriger Monat.
+ */
+export function correctionNeedsReason(vehicleId: string, day: unknown, kmValue: unknown, original?: { date: string; km: number | null } | null): boolean {
+  const periods = all('trip_period')
+  const hit = (d: unknown, k: unknown) =>
+    k !== null && k !== undefined && k !== '' && typeof d === 'string' && /^\d{4}-\d{2}/.test(d) && Boolean(closedPeriod(periods, vehicleId, d.slice(0, 7)))
+  return hit(day, kmValue) || Boolean(original && hit(original.date, original.km))
 }
 
 /** Zahl aus Eingabefeld (leer → null). */

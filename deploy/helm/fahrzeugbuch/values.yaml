@@ -129,6 +129,10 @@ config:
   ANCHOR_INTERVAL_MIN: "60"
   ANCHOR_PUBLIC_KEYS: ""
   VERIFY_FULL_INTERVAL_S: "86400"
+  # Rollback auf ein älteres Image nach einer Migration, deren Revision dieses Image nicht kennt: hier als kompatibel
+  # zulassen (kommagetrennt, "*" = jede unbekannte neuere). Neuere Migrationen mit compatible_with_previous=True
+  # vermerken das selbst in der DB – dann ist nichts nötig (README «Upgrade / Rollback»).
+  SCHEMA_COMPATIBLE_NEWER: ""
   # Keycloak-Admin-API (Mitgliederverwaltung); Client-Secret in secrets
   KC_ADMIN_URL: ""
   KC_ADMIN_REALM: ""
@@ -252,8 +256,8 @@ valkey:
   enabled: false
   image:
     repository: valkey/valkey
-    tag: 8.1.12-alpine
-    digest: sha256:9971099af41c36e887aabdfe22b80c0fe45df949163dfc9cb434febc57cfc3fc
+    tag: 9.2.0-alpine
+    digest: sha256:c8e2d17498838af5d91e12eb7c11220b3434a7b7131a333e3af52ad5e0b80882
     pullPolicy: IfNotPresent
   auth:
     # nur ohne existingSecret; erzeugen: openssl rand -hex 32
@@ -441,8 +445,12 @@ httpRoute:
     request: 60s
     backendRequest: 55s
 
+# Standardmässig an (Review X16): Ingress nur vom Ingress-Controller/Gateway (+ Prometheus), Egress nur DNS, DB,
+# Valkey/Redis, S3, Issuer und Extras. Pflicht: egress.database und egress.oidc (sonst bricht helm mit Meldung ab);
+# ingress.controller an den eigenen Controller anpassen (z. B. k3s/Traefik: Namespace kube-system). Braucht einen
+# NetworkPolicy-fähigen CNI (Calico, Cilium, kube-router …). Bewusst abschalten: enabled: false.
 networkPolicy:
-  enabled: false
+  enabled: true
   ingress:
     # Ingress-Controller/Gateway (Namespace-Label konfigurierbar)
     controller:

@@ -13,6 +13,9 @@ revision: str = ${repr(up_revision)}
 down_revision: str | None = ${repr(down_revision)}
 branch_labels: str | Sequence[str] | None = ${repr(branch_labels)}
 depends_on: str | Sequence[str] | None = ${repr(depends_on)}
+# True nur, wenn der Code der Vorgängerrevision unverändert auf diesem Stand läuft (rein additiv,
+# nicht in Snapshots/Integritätsprüfung): ältere Pods bleiben dann bereit (app.migrate)
+compatible_with_previous = False
 
 
 def upgrade() -> None:

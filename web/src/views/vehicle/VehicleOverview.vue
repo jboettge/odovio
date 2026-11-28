@@ -1,6 +1,5 @@
 <script setup lang="ts">
-import { errorText } from '../../store/toasts'
-import { computed, ref, watch } from 'vue'
+import { computed } from 'vue'
 import Kpi from '../../components/Kpi.vue'
 import Icon from '../../components/Icon.vue'
 import Loading from '../../components/Loading.vue'
@@ -16,22 +15,15 @@ import { analytics } from '../../lib/analyticsClient'
 import type { HealthResult } from '../../lib/slim'
 import { useAsync } from '../../use/async'
 
-const { vid, vehicle, fuel, maintenance, tenant } = useVehicle()
-const s = ref<Stats | null>(null)
-const error = ref<string | null>(null)
-
-watch(
-  () => [vid.value, dataState.loadedAt] as const,
-  async () => {
-    error.value = null
-    try {
-      s.value = await stats(tenant.value, vid.value)
-    } catch (e) {
-      error.value = errorText(e)
-    }
-  },
-  { immediate: true },
+const { vid, vehicle, fuel, maintenance, tenant, writable } = useVehicle()
+// Kennzahlen vom Server: veraltete Antworten (Fahrzeugwechsel) werden verworfen, Fehler mit «Erneut versuchen»
+const statsRes = useAsync(
+  () => ({ tenant: tenant.value, vid: vid.value, at: dataState.loadedAt }),
+  (a) => stats(a.tenant, a.vid),
+  null as Stats | null,
 )
+const s = computed(() => statsRes.data.value)
+const error = statsRes.error
 
 const NO_HEALTH: HealthResult = { open: 0, gaps: 0, gapKm: 0, estimated: 0 }
 // Kilometerkette/offene Fahrten über alle Fahrten des Fahrzeugs im Web Worker
@@ -76,9 +68,17 @@ const monthlyTotal = computed(() => monthly.value.reduce((a, d) => a + d.values[
 </script>
 
 <template>
-  <AlertBox v-if="error" kind="danger" live>{{ error }}</AlertBox>
+  <AlertBox v-if="error && !statsRes.pending.value" kind="danger" title="Kennzahlen konnten nicht geladen werden" live>
+    <p>{{ error }}</p>
+    <button type="button" class="btn btn-sm" @click="statsRes.reload()"><Icon name="refresh" size="sm" />Erneut versuchen</button>
+  </AlertBox>
   <Loading v-else-if="!s" text="Kennzahlen werden geladen …" />
   <div v-else class="stack">
+    <div v-if="writable && !vehicle?.deleted" class="row" role="group" aria-label="Erfassen">
+      <RouterLink :to="{ path: `/fahrzeuge/${vid}/tanken`, query: { neu: '1' } }" class="btn btn-sm"><Icon name="fuel" size="sm" />Tanken erfassen</RouterLink>
+      <RouterLink :to="{ path: `/fahrzeuge/${vid}/wartungen`, query: { neu: '1' } }" class="btn btn-sm"><Icon name="wrench" size="sm" />Wartung erfassen</RouterLink>
+      <RouterLink :to="{ path: `/fahrzeuge/${vid}/kilometerstaende`, query: { neu: '1' } }" class="btn btn-sm"><Icon name="gauge" size="sm" />Kilometerstand erfassen</RouterLink>
+    </div>
     <div class="grid grid-kpi">
       <Kpi label="Aktueller Kilometerstand" :value="km(s.current_km)" :sub="`${km(s.driven_km)} seit Erfassung`" />
       <Kpi label="Ø Verbrauch" :value="consumption(s.avg_consumption)" :sub="s.avg_liters_per_km !== null ? `${num(s.avg_liters_per_km, 3)} l pro km` : 'mind. zwei Volltankungen nötig'" />
@@ -117,6 +117,7 @@ const monthlyTotal = computed(() => monthly.value.reduce((a, d) => a + d.values[
         <dl v-if="vehicle" class="dl">
           <dt>Kennzeichen</dt><dd>{{ vehicle.plate || '–' }}</dd>
           <dt>Marke / Modell</dt><dd>{{ [vehicle.make, vehicle.model].filter(Boolean).join(' ') || '–' }}</dd>
+          <dt>VIN</dt><dd><span v-if="vehicle.vin" class="mono" data-testid="vehicle-vin">{{ vehicle.vin }}</span><template v-else>–</template></dd>
           <dt>Treibstoff</dt><dd>{{ FUEL_TYPE_LABELS[vehicle.fuel_type] ?? vehicle.fuel_type }}</dd>
           <dt>Start-km</dt><dd>{{ km(vehicle.initial_km) }}</dd>
           <dt>Halter</dt><dd>{{ vehicle.ownership ? OWNERSHIP_LABELS[vehicle.ownership] : 'nicht erfasst (Privatfahrzeug angenommen)' }}</dd>

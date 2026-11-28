@@ -2,6 +2,8 @@
 
 Parameter sind nicht hart codiert: `tax_param`-Einträge des Mandanten gehen vor.
 Auflösung je (Jahr, Schlüssel): scope "tenant" > "canton:XX" (Env TAX_CANTON) > "federal" > Default unten.
+Fehlt ein Schlüssel im Jahr, gilt der jüngste Wert eines Vorjahres (Einträge des Mandanten wie Defaults, Review S8):
+der neuere Jahrgang geht vor, im gleichen Jahrgang die Reihenfolge oben; übernommene Werte tragen einen Hinweis.
 Defaults = Annahmen gemäss Konzept (Kap. 3.1, Stand 11/2026) **[A]** – mit Treuhand bestätigen.
 
 Rechnungen (Konzept Kap. 4, Rechenbeispiele):
@@ -89,28 +91,40 @@ def _default(year: int, key: str) -> Param | None:
     return Param(key, DEFAULTS[use][key], use, "default", SOURCES.get(key), note)
 
 
+KEYS = ("km_rate", "commute_rate", "cap_federal", "cap_canton", "private_share_pct", "min_private_month",
+        "vat_rate")
+
+
 def resolve_params(db: Session, tenant_id: int, year: int) -> dict[str, Param]:
-    """Alle Schlüssel für ein Jahr auflösen (tenant > canton:XX > federal > Default)."""
+    """Alle Schlüssel für ein Jahr auflösen: jüngster Jahrgang ≤ `year`, darin tenant > canton:XX > federal >
+    Default (s. Modul-Docstring). Werte aus einem Vorjahr erhalten in `note` den Hinweis «Wert von … übernommen»."""
     kt = canton()
     rank = {"tenant": 0, **({f"canton:{kt}": 1} if kt else {}), "federal": 2}
     rows = db.scalars(select(models.TaxParam).where(
-        models.TaxParam.tenant_id == tenant_id, models.TaxParam.year == year, models.TaxParam.deleted.is_(False)))
-    best: dict[str, tuple[tuple[int, int], models.TaxParam]] = {}
+        models.TaxParam.tenant_id == tenant_id, models.TaxParam.year <= year, models.TaxParam.deleted.is_(False)))
+    best: dict[str, tuple[tuple[int, int, int], models.TaxParam]] = {}
     for r in rows:
         if r.scope not in rank:
             continue                      # anderer Kanton
-        prio = (rank[r.scope], -r.last_seq)  # bei Doppeln gilt der neuste Eintrag
+        prio = (-r.year, rank[r.scope], -r.last_seq)  # jüngster Jahrgang, dann Scope; bei Doppeln der neuste
         if r.key not in best or prio < best[r.key][0]:
             best[r.key] = (prio, r)
     out: dict[str, Param] = {}
-    for key in ("km_rate", "commute_rate", "cap_federal", "cap_canton", "private_share_pct",
-                "min_private_month", "vat_rate"):
-        if key in best:
+    for key in KEYS:
+        d = _default(year, key)
+        if key in best and (d is None or best[key][1].year >= d.year):
             r = best[key][1]
-            out[key] = Param(key, r.value, r.year, r.scope, r.source_url, r.note)
-        elif (d := _default(year, key)) is not None:
+            note = r.note
+            if r.year != year:
+                hint = f"Wert von {r.year} übernommen – für {year} prüfen bzw. erfassen"
+                note = f"{note}; {hint}" if note else hint
+            out[key] = Param(key, r.value, r.year, r.scope, r.source_url, note)
+        elif d is not None:
             out[key] = d
     return out
+
+
+CAT_KM = {"private": "Privat-km", "commute": "Arbeitsweg-km"}
 
 
 def _r(v: float | None, d: int = 2) -> float | None:
@@ -152,10 +166,10 @@ def year_report(db: Session, tenant: models.Tenant, data: VehicleData, year: int
     pct, minimum = params["private_share_pct"].value, params["min_private_month"].value
     if not business:
         flat = None
-        why = "nur für Geschäftsfahrzeuge (ownership business)"
+        why = "nur für Geschäftsfahrzeuge (Halter «Geschäftsfahrzeug»)"
     elif v.purchase_price is None:
         flat = None
-        why = "Kaufpreis (purchase_price) fehlt"
+        why = "Kaufpreis fehlt"
     else:
         monthly = max(pct / 100 * v.purchase_price, minimum)
         flat = monthly * months_used
@@ -175,9 +189,9 @@ def year_report(db: Session, tenant: models.Tenant, data: VehicleData, year: int
         val = cost_total * part / total if business and total else None
         items[key] = {
             "label": label, "value": _r(val), "applicable": business,
-            "formula": f"Kosten Jahr × {'+'.join(cats)}-km ÷ total-km",
+            "formula": f"Kosten Jahr × {' + '.join(CAT_KM[c] for c in cats)} ÷ Total-km",
             "inputs": {"costs_total": _r(cost_total), "km_part": _r(part, 1), "km_total": _r(total, 1)},
-            "params": [], "reason": None if business else "nur für Geschäftsfahrzeuge (ownership business)",
+            "params": [], "reason": None if business else "nur für Geschäftsfahrzeuge (Halter «Geschäftsfahrzeug»)",
         }
 
     # Kilometerentschädigung (Geschäftsfahrten mit Privatauto)
@@ -186,7 +200,7 @@ def year_report(db: Session, tenant: models.Tenant, data: VehicleData, year: int
         "label": "Kilometerentschädigung", "value": _r(km["business"] * rate) if not business else None,
         "applicable": not business, "formula": f"geschäftliche km × CHF {rate}/km",
         "inputs": {"business_km": _r(km["business"], 1)}, "params": p("km_rate"),
-        "reason": "nur für Privatfahrzeuge (ownership private)" if business else None,
+        "reason": "nur für Privatfahrzeuge (Halter «Privatfahrzeug»)" if business else None,
     }
 
     # Arbeitsweg-Abzug Bund / Kanton
@@ -206,7 +220,8 @@ def year_report(db: Session, tenant: models.Tenant, data: VehicleData, year: int
         "formula": f"min(Arbeitsweg-km × CHF {crate}/km, CHF {cap_c.value if cap_c else '–'})",
         "inputs": {"commute_km": _r(km["commute"], 1), "uncapped": _r(raw)},
         "params": p("commute_rate", "cap_canton"),
-        "reason": None if cap_c else "Parameter cap_canton fehlt (tax_param scope canton:XX oder tenant)",
+        "reason": None if cap_c else ("Obergrenze Kanton nicht erfasst (Steuerparameter für den Kanton oder den "
+                                      "Mandanten)"),
     }
 
     # Warnungen
@@ -229,11 +244,15 @@ def year_report(db: Session, tenant: models.Tenant, data: VehicleData, year: int
                         "Behandlung bei effektiver Methode ungeklärt [P].")
     if not business and km["field"]:
         warnings.append("Aussendienst-km sind nicht in der Kilometerentschädigung enthalten – mit Treuhand klären.")
+    if carried := sorted(f"{LABELS.get(k, k)} {x.year}" for k, x in params.items()
+                         if x.scope != "default" and x.year != year):
+        warnings.append(f"Steuerparameter aus Vorjahren übernommen ({', '.join(carried)}) – für {year} prüfen "
+                        "bzw. erfassen.")
     if any(x.scope == "default" for x in params.values()):
         warnings.append("Teilweise Default-Parameter verwendet [A] – eigene tax_params erfassen/bestätigen.")
 
     return {
-        "vehicle": {"id": v.id, "name": v.name, "plate": v.plate, "ownership": ownership,
+        "vehicle": {"id": v.id, "name": v.name, "plate": v.plate, "vin": v.vin, "ownership": ownership,
                     "private_use_method": method, "purchase_price": v.purchase_price,
                     "annual_fixed_costs": v.annual_fixed_costs},
         "year": year,

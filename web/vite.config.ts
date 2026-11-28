@@ -8,28 +8,36 @@ const API_TARGET = process.env.FZB_API ?? 'http://127.0.0.1:8787'
 type ModuleInfo = { isEntry: boolean; importers: readonly string[] } | null
 type ChunkMeta = { getModuleInfo: (id: string) => ModuleInfo }
 
-/** Gruppen von App-Modulen mit eigenem Chunk (nur von den Seiten geladen, die sie brauchen). */
-const GROUPS: [RegExp, string][] = [
-  [/\/src\/(components\/(LineChart|BarChart)\.vue|components\/useWidth\.ts|lib\/(chart|downsample)\.ts)/, 'charts'],
-  [/\/src\/lib\/(download|blobCache)\.ts$/, 'export'],
-  [/\/src\/(components\/(Pager|VPad)\.vue|use\/(pager|virtualRows|debounced|async)\.ts)/, 'lists'],
+/**
+ * Eigene, stabile Chunks (Rolldown `codeSplitting.groups`, ersetzt Rollups `manualChunks`): Vendor-Code ändert
+ * seinen Hash nur bei einem Update der Abhängigkeit (Browser-Cache bleibt bei App-Releases gültig); Diagramme,
+ * Export/Download und Listen-Hilfen liegen getrennt. Module, die statisch vom Entry erreichbar sind, kommen in
+ * `core` – sonst würde der Bundler gemeinsame Abhängigkeiten in einen Gruppen-Chunk ziehen und diesen in den
+ * Startpfad holen. Die Priorität legt fest, welche Gruppe ein Modul zuerst bekommt: Rolldown zieht die Abhängigkeiten
+ * eines erfassten Moduls mit in dessen Gruppe (`includeDependenciesRecursively`), schon vergebene Module aber nicht.
+ */
+const CHUNK_GROUPS: { name: string; test: RegExp; priority: number }[] = [
+  { name: 'vendor-vue', test: /[\\/]node_modules[\\/](@vue|vue)[\\/]/, priority: 60 },
+  { name: 'vendor-router', test: /[\\/]node_modules[\\/]vue-router[\\/]/, priority: 50 },
+  { name: 'vendor-oidc', test: /[\\/]node_modules[\\/](oidc-client-ts|jwt-decode)[\\/]/, priority: 40 },
+  { name: 'vendor', test: /[\\/]node_modules[\\/]/, priority: 30 },
+  {
+    name: 'lists',
+    test: /[\\/]src[\\/](components[\\/](Pager|VPad)\.vue|use[\\/](pager|virtualRows|debounced|async)\.ts)/,
+    // vor `charts`: LineChart importiert Pager/usePager, die sonst als Abhängigkeit in `charts` landen
+    priority: 23,
+  },
+  { name: 'export', test: /[\\/]src[\\/]lib[\\/](download|blobCache)\.ts$/, priority: 22 },
+  {
+    name: 'charts',
+    test: /[\\/]src[\\/](components[\\/](LineChart|BarChart)\.vue|components[\\/]useWidth\.ts|lib[\\/](chart|downsample)\.ts)/,
+    priority: 21,
+  },
 ]
 
-/**
- * Eigene, stabile Chunks: Vendor-Code ändert seinen Hash nur bei einem Update der Abhängigkeit (Browser-Cache
- * bleibt bei App-Releases gültig); Diagramme, Export/Download und Listen-Hilfen liegen getrennt. Module, die
- * statisch vom Entry erreichbar sind, kommen in `core` – sonst würde Rollup gemeinsame Abhängigkeiten in einen
- * Gruppen-Chunk ziehen und diesen in den Startpfad holen.
- */
+/** Chunk eines Moduls nach `CHUNK_GROUPS` bzw. `core` (statisch vom Entry erreichbar); sonst automatisch. */
 export function chunkFor(id: string, meta?: ChunkMeta, cache = new Map<string, boolean>()): string | undefined {
-  const p = id.split('\\').join('/')
-  if (p.includes('/node_modules/')) {
-    if (/\/node_modules\/(@vue|vue)\//.test(p)) return 'vendor-vue'
-    if (p.includes('/node_modules/vue-router/')) return 'vendor-router'
-    if (/\/node_modules\/(oidc-client-ts|jwt-decode)\//.test(p)) return 'vendor-oidc'
-    return 'vendor'
-  }
-  for (const [re, name] of GROUPS) if (re.test(p)) return name
+  for (const g of CHUNK_GROUPS) if (g.test.test(id)) return g.name
   if (meta && !meta.getModuleInfo(id)?.isEntry && staticFromEntry(id, meta, cache)) return 'core'
   return undefined
 }
@@ -75,9 +83,19 @@ export default defineConfig({
     cssCodeSplit: true,
     target: 'es2022',
     reportCompressedSize: true,
-    rollupOptions: {
+    rolldownOptions: {
       output: {
-        manualChunks: (id, meta) => chunkFor(id, meta, reachCache),
+        codeSplitting: {
+          groups: [
+            ...CHUNK_GROUPS,
+            // nach Vendor, vor den App-Gruppen: gemeinsame Abhängigkeiten des Startpfads bleiben in `core`
+            {
+              name: (id, ctx) => (chunkFor(id, ctx, reachCache) === 'core' ? 'core' : null),
+              debugName: 'core',
+              priority: 25,
+            },
+          ],
+        },
         entryFileNames: 'assets/app-[hash].js',
         chunkFileNames: (info) => `assets/${cleanName(info.name)}-[hash].js`,
         assetFileNames: 'assets/[name]-[hash][extname]',
@@ -87,7 +105,7 @@ export default defineConfig({
   worker: {
     // Web Worker als eigene Datei (CSP: worker-src → script-src 'self'), nie als blob:/data:-URL
     format: 'es',
-    rollupOptions: { output: { entryFileNames: 'assets/[name]-[hash].js', chunkFileNames: 'assets/w-[name]-[hash].js' } },
+    rolldownOptions: { output: { entryFileNames: 'assets/[name]-[hash].js', chunkFileNames: 'assets/w-[name]-[hash].js' } },
   },
   server: {
     port: 5173,

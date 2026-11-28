@@ -7,6 +7,9 @@ import ConfirmDialog from '../../components/ConfirmDialog.vue'
 import EmptyState from '../../components/EmptyState.vue'
 import AttachmentThumb from '../../components/AttachmentThumb.vue'
 import VPad from '../../components/VPad.vue'
+import PendingUploads from '../../components/PendingUploads.vue'
+import FuelEditor from './editors/FuelEditor.vue'
+import { useOpenOnQuery } from '../../use/openOnQuery'
 import { useHistory, useStorno, useVehicle } from '../../composables'
 import { childrenOf } from '../../store/data'
 import type { FuelEntry } from '../../api/types'
@@ -18,6 +21,8 @@ const history = useHistory()
 const storno = useStorno()
 const showDeleted = ref(false)
 const preview = shallowRef<FuelEntry | null>(null)
+const editor = ref<InstanceType<typeof FuelEditor> | null>(null)
+useOpenOnQuery(() => editor.value?.create(), () => writable.value)
 
 const rows = computed(() =>
   fuel.value.filter((f) => showDeleted.value || !f.deleted).sort((a, b) => byCode(b.date, a.date) || b.km - a.km || byCode(a.id, b.id)),
@@ -43,8 +48,12 @@ const visibleRows = computed(() => visible.value.map((f) => ({ f, att: allAtt(f.
     <div class="card-header">
       <h2 id="fuel-h">Tankvorgänge</h2>
       <span class="muted small">{{ num(rows.length) }} Einträge</span>
-      <div class="actions"><label class="check"><input v-model="showDeleted" type="checkbox" />Stornierte anzeigen</label></div>
+      <div class="actions">
+        <label class="check"><input v-model="showDeleted" type="checkbox" />Stornierte anzeigen</label>
+        <button v-if="writable" type="button" class="btn btn-primary btn-sm" @click="editor?.create()"><Icon name="plus" size="sm" />Tankvorgang erfassen</button>
+      </div>
     </div>
+    <PendingUploads />
     <EmptyState v-if="!rows.length" title="Keine Tankvorgänge" icon="fuel" />
     <div v-else ref="tableEl" class="table-wrap vtable">
       <table class="table" :aria-rowcount="rows.length + 2">
@@ -73,15 +82,16 @@ const visibleRows = computed(() => visible.value.map((f) => ({ f, att: allAtt(f.
             <td><span :class="['badge', f.full_tank ? 'badge-ok' : 'badge-outline']">{{ f.full_tank ? 'voll' : 'teil' }}</span></td>
             <td>{{ f.station || '–' }}<span v-if="f.note" class="cell-sub">{{ f.note }}</span></td>
             <td>
-              <button v-if="att" type="button" class="btn btn-sm" :aria-label="`${att} Belege vom ${date(f.date)} anzeigen`" @click="preview = f">
+              <button v-if="att" type="button" class="btn btn-sm" :aria-label="`${att} ${att === 1 ? 'Beleg' : 'Belege'} vom ${date(f.date)} · ${chf(f.price_total)} anzeigen`" @click="preview = f">
                 <Icon name="image" size="sm" />{{ att }}
               </button>
               <span v-else class="muted">–</span>
             </td>
             <td>{{ f.created_by || '–' }}</td>
             <td class="actions">
-              <button type="button" class="btn btn-ghost btn-icon btn-sm" :aria-label="`Verlauf Tankvorgang ${date(f.date)}`" @click="history.show('fuel', f.id, 'Verlauf des Tankvorgangs')"><Icon name="history" size="sm" /></button>
-              <button v-if="writable && !f.deleted" type="button" class="btn btn-ghost btn-icon btn-sm" :aria-label="`Tankvorgang ${date(f.date)} stornieren`" @click="storno.ask('fuel', f, `${date(f.date)} · ${liters(f.liters)} · ${chf(f.price_total)}`)"><Icon name="ban" size="sm" /></button>
+              <button type="button" class="btn btn-ghost btn-icon btn-sm" :aria-label="`Verlauf Tankvorgang ${date(f.date)} · ${chf(f.price_total)}`" @click="history.show('fuel', f.id, 'Verlauf des Tankvorgangs')"><Icon name="history" size="sm" /></button>
+              <button v-if="writable && !f.deleted" type="button" class="btn btn-ghost btn-icon btn-sm" :aria-label="`Tankvorgang ${date(f.date)} · ${chf(f.price_total)} bearbeiten`" @click="editor?.edit(f)"><Icon name="edit" size="sm" /></button>
+              <button v-if="writable && !f.deleted" type="button" class="btn btn-ghost btn-icon btn-sm" :aria-label="`Tankvorgang ${date(f.date)} · ${chf(f.price_total)} stornieren`" @click="storno.ask('fuel', f, `${date(f.date)} · ${liters(f.liters)} · ${chf(f.price_total)}`)"><Icon name="ban" size="sm" /></button>
             </td>
           </tr>
           <VPad :height="padBottom" :cols="10" />
@@ -93,12 +103,13 @@ const visibleRows = computed(() => visible.value.map((f) => ({ f, att: allAtt(f.
     </div>
   </section>
 
-  <Modal :open="preview !== null" :title="preview ? `Belege vom ${date(preview.date)}` : 'Belege'" wide @close="preview = null">
+  <Modal :open="preview !== null" :title="preview ? `Belege vom ${date(preview.date)} · ${chf(preview.price_total)}` : 'Belege'" wide @close="preview = null">
     <div v-if="preview" class="thumbs">
       <AttachmentThumb v-for="a in allAtt(preview.id)" :key="a.id" :tenant="tenant" :attachment="a" />
     </div>
     <p class="muted small mt-2">Belege werden mit Prüfsumme (SHA-256) gespeichert und in der Integritätsprüfung kontrolliert.</p>
   </Modal>
+  <FuelEditor ref="editor" />
   <HistoryPanel :tenant="tenant" :entity="history.sel.value?.entity ?? null" :id="history.sel.value?.id ?? null" :title="history.sel.value?.title" @close="history.close" />
   <ConfirmDialog :open="storno.state.open" title="Tankvorgang stornieren" confirm-label="Stornieren" danger :reason="storno.state.reason" :busy="storno.state.busy" :error="storno.state.error" @close="storno.close" @confirm="storno.confirm">
     <p><strong>{{ storno.state.label }}</strong></p>

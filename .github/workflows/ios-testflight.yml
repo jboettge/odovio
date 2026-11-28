@@ -1,11 +1,22 @@
-# iOS → TestFlight: xcodegen, Archive (Release, automatische Signierung über App-Store-Connect-API-Key),
-# Export + Upload nach App Store Connect. Keine Zertifikate/Profile im Repo: Xcode verwaltet sie (Cloud-Signing).
+# iOS → TestFlight: xcodegen, Archive (Release, MANUELL signiert mit eigenem Apple-Distribution-Zertifikat
+# und App-Store-Profil), IPA direkt aus dem Archiv, Signaturprüfung, Upload per altool (API-Key).
+#
+# Warum nicht Cloud-Signing / -exportArchive: Xcode erzwingt beim Export eine Designated Requirement mit
+# leaf[subject.CN] = "Apple Distribution: … Böttger (…)"; der Abgleich mit dem Umlaut im Zertifikatsnamen
+# schlägt fehl → Upload «Invalid Signature» (90035). Lokales codesign erzeugt die Standard-Requirement über
+# die Team-ID (subject.OU) – ohne Namen. Details: docs/TESTFLIGHT.md.
 #
 # Secrets (Repo → Settings → Secrets and variables → Actions):
-#   ASC_ISSUER_ID     Issuer-ID (UUID)
-#   ASC_KEY_ID        Key-ID (10 Zeichen)
-#   ASC_PRIVATE_KEY   Inhalt AuthKey_<KEY_ID>.p8, base64-kodiert
-#   TEAM_ID           Apple-Team-ID
+#   ASC_ISSUER_ID        Issuer-ID (UUID)
+#   ASC_KEY_ID           Key-ID (10 Zeichen)
+#   ASC_PRIVATE_KEY      Inhalt AuthKey_<KEY_ID>.p8, base64-kodiert
+#   TEAM_ID              Apple-Team-ID
+#   DIST_CERT_P12        Apple-Distribution-Zertifikat inkl. privatem Schlüssel (.p12), base64-kodiert
+#   DIST_CERT_PASSWORD   Passwort der .p12
+#   ASC_PROFILE          App-Store-Provisioning-Profil für ch.odovio (.mobileprovision), base64-kodiert
+# Schutz (docs/TESTFLIGHT.md): Job im Environment «testflight» (Required Reviewers, nur Tags ios-v*), Secrets als
+# Environment-Secrets; Tag-Schutzregel für ios-v*. Fremdwerkzeug (XcodeGen) gepinnt per Version + SHA-256 und
+# VOR dem Ablegen von API-Key/Zertifikat ausgeführt; Checkout ohne gespeichertes GITHUB_TOKEN.
 # Build-Nummer: run_number*10 + run_attempt (monoton, Rerun-sicher).
 # Version: aus Tag ios-vX.Y[.Z]; bei manuellem Start Eingabe «version» oder MARKETING_VERSION aus ios/project.yml.
 name: ios-testflight
@@ -32,6 +43,8 @@ jobs:
   testflight:
     # App-Store-Uploads verlangen das iOS-26-SDK (Xcode 26).
     runs-on: macos-26
+    # Freigabe durch Required Reviewers + Deployment-Branch/Tag-Regel (in GitHub einzurichten, s. docs/TESTFLIGHT.md)
+    environment: testflight
     timeout-minutes: 60
     defaults:
       run:
@@ -40,15 +53,21 @@ jobs:
       ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
       ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
       TEAM_ID: ${{ secrets.TEAM_ID }}
+      BUNDLE_ID: ch.odovio
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Secrets prüfen
         env:
           ASC_PRIVATE_KEY: ${{ secrets.ASC_PRIVATE_KEY }}
+          DIST_CERT_P12: ${{ secrets.DIST_CERT_P12 }}
+          DIST_CERT_PASSWORD: ${{ secrets.DIST_CERT_PASSWORD }}
+          ASC_PROFILE: ${{ secrets.ASC_PROFILE }}
         run: |
           miss=0
-          for v in ASC_ISSUER_ID ASC_KEY_ID ASC_PRIVATE_KEY TEAM_ID; do
+          for v in ASC_ISSUER_ID ASC_KEY_ID ASC_PRIVATE_KEY TEAM_ID DIST_CERT_P12 DIST_CERT_PASSWORD ASC_PROFILE; do
             [ -n "${!v}" ] || { echo "::error::Secret $v fehlt"; miss=1; }
           done
           exit $miss
@@ -60,6 +79,21 @@ jobs:
           sudo xcode-select -s "$X/Contents/Developer"
           xcodebuild -version
 
+      # Vor allen Schlüsseln: XcodeGen als gepinntes Release-Zip (Version + SHA-256, Tag 2.46.0 =
+      # 8445e778451c7e44237b90281bde622d764b0084) statt `brew install` (ungepinnt, nach dem Schlüsselimport)
+      - name: XcodeGen installieren (gepinnt) und Projekt erzeugen
+        env:
+          XCODEGEN_VERSION: "2.46.0"
+          XCODEGEN_SHA256: 4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806
+        run: |
+          Z="$RUNNER_TEMP/xcodegen.zip"
+          curl -fsSL --retry 3 -o "$Z" "https://github.com/yonaskolb/XcodeGen/releases/download/${XCODEGEN_VERSION}/xcodegen.zip"
+          echo "${XCODEGEN_SHA256}  $Z" | shasum -a 256 -c -
+          rm -rf "$RUNNER_TEMP/xcodegen-dist" && unzip -q "$Z" -d "$RUNNER_TEMP/xcodegen-dist"
+          XG="$RUNNER_TEMP/xcodegen-dist/xcodegen/bin/xcodegen"
+          "$XG" --version
+          "$XG" generate
+
       - name: API-Key ablegen
         env:
           ASC_PRIVATE_KEY: ${{ secrets.ASC_PRIVATE_KEY }}
@@ -68,10 +102,55 @@ jobs:
           printf '%s' "$ASC_PRIVATE_KEY" | base64 --decode > "$KEY"
           chmod 600 "$KEY"
           grep -q "BEGIN PRIVATE KEY" "$KEY" || { echo "::error::ASC_PRIVATE_KEY ist kein base64-kodierter .p8-Key"; exit 1; }
+          mkdir -p ~/.appstoreconnect/private_keys && cp "$KEY" ~/.appstoreconnect/private_keys/
           echo "ASC_KEY_PATH=$KEY" >> "$GITHUB_ENV"
 
-      - run: brew install xcodegen
-      - run: xcodegen generate
+      - name: Zertifikat in temporären Schlüsselbund
+        env:
+          DIST_CERT_P12: ${{ secrets.DIST_CERT_P12 }}
+          DIST_CERT_PASSWORD: ${{ secrets.DIST_CERT_PASSWORD }}
+        run: |
+          KC="$RUNNER_TEMP/signing.keychain-db"
+          KCPW=$(openssl rand -hex 24)
+          P12="$RUNNER_TEMP/dist.p12"
+          printf '%s' "$DIST_CERT_P12" | base64 --decode > "$P12"
+          security create-keychain -p "$KCPW" "$KC"
+          security set-keychain-settings -lut 3600 "$KC"
+          security unlock-keychain -p "$KCPW" "$KC"
+          # nur codesign darf den Schlüssel ohne Rückfrage nutzen (kein -T /usr/bin/security: sonst könnte jeder
+          # Prozess per `security` den privaten Schlüssel exportieren)
+          security import "$P12" -k "$KC" -P "$DIST_CERT_PASSWORD" -f pkcs12 -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KCPW" "$KC" >/dev/null
+          security list-keychains -d user -s "$KC" $(security list-keychains -d user | tr -d '"')
+          rm -f "$P12"
+          IDS=$(security find-identity -v -p codesigning "$KC")
+          echo "$IDS"
+          SHA=$(echo "$IDS" | awk '/Apple Distribution/ {print $2; exit}')
+          [ -n "$SHA" ] || { echo "::error::Kein gültiges «Apple Distribution»-Zertifikat in DIST_CERT_P12"; exit 1; }
+          echo "SIGN_KEYCHAIN=$KC" >> "$GITHUB_ENV"
+          echo "SIGN_IDENTITY=$SHA" >> "$GITHUB_ENV"
+
+      - name: Provisioning-Profil installieren
+        env:
+          ASC_PROFILE: ${{ secrets.ASC_PROFILE }}
+        run: |
+          P="$RUNNER_TEMP/appstore.mobileprovision"
+          printf '%s' "$ASC_PROFILE" | base64 --decode > "$P"
+          security cms -D -i "$P" > "$RUNNER_TEMP/profile.plist"
+          PB=/usr/libexec/PlistBuddy
+          UUID=$($PB -c "Print :UUID" "$RUNNER_TEMP/profile.plist")
+          NAME=$($PB -c "Print :Name" "$RUNNER_TEMP/profile.plist")
+          APPID=$($PB -c "Print :Entitlements:application-identifier" "$RUNNER_TEMP/profile.plist")
+          EXP=$($PB -c "Print :ExpirationDate" "$RUNNER_TEMP/profile.plist")
+          echo "Profil: $NAME ($UUID), $APPID, gültig bis $EXP"
+          [ "$APPID" = "$TEAM_ID.$BUNDLE_ID" ] || { echo "::error::Profil gilt für $APPID, erwartet $TEAM_ID.$BUNDLE_ID"; exit 1; }
+          if $PB -c "Print :ProvisionedDevices" "$RUNNER_TEMP/profile.plist" >/dev/null 2>&1; then
+            echo "::error::Profil enthält Geräte (Development/Ad-hoc) – nötig ist ein App-Store-Profil"; exit 1
+          fi
+          for d in ~/Library/MobileDevice/Provisioning\ Profiles ~/Library/Developer/Xcode/UserData/Provisioning\ Profiles; do
+            mkdir -p "$d" && cp "$P" "$d/$UUID.mobileprovision"
+          done
+          echo "PROFILE_UUID=$UUID" >> "$GITHUB_ENV"
 
       - name: Version + Build-Nummer
         env:
@@ -88,47 +167,75 @@ jobs:
           echo "Version $VERSION ($BUILD)" >> "$GITHUB_STEP_SUMMARY"
           [ -z "$CHANGELOG" ] || printf 'Zu testen: %s\n' "$CHANGELOG" >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Archive
+      - name: Archive (manuell signiert, Apple Distribution)
         run: |
           set -o pipefail
           xcodebuild archive \
             -project Fahrzeugbuch.xcodeproj -scheme Fahrzeugbuch -configuration Release \
             -destination "generic/platform=iOS" \
             -archivePath "$RUNNER_TEMP/Fahrzeugbuch.xcarchive" \
-            -allowProvisioningUpdates \
-            -authenticationKeyPath "$ASC_KEY_PATH" \
-            -authenticationKeyID "$ASC_KEY_ID" \
-            -authenticationKeyIssuerID "$ASC_ISSUER_ID" \
-            DEVELOPMENT_TEAM="$TEAM_ID" CODE_SIGN_STYLE=Automatic \
+            DEVELOPMENT_TEAM="$TEAM_ID" CODE_SIGN_STYLE=Manual \
+            CODE_SIGN_IDENTITY="$SIGN_IDENTITY" PROVISIONING_PROFILE_SPECIFIER="$PROFILE_UUID" \
+            OTHER_CODE_SIGN_FLAGS="--keychain $SIGN_KEYCHAIN" \
             MARKETING_VERSION="$APP_VERSION" CURRENT_PROJECT_VERSION="$BUILD_NUMBER" \
             2>&1 | tee "$RUNNER_TEMP/archive.log" | grep -E "error:|warning: .*(sign|provision)|ARCHIVE (SUCCEEDED|FAILED)" || true
           test -d "$RUNNER_TEMP/Fahrzeugbuch.xcarchive" || { tail -80 "$RUNNER_TEMP/archive.log"; exit 1; }
 
-      - name: Export + Upload nach App Store Connect
+      - name: IPA aus dem Archiv packen
+        # bewusst ohne -exportArchive (das würde mit CN-Requirement neu signieren, s. Kopf)
         run: |
-          set -o pipefail
-          /usr/libexec/PlistBuddy -c "Set :teamID $TEAM_ID" ExportOptions.plist
-          xcodebuild -exportArchive \
-            -archivePath "$RUNNER_TEMP/Fahrzeugbuch.xcarchive" \
-            -exportOptionsPlist ExportOptions.plist \
-            -exportPath "$RUNNER_TEMP/export" \
-            -allowProvisioningUpdates \
-            -authenticationKeyPath "$ASC_KEY_PATH" \
-            -authenticationKeyID "$ASC_KEY_ID" \
-            -authenticationKeyIssuerID "$ASC_ISSUER_ID" \
-            2>&1 | tee "$RUNNER_TEMP/export.log" | tail -40
+          APP=$(ls -d "$RUNNER_TEMP"/Fahrzeugbuch.xcarchive/Products/Applications/*.app | head -1)
+          rm -rf "$RUNNER_TEMP/ipa" && mkdir -p "$RUNNER_TEMP/ipa/Payload" "$RUNNER_TEMP/export"
+          ditto "$APP" "$RUNNER_TEMP/ipa/Payload/$(basename "$APP")"
+          (cd "$RUNNER_TEMP/ipa" && zip -qry "$RUNNER_TEMP/export/Fahrzeugbuch.ipa" Payload)
+          ls -la "$RUNNER_TEMP/export"
+
+      - name: Signatur prüfen
+        run: |
+          APP=$(ls -d "$RUNNER_TEMP"/ipa/Payload/*.app | head -1)
+          V=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP/Info.plist")
+          B=$(/usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$APP/Info.plist")
+          echo "Info.plist: Version $V, Build $B"
+          [ "$V" = "$APP_VERSION" ] && [ "$B" = "$BUILD_NUMBER" ] || {
+            echo "::error::Info.plist hat $V ($B), erwartet $APP_VERSION ($BUILD_NUMBER)"; exit 1; }
+          {
+            echo "== codesign -dvvv (App)"; codesign -dvvv "$APP" 2>&1
+            echo "== Designated Requirement"; codesign -d -r- "$APP" 2>&1
+            echo "== Entitlements"; codesign -d --entitlements - --xml "$APP" 2>/dev/null | plutil -p - || true
+            echo "== Profil"; security cms -D -i "$APP/embedded.mobileprovision" | plutil -p - | grep -E "\"Name\"|application-identifier|get-task-allow|ProvisionedDevices|ExpirationDate" || true
+            echo "== Verify (deep, strict)"; codesign --verify --deep --strict --verbose=4 "$APP" 2>&1
+          } | tee "$RUNNER_TEMP/codesign.log"
+          grep -q "Authority=Apple Distribution" "$RUNNER_TEMP/codesign.log" || { echo "::error::nicht mit Apple Distribution signiert"; exit 1; }
+          grep -q '"get-task-allow" => false' "$RUNNER_TEMP/codesign.log" || { echo "::error::get-task-allow ist nicht false"; exit 1; }
+          if grep -q "does not satisfy its designated Requirement" "$RUNNER_TEMP/codesign.log"; then
+            echo "::error::Signatur erfüllt ihre Designated Requirement nicht"; exit 1
+          fi
+          codesign --verify --deep --strict "$APP"
+
+      - name: Upload nach App Store Connect
+        run: |
+          xcrun altool --upload-app -f "$RUNNER_TEMP/export/Fahrzeugbuch.ipa" -t ios \
+            --apiKey "$ASC_KEY_ID" --apiIssuer "$ASC_ISSUER_ID" --output-format normal 2>&1 | tee "$RUNNER_TEMP/upload.log"
+          grep -qiE "No errors uploading|UPLOAD SUCCEEDED" "$RUNNER_TEMP/upload.log"
           echo "Build $BUILD_NUMBER hochgeladen – erscheint nach Verarbeitung (5–30 min) in TestFlight." >> "$GITHUB_STEP_SUMMARY"
 
       - name: Logs bei Fehler
         if: failure()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        run: |
+          mkdir -p "$RUNNER_TEMP/logs"
+          cp "$RUNNER_TEMP"/*.log "$RUNNER_TEMP/logs/" 2>/dev/null || true
+
+      - name: Logs hochladen
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: xcodebuild-logs
-          path: |
-            ${{ runner.temp }}/*.log
-            ${{ runner.temp }}/export/*.log
+          path: ${{ runner.temp }}/logs
           retention-days: 7
 
-      - name: API-Key entfernen
+      - name: Aufräumen (Schlüssel, Schlüsselbund, Profile)
         if: always()
-        run: rm -f "$RUNNER_TEMP"/AuthKey_*.p8
+        run: |
+          [ -n "${SIGN_KEYCHAIN:-}" ] && security delete-keychain "$SIGN_KEYCHAIN" 2>/dev/null || true
+          rm -f "$RUNNER_TEMP"/AuthKey_*.p8 "$RUNNER_TEMP"/dist.p12 ~/.appstoreconnect/private_keys/AuthKey_*.p8
+          rm -f ~/Library/MobileDevice/Provisioning\ Profiles/*.mobileprovision ~/Library/Developer/Xcode/UserData/Provisioning\ Profiles/*.mobileprovision

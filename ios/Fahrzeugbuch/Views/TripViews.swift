@@ -477,7 +477,12 @@ struct TripRecordingSection: View {
             }
         } footer: {
             if let err = coordinator.lastError {
-                Label(err, systemImage: "exclamationmark.triangle").foregroundStyle(Color.warningText)
+                VStack(alignment: .leading, spacing: 6) {
+                    Label(err, systemImage: "exclamationmark.triangle").foregroundStyle(Color.warningText)
+                    if coordinator.lastErrorOpensSettings {
+                        OpenSystemSettingsButton()   // U2: direkt zu Einstellungen › odovio
+                    }
+                }
             }
         }
     }
@@ -487,31 +492,18 @@ struct TripRecordingSection: View {
         if coordinator.isRecording {
             let here = coordinator.recordingVehicleId == nil || coordinator.recordingVehicleId == vehicle.id
             let title: String = here ? "Aufzeichnung läuft" : "Aufzeichnung läuft (anderes Fahrzeug)"
-            ViewThatFits(in: .horizontal) {
-                HStack(spacing: 12) {
-                    recordingInfo(title)
-                    Spacer()
-                    stopButton
-                }
-                VStack(alignment: .leading, spacing: 10) {
-                    recordingInfo(title)
-                    stopButton
-                }
+            VStack(alignment: .leading, spacing: 12) {
+                recordingInfo(title)
+                stopButton
             }
             .foregroundStyle(.white)
             .listRowBackground(Color(red: 0.70, green: 0.11, blue: 0.10))
             .accessibilityElement(children: .contain)
         } else {
-            ViewThatFits(in: .horizontal) {
-                HStack(spacing: 12) {
-                    startButton
-                    Spacer()
-                    privateToggle
-                }
-                VStack(alignment: .leading, spacing: 10) {
-                    startButton
-                    privateToggle
-                }
+            // Fester Aufbau (kein ViewThatFits/fixedSize: das liess die Beschriftung verschwinden)
+            VStack(alignment: .leading, spacing: 12) {
+                startButton
+                privateToggle
             }
         }
     }
@@ -533,9 +525,16 @@ struct TripRecordingSection: View {
         Button {
             stop()
         } label: {
-            Label("Stopp", systemImage: "stop.fill").font(.headline)
+            HStack(spacing: 8) {
+                Image(systemName: "stop.fill")
+                Text("Fahrt beenden").lineLimit(1).minimumScaleFactor(0.8)
+            }
+            .font(.headline)
+            .frame(maxWidth: .infinity)
         }
         .buttonStyle(.borderedProminent)
+        .controlSize(.large)
+        .dynamicTypeSize(...DynamicTypeSize.xxxLarge)
         .tint(.white)
         .foregroundStyle(Color(red: 0.70, green: 0.11, blue: 0.10))
         .accessibilityLabel("Fahrt beenden")
@@ -545,9 +544,18 @@ struct TripRecordingSection: View {
         Button {
             onStart()
         } label: {
-            Label("Fahrt starten", systemImage: "play.fill").font(.headline)
+            // Symbol + Text explizit (kein Label: in Listenzeilen kann der Titel wegfallen)
+            HStack(spacing: 8) {
+                Image(systemName: "play.fill")
+                Text("Fahrt starten").lineLimit(1).minimumScaleFactor(0.8)
+            }
+            .font(.headline)
+            .frame(maxWidth: .infinity)
         }
         .buttonStyle(.borderedProminent)
+        .controlSize(.large)
+        // sehr grosse Schrift begrenzen (bleibt einzeilig und bedienbar)
+        .dynamicTypeSize(...DynamicTypeSize.xxxLarge)
         .disabled(AppMode.isDemo)
     }
 
@@ -555,7 +563,7 @@ struct TripRecordingSection: View {
         Toggle(isOn: $startPrivate) {
             Label("Privatmodus", systemImage: "eye.slash")
         }
-        .fixedSize()
+        .dynamicTypeSize(...DynamicTypeSize.xxxLarge)
         .accessibilityLabel("Privatmodus für die nächste Fahrt")
         .accessibilityHint("Speichert nur Zeit und Kilometer, keine Orte")
     }
@@ -1125,6 +1133,7 @@ struct TripFormView: View {
                 }
             }
             .navigationTitle(titleText)
+            .keyboardDoneToolbar()   // Zahlentastatur ohne Eingabetaste (U7)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -1420,6 +1429,7 @@ struct TripSplitView: View {
                 }
             }
             .navigationTitle("Fahrt aufteilen")
+            .keyboardDoneToolbar()   // Zahlentastatur ohne Eingabetaste (U7)
             .formToolbar(canSave: store.canWrite && errors.isEmpty, save: save)
             .onAppear(perform: prefill)
         }

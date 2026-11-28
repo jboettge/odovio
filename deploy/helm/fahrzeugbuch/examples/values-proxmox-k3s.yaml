@@ -64,21 +64,23 @@ ingress:
     traefik.ingress.kubernetes.io/router.entrypoints: websecure
     traefik.ingress.kubernetes.io/router.tls: "true"
     # cert-manager.io/cluster-issuer: letsencrypt
+  # kanonisch www.odovio.ch (= ALLOWED_HOSTS, Keycloak WEB_URL); die Apex-Domain odovio.ch nur als dauerhafte
+  # Weiterleitung auf https://www.odovio.ch (z. B. am vorgelagerten Proxy, siehe deploy/Caddyfile.example)
   hosts:
-    - host: fahrzeugbuch.j-mb.net
+    - host: www.odovio.ch
       paths:
         - path: /
           pathType: Prefix
   tls:
     - secretName: fahrzeugbuch-tls
-      hosts: [fahrzeugbuch.j-mb.net]
+      hosts: [www.odovio.ch]
   # Body-Limit 8 MiB (Belege …/blob) per Traefik-Middleware
   traefikMiddleware:
     enabled: true
 
-# k3s bringt kube-router als NetworkPolicy-Controller mit – zum Aktivieren CIDRs prüfen und enabled: true
+# k3s bringt kube-router als NetworkPolicy-Controller mit (Standard an) – CIDRs an die eigene Umgebung anpassen
 networkPolicy:
-  enabled: false
+  enabled: true
   ingress:
     controller:
       namespaceSelector:

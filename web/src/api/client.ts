@@ -106,6 +106,8 @@ export interface RequestOptions {
   body?: unknown
   /** Antwort als Blob (PDF, CSV, Belege) statt JSON. */
   blob?: boolean
+  /** Roh-Body (Datei-Upload) mit eigenem Content-Type statt JSON. */
+  upload?: { data: Blob; type: string }
   signal?: AbortSignal
 }
 
@@ -292,8 +294,11 @@ export class ApiClient {
   private async send(method: string, url: string, token: string | null, opts: RequestOptions, signal?: AbortSignal): Promise<Response> {
     const headers: Record<string, string> = { Accept: opts.blob ? '*/*' : 'application/json' }
     if (token) headers.Authorization = `Bearer ${token}`
-    let body: string | undefined
-    if (opts.body !== undefined) {
+    let body: string | Blob | undefined
+    if (opts.upload) {
+      headers['Content-Type'] = opts.upload.type
+      body = opts.upload.data
+    } else if (opts.body !== undefined) {
       headers['Content-Type'] = 'application/json'
       body = JSON.stringify(opts.body)
     }
@@ -381,15 +386,24 @@ export class ApiClient {
 
   private async once<T>(method: string, url: string, opts: RequestOptions, signal?: AbortSignal): Promise<T> {
     const res = await this.fetchChecked(method, url, opts, signal)
+    // Verbindungsabbruch mitten in der Antwort = wie keine Antwort (nicht «unerwarteter Fehler»)
+    const body = async <B>(read: () => Promise<B>): Promise<B> => {
+      try {
+        return await read()
+      } catch (e) {
+        if (isAbort(e) || signal?.aborted) throw abortError()
+        throw new ApiError(0, errorMessage(0, null, null))
+      }
+    }
     if (opts.blob) {
       return {
-        blob: await res.blob(),
+        blob: await body(() => res.blob()),
         filename: filenameFromDisposition(res.headers.get('Content-Disposition')),
         contentType: res.headers.get('Content-Type') ?? 'application/octet-stream',
       } as T
     }
     if (res.status === 204) return undefined as T
-    const text = await res.text()
+    const text = await body(() => res.text())
     return (text ? JSON.parse(text) : undefined) as T
   }
 
@@ -434,6 +448,11 @@ export class ApiClient {
 
   patch<T>(path: string, body: unknown): Promise<T> {
     return this.request<T>('PATCH', path, { body })
+  }
+
+  /** Datei hochladen (PUT, Roh-Body). */
+  putFile<T>(path: string, data: Blob, type: string): Promise<T> {
+    return this.request<T>('PUT', path, { upload: { data, type } })
   }
 
   delete<T>(path: string): Promise<T> {

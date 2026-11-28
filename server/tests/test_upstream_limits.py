@@ -13,7 +13,7 @@ PHOTON = _photon({"osm_key": "building", "street": "Bahnhofstrasse", "housenumbe
                   "city": "Zürich", "country": "Schweiz"})
 
 
-def test_reverse_post_and_deprecated_get(client, http):  # noqa: F811
+def test_reverse_post_only(client, http):  # noqa: F811
     http.on("/reverse", PHOTON)
     r = client.post("/api/geo/reverse", json={"lat": 47.3712345, "lon": 8.5398765})
     assert r.status_code == 200 and r.json()["label"] == "Bahnhofstrasse 1, 8001 Zürich"
@@ -21,8 +21,7 @@ def test_reverse_post_and_deprecated_get(client, http):  # noqa: F811
     assert client.post("/api/geo/reverse", json={"lat": 95, "lon": 8}).status_code == 422
     assert client.post("/api/geo/reverse", content=b'{"lat": NaN, "lon": 8}',
                        headers={"Content-Type": "application/json"}).status_code == 422
-    r = client.get("/api/geo/reverse?lat=47&lon=8")
-    assert r.status_code == 200 and r.headers["deprecation"] == "true"
+    assert client.get("/api/geo/reverse?lat=47&lon=8").status_code in (404, 405)   # GET entfernt (X15)
 
 
 def test_access_log_without_query_string(caplog):

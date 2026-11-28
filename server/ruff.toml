@@ -1,6 +1,6 @@
 # Lint (CI: ruff check app tests alembic)
 line-length = 120
-target-version = "py312"
+target-version = "py314"
 extend-exclude = ["alembic/versions"]   # autogeneriert
 
 [lint]

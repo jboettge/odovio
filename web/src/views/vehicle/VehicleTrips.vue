@@ -171,8 +171,8 @@ function stornoTrip(t: Trip) {
             </td>
             <td>{{ r.by }}</td>
             <td class="actions">
-              <button type="button" class="btn btn-ghost btn-icon btn-sm" :aria-label="`Verlauf der Fahrt vom ${weekdayDate(r.t.start_at)}`" @click="history.show('trip', r.t.id, 'Verlauf der Fahrt')"><Icon name="history" size="sm" /></button>
-              <button v-if="writable && !r.t.deleted" type="button" class="btn btn-ghost btn-icon btn-sm" :aria-label="`Fahrt vom ${weekdayDate(r.t.start_at)} stornieren`" @click="stornoTrip(r.t)"><Icon name="ban" size="sm" /></button>
+              <button type="button" class="btn btn-ghost btn-icon btn-sm" :aria-label="`Verlauf der Fahrt vom ${weekdayDate(r.t.start_at)}, ${time(r.t.start_at)} Uhr`" @click="history.show('trip', r.t.id, 'Verlauf der Fahrt')"><Icon name="history" size="sm" /></button>
+              <button v-if="writable && !r.t.deleted" type="button" class="btn btn-ghost btn-icon btn-sm" :aria-label="`Fahrt vom ${weekdayDate(r.t.start_at)}, ${time(r.t.start_at)} Uhr stornieren`" @click="stornoTrip(r.t)"><Icon name="ban" size="sm" /></button>
             </td>
           </tr>
           <VPad :height="padBottom" :cols="9" />
@@ -180,7 +180,7 @@ function stornoTrip(t: Trip) {
       </table>
     </div>
   </section>
-  <p class="muted small mt-1">Fahrten werden in der App erfasst und bestätigt. Im Web: ansehen, Verlauf prüfen und stornieren. <span class="badge badge-warn">ca.</span> = geschätzter Kilometerstand.</p>
+  <p class="muted small mt-1">Fahrten werden in der App erfasst und bestätigt. Im Web: ansehen, Verlauf prüfen und stornieren. Tanken, Wartungen und Kilometerstände lassen sich auch im Web erfassen. <span class="badge badge-warn">ca.</span> = geschätzter Kilometerstand.</p>
 
   <HistoryPanel :tenant="tenant" :entity="history.sel.value?.entity ?? null" :id="history.sel.value?.id ?? null" :title="history.sel.value?.title" @close="history.close" />
   <ConfirmDialog

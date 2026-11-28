@@ -12,7 +12,7 @@ import time
 import uuid
 from pathlib import Path
 
-import httpx
+import httpx2
 import pytest
 
 from loadtest.issuer import Issuer
@@ -30,10 +30,10 @@ def _free_port() -> int:
         return s.getsockname()[1]
 
 
-def _get(url: str, ip: str, **kw) -> httpx.Response:
+def _get(url: str, ip: str, **kw) -> httpx2.Response:
     """Neue Verbindung je Anfrage (verteilt sich auf die Worker); Client-IP über X-Forwarded-For."""
     headers = {"X-Forwarded-For": ip, **kw.pop("headers", {})}
-    with httpx.Client(timeout=30) as c:
+    with httpx2.Client(timeout=30) as c:
         return c.request(kw.pop("method", "GET"), url, headers=headers, **kw)
 
 
@@ -69,7 +69,7 @@ def server():
             if r.status_code == 200:
                 workers = {line.split('worker="')[1].split('"')[0] for line in r.text.splitlines()
                            if line.startswith("fzb_worker_start_time_seconds{")}
-        except httpx.TransportError:
+        except httpx2.TransportError:
             pass
         time.sleep(0.3)
     if len(workers) < 2:
@@ -82,29 +82,51 @@ def server():
     issuer.stop()
 
 
-def _route_counts(base: str, route: str) -> dict[str, int]:
+def _route_counts(base: str, route: str, status: str = "200") -> dict[str, int]:
     r = _get(f"{base}/metrics", "198.18.0.1", headers={"Authorization": f"Bearer {METRICS_TOKEN}"})
     out: dict[str, int] = {}
     for line in r.text.splitlines():
-        if line.startswith("fzb_http_requests_total{") and f'route="{route}"' in line:
+        if line.startswith("fzb_http_requests_total{") and f'route="{route}"' in line \
+                and f'status="{status}"' in line:
             w = line.split('worker="')[1].split('"')[0]
             out[w] = out.get(w, 0) + int(line.rsplit(" ", 1)[1])
     return out
 
 
+def _settled_counts(base: str, route: str, expected_total: int) -> dict[str, int]:
+    """Zählstand je Worker, sobald die Schnappschüsse (METRICS_PUSH_S) `expected_total` erreichen (max. 10 s)."""
+    deadline = time.monotonic() + 10
+    while True:
+        counts = _route_counts(base, route)
+        if sum(counts.values()) >= expected_total or time.monotonic() > deadline:
+            return counts
+        time.sleep(0.2)
+
+
 def test_rate_limit_across_workers(server):
+    """Burst 10 gilt für alle Worker zusammen. Welcher Worker eine neue Verbindung annimmt, entscheidet der Kernel –
+    bei ungünstiger Verteilung (alle Anfragen bei einem Worker) wäre die Aussage leer: dann mit neuer IP (frischem
+    Kontingent) wiederholen, bis beide Worker beteiligt waren (Review S19, Flake)."""
     base = server["base"]
-    codes = [_get(f"{base}/auth/config", "198.18.1.1").status_code for _ in range(24)]
-    assert codes.count(200) == 10 and codes.count(429) == 14       # Burst 10 gilt für alle Worker zusammen
-    time.sleep(1.0)                                                # Schnappschüsse (METRICS_PUSH_S)
-    counts = _route_counts(base, "/auth/config")
-    assert len(counts) == 2 and all(n > 0 for n in counts.values()), counts   # beide Worker beteiligt
+    total = sum(_settled_counts(base, "/auth/config", 0).values())
+    for attempt in range(1, 9):
+        before = _settled_counts(base, "/auth/config", total)
+        codes = [_get(f"{base}/auth/config", f"198.18.1.{attempt}").status_code for _ in range(24)]
+        assert codes.count(200) == 10 and codes.count(429) == 14, codes
+        total += 10
+        after = _settled_counts(base, "/auth/config", total)
+        delta = {w: after.get(w, 0) - before.get(w, 0) for w in after}
+        assert sum(delta.values()) == 10, (before, after)
+        if len([n for n in delta.values() if n > 0]) == 2:          # beide Worker beteiligt
+            return
+    pytest.fail(f"Anfragen landeten in 8 Versuchen immer bei einem Worker: {after}")
 
 
 def test_brute_force_block_across_workers(server):
     base, issuer = server["base"], server["issuer"]
     for _ in range(5):
-        r = _get(f"{base}/api/me", "198.18.2.2", headers={"Authorization": "Bearer kaputt"})
+        forged = issuer.token().rsplit(".", 1)[0] + "." + "A" * 342   # falsche Signatur (zählt, anders als kaputt)
+        r = _get(f"{base}/api/me", "198.18.2.2", headers={"Authorization": f"Bearer {forged}"})
         assert r.status_code == 401
     good = {"Authorization": f"Bearer {issuer.token()}"}
     codes = [_get(f"{base}/api/me", "198.18.2.2", headers=good).status_code for _ in range(8)]

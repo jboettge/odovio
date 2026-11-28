@@ -82,7 +82,7 @@ def test_precompressed_variants(client, tmp_path, monkeypatch):
     assert br.headers["content-type"].startswith("text/javascript")
     assert "immutable" in br.headers["cache-control"] and br.headers["etag"].endswith('-br"')
     gz = _get(client, "/assets/big-1a2b.js", "gzip")
-    assert gz.headers["content-encoding"] == "gzip" and gz.content == JS      # httpx dekodiert gzip
+    assert gz.headers["content-encoding"] == "gzip" and gz.content == JS      # httpx2 dekodiert gzip
     ident = _get(client, "/assets/big-1a2b.js", "identity")
     assert "content-encoding" not in ident.headers and ident.content == JS and ident.headers["vary"]
     # q-Werte: br ausgeschlossen → gzip; gzip bevorzugt → gzip

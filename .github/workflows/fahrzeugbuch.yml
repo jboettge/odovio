@@ -13,7 +13,7 @@ jobs:
     runs-on: ubuntu-24.04
     services:
       postgres:
-        image: postgres:17-alpine@sha256:f9cf3e1f0066f0eb0c48707d864f0ac5941e9ff454a072077d97a4d278d07d73
+        image: postgres:18-alpine@sha256:0115267ab5a509022df9319c77be365cef335adb71556c75f60f5360ee247e71
         env:
           POSTGRES_USER: fzb
           POSTGRES_PASSWORD: fzb
@@ -23,7 +23,7 @@ jobs:
           --health-cmd "pg_isready -U fzb" --health-interval 5s --health-timeout 5s --health-retries 10
       # gemeinsamer Zustand (STATE_BACKEND=redis) – gleicher Digest wie docker-compose.yml
       valkey:
-        image: valkey/valkey:8-alpine@sha256:9971099af41c36e887aabdfe22b80c0fe45df949163dfc9cb434febc57cfc3fc
+        image: valkey/valkey:9-alpine@sha256:c8e2d17498838af5d91e12eb7c11220b3434a7b7131a333e3af52ad5e0b80882
         ports: ["6379:6379"]
         options: >-
           --health-cmd "valkey-cli ping" --health-interval 5s --health-timeout 3s --health-retries 10
@@ -39,10 +39,10 @@ jobs:
       run:
         working-directory: server
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
-          python-version: "3.12"
+          python-version: "3.14"
       - name: Abhängigkeiten (Lock-Datei mit Hashes)
         run: |
           pip install --require-hashes --no-deps -r requirements.txt
@@ -94,7 +94,7 @@ jobs:
       run:
         working-directory: ios
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - run: brew install xcodegen
       - run: xcodegen generate
       - name: Build + Unit-Tests (Simulator, ohne Signierung)

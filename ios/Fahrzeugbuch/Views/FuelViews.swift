@@ -361,6 +361,7 @@ struct FuelFormView: View {
                 }
             }
             .navigationTitle(entry == nil ? "Tankvorgang" : "Tankvorgang bearbeiten")
+            .keyboardDoneToolbar()   // Zahlentastatur ohne Eingabetaste (U7)
             .formToolbar(canSave: store.canWrite && missing.isEmpty
                             && (!reasonRequired || CorrectionReason.isValid(reason)),
                          hasChanges: hasChanges, save: save)

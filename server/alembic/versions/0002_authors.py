@@ -17,6 +17,9 @@ revision: str = '0002'
 down_revision: str | None = '0001'
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
+# Läuft der Code der Vorgängerrevision unverändert auf diesem Stand? (nullable Spalten, nicht in den Snapshots – Code von 0001 läuft unverändert)
+# → app.migrate: Readiness/Rollback eines älteren Images
+compatible_with_previous = True
 
 SYNCED_TABLES = ('vehicles', 'odometer_readings', 'fuel_entries', 'maintenance', 'maintenance_items',
                  'maintenance_materials', 'material_articles', 'attachments', 'customers', 'places', 'trips',
@@ -37,9 +40,10 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    # Natives DROP COLUMN (SQLite ≥ 3.35) statt Batch-Neuaufbau: dieser bricht unter PRAGMA foreign_keys=ON ab,
+    # sobald andere Tabellen auf die neu aufgebaute verweisen (Review S12).
     for table in SYNCED_TABLES:
         present = _present(table)
-        with op.batch_alter_table(table) as batch:
-            for col in COLUMNS:
-                if col in present:
-                    batch.drop_column(col)
+        for col in COLUMNS:
+            if col in present:
+                op.execute(f'ALTER TABLE {table} DROP COLUMN "{col}"')

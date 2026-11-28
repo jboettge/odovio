@@ -10,12 +10,12 @@ Deutsch (Schweizer Schreibweise, `53’410 km`, `CHF 1’234.50`, `25.11.2026`).
 |---|---|---|
 | `/` | Anmelden, Fahrzeugbuch wählen (Rolle sichtbar) | – |
 | `/uebersicht` | Fahrzeug-Kacheln (km, Ø Verbrauch, Kosten, Fälligkeiten), offene Bestätigungen/Lücken, letzte Aktivität | Lesen |
-| `/fahrzeuge/:id` (+ `/fahrten`, `/tanken`, `/wartungen`, `/kilometerstaende`, `/berichte`) | Kennzahlen, Diagramme, Tabellen, Belege, Berichte/Downloads, Jahresbericht | Lesen |
+| `/fahrzeuge/:id` (+ `/fahrten`, `/tanken`, `/wartungen`, `/kilometerstaende`, `/berichte`) | Kennzahlen, Diagramme, Tabellen, Belege, Berichte/Downloads, Jahresbericht; Tanken, Wartungen (Checkliste, Material aus dem Stamm, Belege) und km-Stände erfassen/bearbeiten (Bearbeiten, Schnellaktionen in der Übersicht, `?neu=1`) | Lesen |
 | `/fahrzeuge/:id/monatsabschluss` | Prüfung + Abschluss mit Bestätigung | Bearbeiten |
 | `/aktivitaet` | Feed mit Filter und Nachladen, Verlauf je Eintrag (Seitenpanel) | Lesen |
 | `/integritaet` | Prüfung, Ergebnis, Anker, Grenzen | Lesen |
 | `/stammdaten/{fahrzeuge,orte,kunden,regeln,steuerparameter,material}` | ansehen (Lesen) bzw. erfassen/bearbeiten/stornieren (Bearbeiten) | Lesen |
-| `/verwaltung/mitglieder` | Mitglieder einladen, Rolle ändern, entfernen | Verwalten |
+| `/verwaltung/mitglieder` | Mitglieder einladen, Rolle ändern (Auswahl → «Übernehmen»; eigene Herabstufung/Entfernung mit zusätzlicher Bestätigung, eigene Zeile «(du)»), entfernen | Verwalten |
 | `/konto` | Name, Fahrzeugbücher/Rollen, Begriffe, Abmelden | angemeldet |
 
 Rollen: `admin` (Verwalten) ⊇ `write` (Bearbeiten) ⊇ `read` (Lesen). Router-Guards prüfen die Mindestrolle; nicht erlaubte
@@ -25,9 +25,15 @@ Login (Rücksprung über den OIDC-`state`), optional mit Fahrzeugbuch: `/verwalt
 
 Schreibaktionen laufen über `POST /api/t/{t}/sync` (eine Op je Aktion, Feldgrenzen wie die Server-Schemas, ganzes
 Objekt wird gesendet), danach wird inkrementell ab Cursor neu geladen. Stornos in abgeschlossenen Monaten verlangen
-eine Begründung (≥ 10 Zeichen).
+eine Begründung (≥ 10 Zeichen). Der Editor legt `id` (Neuanlage) und `op_id` beim Öffnen fest: ein erneutes «Speichern»
+nach einem Verbindungsfehler sendet dieselbe Op (Server dedupliziert über `op_id`, keine Doppelanlage); nach Erfolg oder
+geändertem Inhalt gibt es eine neue `op_id`. Der Fahrzeugbuch-Wechsler wechselt per Maus/Touch sofort, per Tastatur erst
+mit Enter bzw. «Wechseln» (Pfeiltasten wählen nur vor). Fehler-Toasts schliessen sich nicht automatisch.
 
 ## Entwicklung
+
+Voraussetzung: Node.js 24 (`engines.node` `>=24`), npm 11. Werkzeuge: Vite 8 (Rolldown), Vitest 5, TypeScript 6,
+vue-tsc 3, ESLint 10 (Flat Config), Playwright 1.65 (Chromium-Revision 1255).
 
 ```bash
 npm ci
@@ -57,7 +63,8 @@ Demo-Benutzer (Auswahl auf der Mock-Anmeldeseite):
 | `neu` Nora Neu | – (zum Einladen) |
 
 Teststeuerung: `POST /__mock/reset`, `POST /__mock/config` (`{"members501":true}`, `{"rate429":"verify"}`,
-`{"tokenTtl":30}`), `POST /__mock/expire-tokens`. Umgebungsvariablen: `MOCK_TOKEN_TTL`, `MOCK_PAGE_MAX`, `MOCK_SEED`.
+`{"tokenTtl":30}`, `{"dropResponseOnce":true}` = nächsten Sync anwenden, Antwort aber abbrechen; `{"failUploadOnce":true}` = nächster Beleg-Upload 503), `POST /__mock/expire-tokens`.
+Mitglieds-IDs entsprechen wie beim Server der Keycloak-Benutzer-ID (`sub`). Umgebungsvariablen: `MOCK_TOKEN_TTL`, `MOCK_PAGE_MAX`, `MOCK_SEED`.
 `--seed large` (bzw. `npm run mock:large`) ersetzt «privat» durch einen Lasttest-Bestand (siehe Skalierung).
 
 ## Build, Tests
@@ -77,7 +84,9 @@ npm run preview       # dist/ über den Mock (http://127.0.0.1:4319)
   inkl. Fallback, virtuelles Scrollen mit ARIA, Seitenwahl, Entprellung, Diagramm-Verdichtung, Beleg-Cache,
   Vorkomprimierung und Budget-Skript).
 - `npm run e2e`: Playwright-Projekt `functional` gegen `mock/server.mjs --static dist` (Login mit PKCE, Deep-Links,
-  Rollen, Monatsabschluss, Stammdaten-Sync, Mitglieder, 401-Refresh, 429, Downloads, Belege, vorkomprimierte Assets)
+  Rollen, Monatsabschluss, Stammdaten-Sync inkl. verlorener Antwort, Mitglieder inkl. Übernehmen/Selbst-Herabstufung,
+  Fahrzeugbuch-Wechsler per Tastatur, Reflow 390 px ohne horizontales Scrollen, 401-Refresh, 429, Downloads, Belege,
+  vorkomprimierte Assets)
   und Projekt `perf` gegen `--seed large` (`tests/e2e/large-data.perf.spec.ts`). Jeder Test schlägt fehl, wenn die
   Konsole einen CSP-Verstoss oder einen Seitenfehler meldet.
 
@@ -102,14 +111,15 @@ Hash unter `/assets/`) und danach mit `scripts/compress.mjs` die vorkomprimierte
 Ausgelegt auf viele Jahre, viele Fahrzeuge und 100k+ Fahrten je Fahrzeugbuch, bei wenig Last auf dem Server.
 
 **Bundle und Auslieferung**
-- Alle Routen lazy (`() => import(…)`). Stabile Chunks (`vite.config.ts`): `vendor-vue`, `vendor-router`,
+- Alle Routen lazy (`() => import(…)`). Stabile Chunks (`vite.config.ts`, Rolldown `codeSplitting.groups` mit
+  Prioritäten): `vendor-vue`, `vendor-router`,
   `vendor-oidc` (Hash ändert sich nur bei Updates der Abhängigkeit → bleiben über App-Releases im Browser-Cache),
   `core` (alles statisch vom Entry Erreichbare), `charts` (SVG-Diagramme, Ausdünnung), `export` (PDF/CSV/Belege,
   Beleg-Cache), `lists` (virtuelles Scrollen, Seitenwahl). `index.html` lädt nur den Startpfad; Routen-Chunks erst bei
   Bedarf. Vue ohne Options-API (`__VUE_OPTIONS_API__: false`).
 - Budgets in `package.json` → `budgets` (KiB, gzip), geprüft mit `npm run size` (auch in CI): Startpfad-JS ≤ 72,
-  Pfad bis Übersicht ≤ 85, CSS ≤ 8, jeder Chunk ≤ 32, Worker ≤ 8. Stand: Startpfad 68.6 KiB gzip (61.5 KiB brotli),
-  bis Übersicht 80.7 KiB, CSS 5.6 KiB, grösster Chunk `vendor-vue` 26.0 KiB.
+  Pfad bis Übersicht ≤ 85, CSS ≤ 8, jeder Chunk ≤ 32, Worker ≤ 8. Stand: Startpfad 65.9 KiB gzip (59.3 KiB brotli),
+  bis Übersicht 77.7 KiB, CSS 5.6 KiB, grösster Chunk `vendor-vue` 24.9 KiB.
 - Vorkomprimierung (Vertrag mit dem Server): `npm run build` erzeugt für jede Text-Datei in `dist/` ab 1 KiB
   (`.html .js .css .svg .json .txt …`) `<datei>.br` (Brotli Q11) und `<datei>.gz` (gzip 9). `npm run size` prüft
   Vollständigkeit und verlustfreie Dekomprimierung; der Mock liefert sie wie der Server mit `Content-Encoding`/`Vary`

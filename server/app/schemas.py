@@ -26,6 +26,8 @@ class AuthConfig(BaseModel):
     client_id: str
     web_client_id: str
     scopes: str
+    # Quellcode der laufenden Fassung (AGPL-3.0 § 13), für den Link in Web und App
+    source_url: str
 
 
 Role = Literal["admin", "write", "read"]
@@ -107,6 +109,31 @@ class VehicleData(Payload):
     ownership: Literal["private", "business"] | None = None
     private_use_method: Literal["flat", "effective"] | None = None
     annual_fixed_costs: float | None = Field(default=None, ge=0, le=1_000_000)
+    # VIN/Fahrgestellnummer: Eingabe mit Leer-/Bindestrichen zulässig, gespeichert normalisiert (17 Zeichen)
+    vin: str | None = Field(default=None, max_length=40)
+
+    @field_validator("vin")
+    @classmethod
+    def _vin(cls, v: str | None) -> str | None:
+        return normalize_vin(v)
+
+
+# ISO 3779: 17 Zeichen, Ziffern und Grossbuchstaben ohne I, O, Q. Prüfziffer (Stelle 9) wird nicht erzwungen –
+# in Europa unüblich; nur die Clients weisen bei nordamerikanischen VINs darauf hin.
+VIN_RE = re.compile(r"[A-HJ-NPR-Z0-9]{17}")
+VIN_STRIP = re.compile(r"[\s\-]+")
+
+
+def normalize_vin(v: str | None) -> str | None:
+    """Leer → None; Leerzeichen/Bindestriche entfernen, Grossbuchstaben; ungültig → ValueError (422/abgelehnt)."""
+    if v is None:
+        return None
+    v = VIN_STRIP.sub("", v).upper()
+    if not v:
+        return None
+    if not VIN_RE.fullmatch(v):
+        raise ValueError("VIN ungültig: genau 17 Zeichen (Ziffern und Buchstaben ohne I, O, Q)")
+    return v
 
 
 class OdometerData(Payload):
@@ -456,7 +483,7 @@ class RevisionOut(BaseModel):
 
 
 class AuditResult(BaseModel):
-    ok: bool                # Kette + Datenstand + Anker
+    ok: bool                # Kette + Datenstand + Anker + Belegdateien, Vollprüfung nicht überfällig
     chain_ok: bool
     state_ok: bool
     count: int
@@ -467,7 +494,9 @@ class AuditResult(BaseModel):
     signed: bool            # Anker-Signaturschlüssel konfiguriert
     anchors: int
     blobs_checked: int = 0  # Belegdateien mit geprüfter SHA-256
-    blobs_missing: int = 0  # Belege ohne (hochgeladene) Datei – kein Fehler
+    blobs_missing: int = 0  # Belege ohne je hochgeladene Datei – kein Fehler (fehlt eine vorhanden gewesene: Befund)
+    # fällige Vollprüfung seit > 2 × VERIFY_FULL_INTERVAL_S nicht ausgeführt (Lock belegt) → ok=false
+    full_overdue: bool = False
     # Inkrementell: Kette, geänderte Datensätze und Anker ab dieser Seq geprüft (davor bestätigt); None = voll
     incremental_from: int | None = None
     full_seq: int | None = None           # Stand (Revisionen) der letzten Vollprüfung
@@ -489,6 +518,8 @@ class AnchorList(BaseModel):
     key_id: str | None
     message_format: str
     anchors: list[AnchorOut]
+    total: int | None = None              # alle Anker des Mandanten (unabhängig vom Paging)
+    next_after_seq: int | None = None     # weitere Seite: ?after_seq=<Wert>&limit=…; None = vollständig
 
 
 # ---------- Statistik ----------

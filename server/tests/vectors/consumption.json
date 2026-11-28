@@ -1,5 +1,5 @@
 {
- "description": "Verbrauch Voll-zu-voll (stats.consumption_points/summarize). Eingabe: Tankvorgänge (nicht stornierte, beliebige Reihenfolge; sortiert wird nach km, Datum, id). Ausgabe: Etappen und Durchschnitt. Gerundet wie der Server: liters/cost 2, consumption 2, cost_per_km 3, avg_consumption 2, avg_liters_per_km 4, avg_cost_per_km 3.",
+ "description": "Verbrauch Voll-zu-voll (stats.consumption_points/summarize). Eingabe: Tankvorgänge (nicht stornierte, beliebige Reihenfolge; sortiert wird nach km, Datum, id). Ausgabe: Etappen und Durchschnitt. Gerundet wie der Server: liters/cost 2, consumption 2, cost_per_km 3, avg_consumption 2, avg_liters_per_km 4, avg_cost_per_km 3. Erneute Volltankung beim gleichen km-Stand (nachgetankt) zählt zur vorigen Etappe; vor der ersten Etappe bleibt sie unberücksichtigt.",
  "cases": [
   {
    "name": "zwei Volltankungen",
@@ -216,6 +216,78 @@
      "avg_consumption": null,
      "avg_liters_per_km": null,
      "avg_cost_per_km": null
+    }
+   }
+  },
+  {
+   "name": "Nachtanken beim gleichen km zählt zur vorigen Etappe",
+   "fuel": [
+    {
+     "id": "f1",
+     "date": "2026-06-01",
+     "km": 60000,
+     "liters": 40.0,
+     "price_total": 72.0,
+     "full_tank": true
+    },
+    {
+     "id": "f2",
+     "date": "2026-06-10",
+     "km": 60600,
+     "liters": 36.0,
+     "price_total": 64.8,
+     "full_tank": true
+    },
+    {
+     "id": "f3",
+     "date": "2026-06-10",
+     "km": 60600,
+     "liters": 3.0,
+     "price_total": 5.4,
+     "full_tank": true
+    },
+    {
+     "id": "f4",
+     "date": "2026-06-15",
+     "km": 60900,
+     "liters": 8.0,
+     "price_total": 14.4,
+     "full_tank": false
+    },
+    {
+     "id": "f5",
+     "date": "2026-06-20",
+     "km": 61100,
+     "liters": 22.0,
+     "price_total": 39.6,
+     "full_tank": true
+    }
+   ],
+   "expected": {
+    "points": [
+     {
+      "date": "2026-06-10",
+      "km": 60600,
+      "distance": 600,
+      "liters": 39.0,
+      "cost": 70.2,
+      "consumption": 6.5,
+      "cost_per_km": 0.117
+     },
+     {
+      "date": "2026-06-20",
+      "km": 61100,
+      "distance": 500,
+      "liters": 30.0,
+      "cost": 54.0,
+      "consumption": 6.0,
+      "cost_per_km": 0.108
+     }
+    ],
+    "summary": {
+     "avg_consumption": 6.27,
+     "avg_liters_per_km": 0.0627,
+     "avg_cost_per_km": 0.113
     }
    }
   }

@@ -1006,7 +1006,7 @@ struct ReadingParser {
         c *= 0.85 + 0.15 * (token?.confidence ?? 0.5)
         reading.confidence = min(0.98, max(0.05, c))
         reading.reason = (token?.hints[.km] ?? 0) >= 0.5
-            ? "Kilometerstand neben „km“ erkannt."
+            ? "Kilometerstand neben «km» erkannt."
             : "Grösste passende Zahl als Kilometerstand gewählt."
     }
 }

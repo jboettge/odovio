@@ -228,6 +228,7 @@ struct MaterialArticleFormView: View {
                 }
             }
             .navigationTitle(titleText)
+            .keyboardDoneToolbar()   // Zahlentastatur ohne Eingabetaste (U7)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {

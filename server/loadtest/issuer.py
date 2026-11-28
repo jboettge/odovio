@@ -68,7 +68,7 @@ class Issuer:
         self.url = f"http://{host}:{self.server.server_address[1]}/realms/{realm}"
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
 
-    def start(self) -> "Issuer":
+    def start(self) -> Issuer:
         self.thread.start()
         return self
 

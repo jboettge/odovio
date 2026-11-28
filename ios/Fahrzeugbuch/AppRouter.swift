@@ -1,3 +1,4 @@
+import CarPlay
 import Foundation
 import Observation
 import UIKit
@@ -61,11 +62,17 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
         MainActor.assumeIsolated {
             TripNotifications.shared.register()
         }
+        CrashReporter.shared.start()
         return true
     }
 
     func application(_ application: UIApplication, configurationForConnecting connectingSceneSession: UISceneSession,
                      options: UIScene.ConnectionOptions) -> UISceneConfiguration {
+        if connectingSceneSession.role == .carTemplateApplication {
+            let config = UISceneConfiguration(name: "CarPlay", sessionRole: connectingSceneSession.role)
+            config.delegateClass = CarPlaySceneDelegate.self
+            return config
+        }
         if let item = options.shortcutItem {
             // Kaltstart über Quick Action
             let type = item.type

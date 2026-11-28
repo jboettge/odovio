@@ -36,12 +36,16 @@ enum LogbookRules {
         localDay(iso).map { String($0.prefix(7)) }
     }
 
-    static func localMonth(_ t: Trip) -> String { localMonth(t.startAt) ?? t.monthKey }
+    static func localMonth(_ t: Trip) -> String { t.monthKey }
 
     static func day(_ date: Date) -> String { dayFormatter.string(from: date) }
 
+    /// Lokaler Monat (Zürich) "yyyy-MM" eines Zeitpunkts – die einzige Monatszuordnung von Fahrten (Q12;
+    /// `Trip.monthKey`, Monatsabschluss, Nachträge), unabhängig von der Zeitzone des Geräts.
+    static func month(_ date: Date) -> String { String(day(date).prefix(7)) }
+
     /// Laufender Monat in Zürich.
-    static func currentMonth(now: Date = Date()) -> String { String(day(now).prefix(7)) }
+    static func currentMonth(now: Date = Date()) -> String { month(now) }
 
     static func isMonth(_ s: String) -> Bool {
         let parts = s.split(separator: "-")

@@ -2,8 +2,10 @@ CrowdSec für das Fahrzeugbuch (Sicherheits-Log der API, Logger fahrzeugbuch.sec
 =========================================================================================
 Die API schreibt je Sicherheits-Ereignis eine JSON-Zeile nach stderr (docker logs fahrzeugbuch-api), z. B.
   {"ts":"…","logger":"fahrzeugbuch.security","event":"auth_failed","ip":"198.51.100.7","path":"/api/me",…}
-Ereignisse: auth_failed, rate_limited, brute_force_block, forbidden_tenant, admin_action, web_only_violation,
-upload_rejected, integrity_failed, config_warning, cors_rejected, host_rejected, forbidden_role.
+Ereignisse: auth_failed, auth_missing, rate_limited, brute_force_block, forbidden_tenant, admin_action,
+web_only_violation, upload_rejected, integrity_failed, integrity_full_overdue, verify_full_busy, config_warning,
+cors_rejected, host_rejected, forbidden_role. auth_missing (fehlendes/kaputtes Token) zählt bewusst nicht für
+Sperren – nur auth_failed (gefälschtes, abgelaufenes, fremdes Token). "path" ist URL-kodiert (ohne Query, nie ").
 
 Dateien
   acquis-fahrzeugbuch.yaml       → /etc/crowdsec/acquis.d/       (liest die Container-Logs über Docker)

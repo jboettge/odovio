@@ -1,0 +1,41 @@
+{
+ "description": "Aktueller km-Stand (stats.VehicleData.current_km / current_km_by_vehicle) und Service-Fälligkeit nach km. Höchster Wert aus Anfangs-km, km-Ständen, Tankvorgängen, Wartungen sowie km-Beginn/-Ende der nicht stornierten Fahrten (Fahrten mit \"deleted\": true zählen nicht). Fälligkeit: jüngste Wartung je Titel, überfällig ab current_km >= next_due_km.",
+ "cases": [
+  {
+   "name": "km-Ende der Fahrten über letzter Tankung → Service fällig",
+   "vehicle": {"name": "Golf", "initial_km": 10000},
+   "odometer": [{"date": "2026-01-02", "km": 10500}],
+   "fuel": [{"date": "2026-01-05", "km": 10800, "liters": 40.0, "price_total": 72.0}],
+   "maintenance": [{"date": "2026-01-06", "km": 10900, "title": "Service", "next_due_km": 12000}],
+   "trips": [
+    {"start_at": "2026-01-07T08:00:00+01:00", "end_at": "2026-01-07T12:00:00+01:00", "km_start": 10900,
+     "km_end": 11400, "category": "business", "purpose": "Kunde", "status": "confirmed"},
+    {"start_at": "2026-01-08T08:00:00+01:00", "end_at": "2026-01-08T18:00:00+01:00", "km_start": 11400,
+     "km_end": 12050, "category": "private", "status": "confirmed"},
+    {"start_at": "2026-01-09T08:00:00+01:00", "km_start": 12050, "km_end": 15000, "category": "private",
+     "status": "draft", "deleted": true}
+   ],
+   "expected": {"current_km": 12050, "driven_km": 2050, "overdue": ["Service"]}
+  },
+  {
+   "name": "Fahrt nur mit km-Beginn zählt ebenfalls",
+   "vehicle": {"name": "Kombi", "initial_km": 500},
+   "odometer": [],
+   "fuel": [{"date": "2026-02-01", "km": 800, "liters": 30.0, "price_total": 54.0}],
+   "maintenance": [{"date": "2026-02-01", "km": 800, "title": "Service", "next_due_km": 2000}],
+   "trips": [
+    {"start_at": "2026-02-03T08:00:00+01:00", "km_start": 950, "category": "unknown", "status": "draft"}
+   ],
+   "expected": {"current_km": 950, "driven_km": 450, "overdue": []}
+  },
+  {
+   "name": "ohne Fahrten: höchster km-Stand aus Tankung/Wartung",
+   "vehicle": {"name": "Bus", "initial_km": 1000},
+   "odometer": [{"date": "2026-03-01", "km": 1500}],
+   "fuel": [{"date": "2026-03-02", "km": 1700, "liters": 30.0, "price_total": 50.0}],
+   "maintenance": [{"date": "2026-03-03", "km": 1600, "title": "Service", "next_due_km": 1700}],
+   "trips": [],
+   "expected": {"current_km": 1700, "driven_km": 700, "overdue": ["Service"]}
+  }
+ ]
+}

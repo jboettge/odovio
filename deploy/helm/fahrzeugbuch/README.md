@@ -32,6 +32,12 @@ Pflicht: `config.OIDC_ISSUER`, `database.host`, DB-Passwörter (`database.existi
 `STRICT_CONFIG=1` (Default) `ANCHOR_SIGNING_KEY`. Weitere App-Geheimnisse (`KC_ADMIN_CLIENT_SECRET`, `VLLM_API_KEY`,
 `N8N_WEBHOOK_SECRET`, `METRICS_TOKEN`) ins App-Secret und in `secrets.existingSecretKeys` eintragen.
 
+**NetworkPolicy ist standardmässig an** (`networkPolicy.enabled: true`): Pflicht sind dann Egress-Ziele für die
+Datenbank (`networkPolicy.egress.database`) und den Issuer/Keycloak (`networkPolicy.egress.oidc`) – sonst bricht
+`helm` mit einer Meldung ab. `networkPolicy.ingress.controller` auf den eigenen Ingress-Controller stellen (Default
+Namespace `ingress-nginx`; k3s/Traefik: `kube-system`), weitere Dienste unter `networkPolicy.egress.extra`. Ohne
+NetworkPolicy-fähigen CNI bzw. bewusst ohne: `networkPolicy.enabled: false`.
+
 Geheimnisse kommen als Dateien (`/run/secrets/fahrzeugbuch/<NAME>` + Env `<NAME>_FILE`); URLs enthalten kein
 Passwort – der Server setzt `DATABASE_PASSWORD`, `MIGRATION_DATABASE_PASSWORD`, `REDIS_PASSWORD` ein.
 `secrets.useFileEnv=false` übergibt sie stattdessen als Env (secretKeyRef). Klartext-Werte in den Values
@@ -48,7 +54,10 @@ Owner-Rolle; die App-Pods erhalten nur die App-Rolle `fahrzeugbuch_app` (`AUTO_M
 Job, Hook-Secret und Hook-ServiceAccount; ein Fehler bricht `helm upgrade` ab, die alten Pods laufen weiter
 (`kubectl logs job/<release>-fahrzeugbuch-migrate`). Argo CD führt die Hooks als PreSync aus.
 Mit PgBouncer: `database.migrationHost` direkt auf die Primary (`<cluster>-rw`).
-`/health/ready` meldet 503, solange das Schema nicht dem Stand des Images entspricht.
+`/health/ready` meldet 503, solange das Schema älter als der Stand des Images ist (`migration_pending`) oder
+neuer und nicht als kompatibel markiert (`schema_newer`); ein Valkey-Ausfall macht Pods nicht unbereit
+(200, `"degraded": true` – Rate-Limits dann lokal mit dem Budget-Anteil je Prozess, Sperren je Pod). Der Migrationslauf eines älteren Images
+ändert einen neueren Stand nie: kompatibel → Exit 0 ohne Änderung, sonst Abbruch.
 
 ## Skalieren
 
@@ -83,18 +92,36 @@ helm upgrade fahrzeugbuch … -f values.yaml          # Migration → Rollout
 helm history fahrzeugbuch -n $NS; helm rollback fahrzeugbuch <rev> -n $NS
 ```
 
-Rollback setzt nur Kubernetes-Ressourcen zurück, **nicht das DB-Schema** (keine Downgrade-Migration). Ist das
-ältere Image mit dem neuen Schema nicht verträglich, `/health/ready` bleibt 503 → DB aus dem Backup vor dem Upgrade
-zurückspielen. Deshalb vor jedem Upgrade sichern. Das Beleg-PVC bleibt bei `helm uninstall` erhalten
-(`storage.fs.persistence.retain`).
+Ablauf `helm upgrade`: Hook-Job migriert (pre-upgrade) → Rolling Update (`maxUnavailable 0`). Während des
+Rollouts laufen alte Pods schon auf dem neuen Schema. Sie bleiben bereit, wenn der neue Stand für sie
+**kompatibel** ist:
+
+| Neue Migration | alte Pods während Rollout / nach `helm rollback` |
+|---|---|
+| `compatible_with_previous = True` (rein additiv, z. B. neue Tabelle/Index, nullable Spalte ausserhalb der Snapshots) | bereit: der Migrationslauf vermerkt die kompatiblen älteren Stände am Tabellenkommentar von `alembic_version`, das alte Image liest ihn (`database: compatible_newer`, `degraded: true`) |
+| `False` (z. B. 0005 `vehicles.vin`: altes Image kennt `vin` nicht) | `/health/ready` 503 `schema_newer` → kurzer Ausfall bis die neuen Pods bereit sind; Rollback siehe unten |
+
+`helm rollback` setzt nur Kubernetes-Ressourcen zurück, **nicht das DB-Schema** (keine Downgrade-Migration; der
+Migrations-Hook läuft bei `rollback` nicht). Danach:
+
+1. Ist der neue Stand als kompatibel vermerkt → nichts zu tun, die alten Pods werden bereit.
+2. Sonst, wenn das ältere Image auf dem neuen Schema trotzdem laufen darf (Fachentscheid; Release-Notes der Migration
+   prüfen): `helm upgrade <release> <chart-version des Rollbacks> --reuse-values
+   --set-string config.SCHEMA_COMPATIBLE_NEWER=<neue Revision>` (bzw. `"*"`); Readiness → 200, `helm upgrade` mit dem
+   älteren Chart bricht im Migrations-Job dann nicht ab. Nach dem nächsten Upgrade wieder leeren.
+3. Sonst DB aus dem Backup vor dem Upgrade zurückspielen. Deshalb vor jedem Upgrade sichern.
+
+Neue Migrationen: `compatible_with_previous` im Revisionsmodul bewusst setzen (Vorlage `alembic/script.py.mako`,
+Default `False`). Das Beleg-PVC bleibt bei `helm uninstall` erhalten (`storage.fs.persistence.retain`).
 
 ## Backup
 
 Gemeinsam und zeitnah: **Datenbank** (CloudNativePG Barman-Cloud bzw. `pg_dump` als Owner) **und Belege**
 (S3-Bucket mit Versionierung/Replikation bzw. PVC-Snapshot/Longhorn-Backup). **`ANCHOR_SIGNING_KEY`** separat und
 offline aufbewahren – ohne ihn lassen sich neue Anker nicht mehr mit demselben Schlüssel signieren; nach einem
-Wechsel alte Public Keys in `config.ANCHOR_PUBLIC_KEYS`. Signierte Anker zusätzlich extern archivieren
-(`GET /api/t/<mandant>/audit/anchors`).
+Wechsel alte Public Keys in `config.ANCHOR_PUBLIC_KEYS`, am besten mit Gültigkeitsgrenze `<key>@<Datum des
+Wechsels>` (UTC; dann bestätigt der alte Schlüssel keine neueren Anker). Signierte Anker zusätzlich extern
+archivieren (`GET /api/t/<mandant>/audit/anchors`, seitenweise mit `?after_seq=<Seq>&limit=<n>`).
 
 ## Tests
 

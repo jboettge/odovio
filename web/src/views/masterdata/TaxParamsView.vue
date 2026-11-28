@@ -120,7 +120,7 @@ const unit = (k: string) => TAX_UNITS[k as TaxKey] ?? ''
     </div>
   </section>
 
-  <EditorModal :open="ed.state.open" :title="ed.state.id ? 'Steuerparameter bearbeiten' : 'Steuerparameter erfassen'" :busy="ed.state.busy" :error="ed.state.error" @close="ed.close" @save="save">
+  <EditorModal :open="ed.state.open" :title="ed.state.id ? 'Steuerparameter bearbeiten' : 'Steuerparameter erfassen'" :busy="ed.state.busy" :error="ed.state.error" :dirty="ed.dirty" @close="ed.close" @save="save">
     <Field v-slot="f" label="Parameter" required :error="e.key">
       <select :id="f.id" v-model="ed.state.form.key" class="select"><option v-for="k in TAX_KEYS" :key="k" :value="k">{{ TAX_KEY_LABELS[k] }} ({{ TAX_UNITS[k] }})</option></select>
     </Field>

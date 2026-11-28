@@ -166,6 +166,7 @@ struct ScanResultView: View {
                 }
             }
         }
+        .keyboardDoneToolbar()   // Zahlentastatur ohne Eingabetaste (U7)
         .toolbar {
             ToolbarItem(placement: .confirmationAction) {
                 Button("Übernehmen", action: apply).disabled(!canApply)

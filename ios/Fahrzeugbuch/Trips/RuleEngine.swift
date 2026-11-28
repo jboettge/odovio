@@ -83,7 +83,7 @@ enum RuleEngine {
             let name = facts.endPlaceName ?? "Zielort"
             return TripSuggestion(category: cat, purpose: nil, customerId: facts.endPlaceCustomerId,
                                   confidence: 0.8,
-                                  reason: "Standardkategorie des Orts „\(name)“: \(TripCategoryText.label(cat))",
+                                  reason: "Standardkategorie des Orts «\(name)»: \(TripCategoryText.label(cat))",
                                   source: "rule")
         }
         return nil

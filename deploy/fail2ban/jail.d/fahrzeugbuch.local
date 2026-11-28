@@ -1,15 +1,29 @@
 # fail2ban-Jail für die Fahrzeugbuch-API (Alternative zu CrowdSec). Sperrt am Docker-Host bzw. – besser –
 # dort, wo der Reverse Proxy läuft (sonst trifft die Sperre nur den Proxy). Bei Docker: Kette DOCKER-USER.
-# logpath: Docker json-file-Log des Containers (docker inspect -f '{{.LogPath}}' fahrzeugbuch-api)
-#          oder bei Log-Treiber journald: backend = systemd, journalmatch = CONTAINER_NAME=fahrzeugbuch-api
+#
+# NUR das Log des API-Containers lesen (nie /var/lib/docker/containers/*/*-json.log: dort könnte jeder andere
+# Container – oder ein Nutzer über dessen Log – Zeilen schreiben, die wie ein Ereignis der API aussehen).
+#
+# Variante A (empfohlen): Log-Treiber journald für den API-Container, z. B. in docker-compose.yml beim Dienst api
+#     logging: {driver: journald, options: {tag: fahrzeugbuch-api}}
+#   (docker logs funktioniert weiter). Dann filtert journalmatch exakt auf den Container:
 [fahrzeugbuch]
 enabled  = true
 filter   = fahrzeugbuch
-logpath  = /var/lib/docker/containers/*/*-json.log
-backend  = auto
+backend  = systemd
+journalmatch = CONTAINER_NAME=fahrzeugbuch-api
+#
+# Variante B: Docker json-file. logpath = genau die Datei des API-Containers; sie ändert sich, wenn der Container
+#   neu erstellt wird (Update/Redeploy) → danach anpassen und `fail2ban-client reload fahrzeugbuch`:
+#     docker inspect -f '{{.LogPath}}' fahrzeugbuch-api
+#   Statt der drei Zeilen oben (backend/journalmatch):
+# backend  = auto
+# logpath  = /var/lib/docker/containers/<ID>/<ID>-json.log
+#
 # Feld "ts" ist UTC
 logtimezone = UTC
-# 15 Ereignisse (401/429/Sperre der API) in 10 min → 1 h sperren, Wiederholungstäter länger
+# 15 Ereignisse (401 mit gefälschtem/abgelaufenem Token, 429, Sperre der API) in 10 min → 1 h sperren,
+# Wiederholungstäter länger. Fehlendes/kaputtes Token (auth_missing) zählt bewusst nicht.
 maxretry = 15
 findtime = 10m
 bantime  = 1h
@@ -17,5 +31,6 @@ bantime.increment = true
 bantime.maxtime = 1w
 chain    = DOCKER-USER
 action   = iptables-allports[name=fahrzeugbuch, chain=DOCKER-USER]
-# eigene Netze/Monitoring nie sperren
-ignoreip = 127.0.0.1/8 ::1 10.0.0.0/8 192.168.0.0/16
+# eigene Netze/Monitoring und der Reverse Proxy selbst nie sperren (Docker-Netze 172.16.0.0/12: bei falsch
+# gesetztem FORWARDED_ALLOW_IPS stünde dort die Proxy-IP statt der Client-IP → sonst Sperre aller Nutzer)
+ignoreip = 127.0.0.1/8 ::1 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16

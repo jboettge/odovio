@@ -36,7 +36,7 @@ final class TenantStore {
     /// Materialstamm (mandantenweit)
     private(set) var articles: [String: MaterialArticle] = [:]
     /// Fahrtenbuch
-    private(set) var trips: [String: Trip] = [:] { didSet { tripCache.invalidate() } }
+    private(set) var trips: [String: Trip] = [:] { didSet { tripCache.invalidate(); statsCache.removeAll() } }
     private(set) var places: [String: Place] = [:]
     private(set) var customers: [String: Customer] = [:]
     private(set) var rules: [String: PurposeRule] = [:]
@@ -197,7 +197,7 @@ final class TenantStore {
         guard let data = try? await apiProvider().download("api/t/\(tenant.slug)/attachments/\(a.id)/blob"),
               !data.isEmpty else { return nil }
         guard AttachmentFiles.sha256(data) == a.sha256.lowercased() else {
-            notices.append("Beleg „\(a.kindLabel)“ wurde nicht angezeigt: Die Prüfsumme der heruntergeladenen Datei "
+            notices.append("Beleg «\(a.kindLabel)» wurde nicht angezeigt: Die Prüfsumme der heruntergeladenen Datei "
                            + "stimmt nicht mit dem Beleg überein (Datei beschädigt oder verändert).")
             return nil
         }
@@ -474,18 +474,23 @@ final class TenantStore {
         reason?.nilIfEmpty.map { String($0.prefix(maxReasonLength)) }
     }
 
-    /// Zuletzt gewähltes Fahrzeug je Mandant (für Start/Automatik); sonst erstes Fahrzeug.
+    /// Standardfahrzeug je Mandant für die Anzeige (Quick Actions, Vorbelegung); ohne Wahl das erste Fahrzeug.
+    /// Automatik/Siri/CarPlay verwenden `explicitDefaultVehicleId` (Q3: nie stillschweigend das erste).
     var defaultVehicleId: String? {
         get {
-            if let id = UserDefaults.standard.string(forKey: defaultVehicleKey),
-               let v = vehicles[id], !v.deleted {
-                return id
-            }
-            return vehicleList.first?.id
+            explicitDefaultVehicleId ?? vehicleList.first?.id
         }
         set {
             UserDefaults.standard.set(newValue, forKey: defaultVehicleKey)
         }
+    }
+
+    /// Ausdrücklich gewähltes Standardfahrzeug (Einstellungen › Fahrtenbuch bzw. zuletzt gestartete Fahrt);
+    /// `nil`, wenn keines gewählt oder es storniert ist.
+    var explicitDefaultVehicleId: String? {
+        guard let id = UserDefaults.standard.string(forKey: defaultVehicleKey),
+              let v = vehicles[id], !v.deleted else { return nil }
+        return id
     }
 
     private var defaultVehicleKey: String { "defaultVehicle-\(tenant.slug)" }
@@ -553,10 +558,10 @@ final class TenantStore {
     }
 
     /// Statistik je Fahrzeug, gecacht (invalidiert bei Änderungen an Fahrzeugen, km-Ständen, Tankungen,
-    /// Wartungen, Material sowie beim Tageswechsel).
+    /// Wartungen, Material, Fahrten sowie beim Tageswechsel).
     func stats(for v: Vehicle) -> VehicleStats {
         // Zugriffe registrieren, damit Ansichten auch bei Cache-Treffern aktualisiert werden
-        _ = (vehicles.count, odometer.count, fuel.count, maintenance.count, materials.count)
+        _ = (vehicles.count, odometer.count, fuel.count, maintenance.count, materials.count, trips.count)
         let today = Calendar.current.startOfDay(for: Date())
         if statsDay != today {
             statsCache.removeAll()
@@ -567,7 +572,7 @@ final class TenantStore {
         let ids = Set(list.map(\.id))
         let mats = materials.values.filter { !$0.deleted && ids.contains($0.maintenanceId) }
         let s = StatsCalculator.stats(vehicle: v, odometer: odometer(for: v.id), fuel: fuel(for: v.id),
-                                      maintenance: list, materials: mats)
+                                      maintenance: list, materials: mats, trips: chain(for: v.id))
         statsCache[v] = s
         return s
     }
@@ -1066,7 +1071,7 @@ final class TenantStore {
         switch entity {
         case FuelEntry.entityName: if let f = fuel[id] { return "\(base) \(day(f.date))" }
         case OdometerReading.entityName: if let o = odometer[id] { return "\(base) \(day(o.date))" }
-        case Maintenance.entityName: if let m = maintenance[id] { return "\(base) „\(m.title)“ \(day(m.date))" }
+        case Maintenance.entityName: if let m = maintenance[id] { return "\(base) «\(m.title)» \(day(m.date))" }
         case Trip.entityName:
             if let t = trips[id] {
                 let when = t.startDate.map(day) ?? String(t.startAt.prefix(10))
@@ -1689,7 +1694,7 @@ final class TenantStore {
             let backup = quarantineFile()
             cursor = 0
             storeLoadIssue = "Die lokale Datei konnte nicht gelesen werden"
-                + (backup.map { " und wurde als „\($0)“ gesichert" } ?? "")
+                + (backup.map { " und wurde als «\($0)» gesichert" } ?? "")
                 + (isLocal ? ". Die Daten werden aus dem lokalen Journal wiederhergestellt."
                    : ". Die Daten werden neu vom Server geladen; nicht synchronisierte Änderungen sind in der Sicherung enthalten.")
         }
@@ -1755,7 +1760,7 @@ final class TenantStore {
             let backup = quarantineFile()
             cursor = 0
             storeLoadIssue = "Die lokale Datei konnte nicht gelesen werden"
-                + (backup.map { " und wurde als „\($0)“ gesichert" } ?? "") + "."
+                + (backup.map { " und wurde als «\($0)» gesichert" } ?? "") + "."
         }
         // Während der Sperre erfasste Änderungen übernehmen
         for op in memory.outbox where !outbox.contains(where: { $0.opId == op.opId }) {
@@ -1799,9 +1804,13 @@ final class TenantStore {
         observers.add(center.addObserver(forName: Notification.Name("UIApplicationProtectedDataDidBecomeAvailable"),
                                          object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated {
-                guard let self, self.persistBlocked else { return }
-                self.reloadIfBlocked()
-                Task { await self.sync() }
+                guard let self else { return }
+                if self.persistBlocked || self.localJournal?.isBlocked == true {
+                    self.reloadIfBlocked()
+                    Task { await self.sync() }
+                }
+                // Entsperrt: während der Sperre zurückgestellte Journal-Zeilen sofort anhängen (Q8)
+                self.localJournal?.flush()
             }
         })
     }

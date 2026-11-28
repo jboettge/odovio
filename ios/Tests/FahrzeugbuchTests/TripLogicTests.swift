@@ -289,3 +289,21 @@ final class TrackStoreTests: XCTestCase {
         XCTAssertFalse(left.contains { $0.hasPrefix("active") })
     }
 }
+
+/// CoreLocation akzeptiert für `CLMonitor` nur Buchstaben/Ziffern im Namen (sonst Absturz beim Start).
+final class TripDetectorTests: XCTestCase {
+    @MainActor
+    func testMonitorNameIsAlphanumeric() {
+        let name = TripDetector.monitorName
+        XCTAssertFalse(name.isEmpty)
+        XCTAssertTrue(name.unicodeScalars.allSatisfy { CharacterSet.alphanumerics.contains($0) && $0.isASCII },
+                      "Ungültiger CLMonitor-Name: \(name)")
+    }
+
+    /// Q13: auch die Bedingungs-Identifier (Orts-UUIDs) nur alphanumerisch.
+    func testMonitorIdentifierIsAlphanumeric() {
+        let id = TripDetector.monitorIdentifier("AAAA1111-bbbb-4ccc-8ddd-eeeeffff0000")
+        XCTAssertEqual(id, "AAAA1111bbbb4ccc8dddeeeeffff0000")
+        XCTAssertTrue(id.unicodeScalars.allSatisfy { CharacterSet.alphanumerics.contains($0) && $0.isASCII })
+    }
+}

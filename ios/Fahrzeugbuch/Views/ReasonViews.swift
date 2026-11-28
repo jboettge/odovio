@@ -62,7 +62,8 @@ struct ReasonSheet: View {
             .interactiveDismissDisabled(!reason.trimmed.isEmpty)
             .onAppear { focused = true }
         }
-        .presentationDetents([.medium, .large])
+        // Nur volle Höhe: Autofokus + Tastatur verdeckten bei halber Höhe den Bestätigen-Knopf (U1)
+        .presentationDetents([.large])
     }
 }
 

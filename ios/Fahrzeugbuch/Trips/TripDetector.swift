@@ -3,7 +3,7 @@ import CoreMotion
 import Foundation
 
 /// Ort, um den eine CLMonitor-Region als Weck-Trigger gelegt wird.
-struct MonitoredPlace {
+struct MonitoredPlace: Codable, Equatable {
     var id: String
     var lat: Double
     var lon: Double
@@ -27,6 +27,15 @@ struct MotionSample {
         date = a.startDate
     }
 
+    /// Wertbasiert (Tests, Auswertung von Lücken)
+    init(automotive: Bool, stationary: Bool = false, onFoot: Bool = false, confidence: Int = 2, date: Date) {
+        self.automotive = automotive
+        self.stationary = stationary
+        self.onFoot = onFoot
+        self.confidence = confidence
+        self.date = date
+    }
+
     var isCar: Bool { automotive && confidence >= CMMotionActivityConfidence.medium.rawValue }
     var isOnFoot: Bool { onFoot && confidence >= CMMotionActivityConfidence.medium.rawValue }
 }
@@ -35,8 +44,11 @@ struct MotionSample {
 ///
 /// - Start: CoreMotion „automotive“ (Konfidenz ≥ mittel) seit ≥ 60 s. Bei Rotlicht meldet iOS oft
 ///   automotive + stationary gleichzeitig → das zählt weiter als Fahrt; nur Gehen/Laufen/Velo setzt zurück.
-/// - Stopp (automatisch gestartete Fahrten): > 3 min kein automotive und keine Bewegung im GPS
-///   (stillstehend/gehend), bzw. > 10 min ohne GPS-Bewegung.
+/// - Stopp (automatisch gestartete Fahrten, `TripStopRule`): > 3 min kein automotive und keine Bewegung im
+///   GPS (stillstehend/gehend) bzw. iOS meldet Stillstand (`isStationary`) seit 1 min und CoreMotion nicht mehr
+///   «automotive». Ohne GPS-Bewegung, aber «automotive» (Stau) läuft die Fahrt weiter (Q4). Wird die App
+///   beim Parkieren suspendiert, gilt als Ende der letzte Bewegungspunkt (`TripTiming`), und eine Bewegung
+///   nach > 10 min Lücke beginnt eine neue Fahrt (`RecordingGap`, im Coordinator).
 /// - Manuell gestartete Fahrten (Knopf/Kurzbefehl): nach 10 min Stillstand nur ein Vorschlag
 ///   (`onIdleDetected` → Mitteilung „Fahrt beenden?“), kein automatisches Beenden.
 /// - Weck-Trigger, wenn die App suspendiert oder beendet ist: wesentliche Standortänderungen,
@@ -47,11 +59,24 @@ struct MotionSample {
 @MainActor
 final class TripDetector: NSObject, CLLocationManagerDelegate {
     static let startAfter: TimeInterval = 60
-    static let stopAfter: TimeInterval = 180
-    static let stopWithoutMovement: TimeInterval = 600
+    static let stopWithoutMovement = TripStopRule.stopWithoutMovement
     static let cooldown: TimeInterval = 120
     static let maxRegions = 20
-    static let monitorName = "fahrzeugbuch.orte"
+    /// Nur Buchstaben/Ziffern: CoreLocation bricht bei anderen Zeichen (Punkt, Bindestrich) mit
+    /// «Monitor name is not valid» ab (NSInternalInconsistencyException in `CLMonitor.init`).
+    static let monitorName = "fahrzeugbuchOrte"
+
+    /// CLMonitor öffnen? Bei aktiver Automatik mit Standortberechtigung immer (unabhängig von den Orten, Q7).
+    nonisolated static func shouldOpenMonitor(enabled: Bool, authorized: Bool) -> Bool {
+        enabled && authorized
+    }
+
+    /// Bedingungs-Identifier ebenfalls nur aus Buchstaben/Ziffern (Q13: Orts-IDs sind UUIDs mit Bindestrich).
+    nonisolated static func monitorIdentifier(_ placeId: String) -> String {
+        String(String.UnicodeScalarView(placeId.unicodeScalars.filter {
+            $0.isASCII && CharacterSet.alphanumerics.contains($0)
+        }))
+    }
 
     var onStartDetected: (() -> Void)?
     var onStopDetected: (() -> Void)?
@@ -67,6 +92,9 @@ final class TripDetector: NSObject, CLLocationManagerDelegate {
     private var monitorTask: Task<Void, Never>?
     private var tickTask: Task<Void, Never>?
     private var places: [MonitoredPlace] = []
+    /// Regionsabgleich seriell: nie zwei gleichzeitig (sonst zwei `CLMonitor` gleichen Namens → Absturz)
+    private var regionSyncTask: Task<Void, Never>?
+    private var regionSyncPending = false
 
     private var lastActivity: MotionSample?
     private var automotiveSince: Date?
@@ -79,6 +107,13 @@ final class TripDetector: NSObject, CLLocationManagerDelegate {
     private var watchStartedAt: Date?
     private var cooldownUntil = Date.distantPast
     private var lastKnownLocation: CLLocation?
+    /// iOS meldet Stillstand (`CLLocationUpdate.isStationary`) seit
+    private var stationarySince: Date?
+
+    /// Letzte CoreMotion-Aktivität
+    var latestMotion: MotionSample? { lastActivity }
+    /// Zuletzt «im Auto» (CoreMotion, mind. mittlere Sicherheit) – Startbedingung der Auto-Erkennung
+    var lastCarMotionAt: Date? { lastAutomotiveAt }
 
     override init() {
         super.init()
@@ -93,7 +128,7 @@ final class TripDetector: NSObject, CLLocationManagerDelegate {
             startMotionUpdates()
         }
         startLocationTriggers()
-        Task { await self.syncRegions() }
+        scheduleRegionSync()
     }
 
     func disable() {
@@ -104,7 +139,7 @@ final class TripDetector: NSObject, CLLocationManagerDelegate {
         manager?.stopMonitoringSignificantLocationChanges()
         manager?.stopMonitoringVisits()
         if wasEnabled || monitor != nil {
-            Task { await self.syncRegions() }
+            scheduleRegionSync()
         }
     }
 
@@ -112,7 +147,7 @@ final class TripDetector: NSObject, CLLocationManagerDelegate {
     func updatePlaces(_ places: [MonitoredPlace]) {
         self.places = places
         guard isEnabled else { return }
-        Task { await self.syncRegions() }
+        scheduleRegionSync()
     }
 
     /// Aufzeichnung läuft; `auto == true` → automatischer Stopp, sonst nur Stillstands-Vorschlag.
@@ -124,6 +159,7 @@ final class TripDetector: NSObject, CLLocationManagerDelegate {
         let now = Date()
         watchStartedAt = now
         lastMovingAt = now
+        stationarySince = nil
         if auto || CMMotionActivityManager.authorizationStatus() == .authorized {
             startMotionUpdates()   // manuell: keine unvermittelte Abfrage „Bewegung & Fitness“
         }
@@ -135,6 +171,7 @@ final class TripDetector: NSObject, CLLocationManagerDelegate {
         stopsAutomatically = false
         idleNotified = false
         automotiveSince = nil
+        stationarySince = nil
         cooldownUntil = Date().addingTimeInterval(Self.cooldown)
         if !isEnabled { stopMotionUpdates() }
     }
@@ -142,9 +179,40 @@ final class TripDetector: NSObject, CLLocationManagerDelegate {
     /// GPS-Fix während der Aufzeichnung (Bewegung zählt als „fährt noch“).
     func noteLocation(_ location: CLLocation) {
         lastKnownLocation = location
-        if location.speed >= 3 {
+        if location.speed >= TripStopRule.movingSpeed {
             lastMovingAt = Date()
+            stationarySince = nil
             idleNotified = false   // fährt wieder → nächster Stillstand meldet erneut
+        }
+    }
+
+    /// `CLLocationUpdate.isStationary` der laufenden Aufzeichnung (Stopp-Signal, Q2).
+    func noteStationary(_ stationary: Bool) {
+        if stationary {
+            if stationarySince == nil { stationarySince = Date() }
+            guard watchingStop else { return }
+            if evaluate() { ensureTicking() }
+        } else {
+            stationarySince = nil
+        }
+    }
+
+    /// Bewegte sich das Fahrzeug in den letzten `seconds` (GPS ≥ 1 m/s)?
+    func movedRecently(within seconds: TimeInterval) -> Bool {
+        lastMovingAt.map { Date().timeIntervalSince($0) < seconds } ?? false
+    }
+
+    /// CoreMotion-Historie (inkl. der Aktivität, die vor `from` begann: Abfrage ab 15 min früher).
+    /// `nil` ohne Berechtigung/Verfügbarkeit oder bei Fehler.
+    func motionHistory(from: Date, to: Date) async -> [MotionSample]? {
+        guard CMMotionActivityManager.isActivityAvailable(),
+              CMMotionActivityManager.authorizationStatus() == .authorized, to > from else { return nil }
+        let manager = motion
+        return await withCheckedContinuation { (continuation: CheckedContinuation<[MotionSample]?, Never>) in
+            manager.queryActivityStarting(from: from.addingTimeInterval(-900), to: to,
+                                          to: OperationQueue.main) { activities, error in
+                continuation.resume(returning: error == nil ? (activities ?? []).map { MotionSample($0) } : nil)
+            }
         }
     }
 
@@ -197,8 +265,9 @@ final class TripDetector: NSObject, CLLocationManagerDelegate {
                 return true
             }
             let stillInCar = lastActivity?.automotive ?? false
-            let noMovement = now.timeIntervalSince(lastMovingAt ?? watchStartedAt ?? now)
-            if (!stillInCar && idle > Self.stopAfter) || noMovement > Self.stopWithoutMovement {
+            if TripStopRule.shouldStop(now: now, lastAutomotiveAt: lastAutomotiveAt, lastMovingAt: lastMovingAt,
+                                       watchStartedAt: watchStartedAt, stillInCar: stillInCar,
+                                       stationarySince: stationarySince) {
                 watchingStop = false
                 stopsAutomatically = false
                 onStopDetected?()
@@ -283,10 +352,29 @@ final class TripDetector: NSObject, CLLocationManagerDelegate {
     private func authorizationChanged() {
         guard isEnabled else { return }
         startLocationTriggers()
-        Task { await self.syncRegions() }
+        scheduleRegionSync()
+    }
+
+    /// Abgleich anstossen; läuft schon einer, wird danach genau einmal nachgezogen.
+    private func scheduleRegionSync() {
+        if regionSyncTask != nil {
+            regionSyncPending = true
+            return
+        }
+        regionSyncTask = Task { [weak self] in
+            while let self {
+                self.regionSyncPending = false
+                await self.syncRegions()
+                if !self.regionSyncPending {
+                    self.regionSyncTask = nil
+                    return
+                }
+            }
+        }
     }
 
     /// Regionen auf die (max. 20 nächstgelegenen) Orte abgleichen; deaktiviert → alle entfernen.
+    /// Nur über `scheduleRegionSync()` aufrufen.
     private func syncRegions() async {
         let status = manager?.authorizationStatus ?? .notDetermined
         let authorized = status == .authorizedAlways || status == .authorizedWhenInUse
@@ -302,7 +390,10 @@ final class TripDetector: NSObject, CLLocationManagerDelegate {
             wanted = Array(list.prefix(Self.maxRegions))
         }
         if monitor == nil {
-            guard !wanted.isEmpty else { return }
+            // Immer öffnen, sobald die Automatik aktiv ist – auch ohne (bekannte) Orte: iOS liefert ein
+            // Weck-Ereignis nur an einen geöffneten Monitor gleichen Namens (Q7). Deaktiviert und noch nie
+            // geöffnet: nichts zu tun.
+            guard Self.shouldOpenMonitor(enabled: isEnabled, authorized: authorized) else { return }
             let m = await CLMonitor(Self.monitorName)
             monitor = m
             monitorTask = Task { [weak self] in
@@ -317,16 +408,16 @@ final class TripDetector: NSObject, CLLocationManagerDelegate {
             }
         }
         guard let monitor else { return }
-        let wantedIds = Set(wanted.map(\.id))
+        let wantedIds = Set(wanted.map { Self.monitorIdentifier($0.id) })
         let existing = await monitor.identifiers
         for id in existing where !wantedIds.contains(id) {
             await monitor.remove(id)
         }
         let existingIds = Set(existing)
-        for p in wanted where !existingIds.contains(p.id) {
+        for p in wanted where !existingIds.contains(Self.monitorIdentifier(p.id)) {
             let condition = CLMonitor.CircularGeographicCondition(
                 center: CLLocationCoordinate2D(latitude: p.lat, longitude: p.lon), radius: max(p.radius, 150))
-            await monitor.add(condition, identifier: p.id)
+            await monitor.add(condition, identifier: Self.monitorIdentifier(p.id))
         }
     }
 

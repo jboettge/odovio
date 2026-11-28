@@ -20,14 +20,29 @@ targets:
         TARGETED_DEVICE_FAMILY: "1"
         CODE_SIGN_STYLE: Automatic
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+      configs:
+        # CarPlay-Berechtigung nur Debug/Simulator, bis Apple sie für ch.odovio freischaltet (dann auch Release
+        # setzen und das App-Store-Profil neu erzeugen – sonst schlägt die Signierung fehl).
+        Debug:
+          CODE_SIGN_ENTITLEMENTS: Fahrzeugbuch/CarPlay/CarPlay.entitlements
     info:
       path: Fahrzeugbuch/Info.plist
       properties:
         CFBundleDisplayName: odovio
+        # XcodeGen schreibt sonst fest 1.0/1 → Versions-/Build-Nummer aus den Build-Settings (CI überschreibt sie)
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         CFBundleDevelopmentRegion: de
         # Nur Standard-Krypto (HTTPS, CryptoKit-Hashes/Signaturprüfung) → keine Exportdeklaration nötig
         ITSAppUsesNonExemptEncryption: false
         UILaunchScreen: {}
+        # CarPlay-Szene (Fahrt starten/beenden, Tanken); das iPhone-Fenster liefert SwiftUI
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: true
+          UISceneConfigurations:
+            CPTemplateApplicationSceneSessionRoleApplication:
+              - UISceneConfigurationName: CarPlay
+                UISceneDelegateClassName: $(PRODUCT_MODULE_NAME).CarPlaySceneDelegate
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
         # Einrichtung per Link/QR: fahrzeugbuch://setup?server=https://…
         # (das OIDC-Callback-Schema ch.odovio behandelt ASWebAuthenticationSession – nicht hier eintragen)
@@ -45,28 +60,31 @@ targets:
             UIApplicationShortcutItemSubtitle: Mit dem Standardfahrzeug
             UIApplicationShortcutItemIconType: UIApplicationShortcutIconTypePlay
         # Intelligentes Fahrtenbuch (ios/Fahrzeugbuch/Trips)
+        # I4: Servermodus ehrlich beschreiben (reduzierter Track, Wohnort-Umgebung) – wie der «Immer»-Text
         NSLocationWhenInUseUsageDescription: >-
           Das Fahrtenbuch nutzt deinen Standort nur während einer Fahrt, um Distanz sowie Start- und Zielort
           zu erfassen. Die GPS-Rohdaten bleiben auf diesem iPhone und werden 30 Tage nach Bestätigung der
-          Fahrt gelöscht. Im Privatmodus wird kein Track gespeichert.
+          Fahrt gelöscht. Mit Server erhält dein Fahrzeugbuch-Server Start/Ziel als Adresse, die Distanz und
+          zur Strassendistanz-Berechnung den reduzierten Track ohne Wohnort-Umgebung und ohne die
+          ersten/letzten 200 m (dort nicht gespeichert). Im Privatmodus wird kein Track gespeichert.
         NSLocationAlwaysAndWhenInUseUsageDescription: >-
-          Mit „Immer“ erkennt das Fahrtenbuch Fahrten automatisch und zeichnet sie auch bei gesperrtem iPhone
+          Mit «Immer» erkennt das Fahrtenbuch Fahrten automatisch und zeichnet sie auch bei gesperrtem iPhone
           auf. Ausserhalb von Fahrten wird nur grob erkannt, ob du losfährst (bekannte Orte, wesentliche
           Standortänderungen) – kein Bewegungsprofil. Die Rohdaten bleiben auf dem Gerät; dein
           Fahrzeugbuch-Server erhält Start/Ziel als Adresse, die Distanz und zur Strassendistanz-Berechnung
           den reduzierten Track ohne Wohnort-Umgebung und ohne die ersten/letzten 200 m (dort nicht gespeichert).
         NSMotionUsageDescription: >-
-          Bewegungsdaten („im Auto“, „stillstehend“, „gehend“) werden nur auf dem iPhone ausgewertet, um
+          Bewegungsdaten («im Auto», «stillstehend», «gehend») werden nur auf dem iPhone ausgewertet, um
           Beginn und Ende einer Fahrt automatisch zu erkennen. Sie verlassen das Gerät nicht.
         NSCalendarsFullAccessUsageDescription: >-
           Termine werden nur auf dem iPhone gelesen, um zu einer Fahrt den passenden Termin als Zweck
           vorzuschlagen. Kalenderinhalte werden nicht übertragen – übernommen wird höchstens der Termintitel
           als Zweckvorschlag der jeweiligen Fahrt. Der Kalender wird nie verändert.
-        # Scan von Zapfsäule, Quittung und Tacho (ios/Fahrzeugbuch/Scan)
+        # Scan von Zapfsäule, Quittung, Tacho und VIN (ios/Fahrzeugbuch/Scan)
         NSCameraUsageDescription: >-
-          Die Kamera wird nur verwendet, um Zapfsäule, Tankquittung oder Tacho zu fotografieren. Die
-          Texterkennung läuft auf diesem iPhone. Ein Foto verlässt das Gerät nur, wenn du es als Beleg
-          speicherst (Übertragung auf deinen Fahrzeugbuch-Server) oder ausdrücklich „Mit KI auswerten“ wählst.
+          Die Kamera wird nur verwendet, um Zapfsäule, Tankquittung oder Tacho zu fotografieren und die
+          Fahrgestellnummer (VIN) zu scannen. Text- und Strichcode-Erkennung laufen auf diesem iPhone. Ein Foto verlässt das Gerät nur, wenn du es als Beleg
+          speicherst (Übertragung auf deinen Fahrzeugbuch-Server) oder ausdrücklich «Mit KI auswerten» wählst.
         UIBackgroundModes: [location]
   FahrzeugbuchTests:
     type: bundle.unit-test

@@ -84,6 +84,32 @@ def test_anchor_interval_and_report_forces_anchor(client, monkeypatch):
     assert len(anchors) == 2 and anchors[-1]["seq"] == 2
 
 
+def test_anchor_list_paging(client, monkeypatch):
+    """S15: /audit/anchors ohne Parameter wie bisher vollständig; mit limit/after_seq seitenweise."""
+    monkeypatch.setenv("ANCHOR_SIGNING_KEY", KEY)
+    monkeypatch.setenv("ANCHOR_INTERVAL_MIN", "0")
+    vid = new_vehicle(client)
+    for i in range(4):
+        sync(client, op("odometer", uid(), {"vehicle_id": vid, "date": f"2026-01-0{i + 1}", "km": i + 1}))
+    full = client.get(f"{T}/audit/anchors").json()
+    seqs = [a["seq"] for a in full["anchors"]]
+    assert len(seqs) == full["total"] == 5 and seqs == sorted(seqs) and full["next_after_seq"] is None
+    page = client.get(f"{T}/audit/anchors?limit=2").json()
+    assert [a["seq"] for a in page["anchors"]] == seqs[:2] and page["next_after_seq"] == seqs[1]
+    got, after = [], None
+    while True:
+        q = "?limit=2" + (f"&after_seq={after}" if after is not None else "")
+        page = client.get(f"{T}/audit/anchors{q}").json()
+        got += [a["seq"] for a in page["anchors"]]
+        after = page["next_after_seq"]
+        if after is None:
+            break
+    assert got == seqs and page["total"] == 5
+    assert client.get(f"{T}/audit/anchors?after_seq={seqs[-1]}").json()["anchors"] == []
+    assert client.get(f"{T}/audit/anchors?limit=0").status_code == 422
+    assert client.get(f"{T}/audit/anchors?limit=1001").status_code == 422
+
+
 def test_anchor_signature_tamper_detected(client, monkeypatch):
     monkeypatch.setenv("ANCHOR_SIGNING_KEY", KEY)
     _seed(client)

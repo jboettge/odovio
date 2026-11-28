@@ -93,15 +93,15 @@ function save() {
     </div>
     <Pager v-model:page="pager.page" v-model:size="pager.size" :total="pager.total" label="Seiten der Regeln" />
   </section>
-  <EditorModal :open="ed.state.open" :title="ed.state.id ? 'Regel bearbeiten' : 'Regel erfassen'" :busy="ed.state.busy" :error="ed.state.error" @close="ed.close" @save="save">
+  <EditorModal :open="ed.state.open" :title="ed.state.id ? 'Regel bearbeiten' : 'Regel erfassen'" :busy="ed.state.busy" :error="ed.state.error" :dirty="ed.dirty" @close="ed.close" @save="save">
     <Field v-slot="f" label="Von Ort"><select :id="f.id" v-model="ed.state.form.from_place_id" class="select"><option :value="null">beliebig</option><option v-for="p in places" :key="p.id" :value="p.id">{{ p.name }}</option></select></Field>
     <Field v-slot="f" label="Nach Ort"><select :id="f.id" v-model="ed.state.form.to_place_id" class="select"><option :value="null">beliebig</option><option v-for="p in places" :key="p.id" :value="p.id">{{ p.name }}</option></select></Field>
-    <fieldset class="fieldset span-2">
+    <fieldset class="fieldset span-2" :aria-describedby="e.weekdays ? 'rule-weekdays-err' : undefined">
       <legend>Wochentage</legend>
       <div class="row">
         <label v-for="(d, i) in WEEKDAYS" :key="d" class="check"><input type="checkbox" :checked="days.includes(i + 1)" @change="toggleDay(i + 1)" />{{ d }}</label>
       </div>
-      <p v-if="e.weekdays" class="error small">{{ e.weekdays }}</p>
+      <p v-if="e.weekdays" id="rule-weekdays-err" class="error small">{{ e.weekdays }}</p>
     </fieldset>
     <Field v-slot="f" label="Zeit von" hint="HH:MM, leer = ganzer Tag" :error="e.time_from"><input :id="f.id" v-model="ed.state.form.time_from" class="input" type="time" :aria-invalid="f.invalid" :aria-describedby="f.describedby" /></Field>
     <Field v-slot="f" label="Zeit bis" :error="e.time_to"><input :id="f.id" v-model="ed.state.form.time_to" class="input" type="time" :aria-invalid="f.invalid" /></Field>

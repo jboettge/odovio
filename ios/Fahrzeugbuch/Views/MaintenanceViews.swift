@@ -341,12 +341,17 @@ struct MaintenanceFormView: View {
                 Section {
                     ForEach($items) { $item in
                         HStack {
+                            // Tippfläche ≥ 44 pt, mit Beschriftung für VoiceOver (U6)
                             Button { item.done.toggle() } label: {
                                 Image(systemName: item.done ? "checkmark.circle.fill" : "circle")
-                                    .foregroundStyle(item.done ? .green : .secondary)
+                                    .foregroundStyle(item.done ? Color.successText : Color.secondary)
                                     .imageScale(.large)
+                                    .frame(minWidth: 44, minHeight: 44)
+                                    .contentShape(Rectangle())
                             }
                             .buttonStyle(.plain)
+                            .accessibilityLabel(item.label.trimmed.isEmpty ? "Punkt abhaken" : "\(item.label) abhaken")
+                            .accessibilityValue(item.done ? "erledigt" : "offen")
                             TextField("Punkt", text: $item.label)
                         }
                     }
@@ -357,7 +362,9 @@ struct MaintenanceFormView: View {
                         TextField("Neuer Punkt", text: $newItem)
                             .onSubmit(addItem)
                         Button(action: addItem) { Image(systemName: "plus.circle.fill") }
+                            .frame(minWidth: 44, minHeight: 44)
                             .disabled(newItem.trimmed.isEmpty)
+                            .accessibilityLabel("Punkt hinzufügen")
                     }
                 } header: {
                     Text("Checkliste")
@@ -378,6 +385,7 @@ struct MaintenanceFormView: View {
                 }
             }
             .navigationTitle(maintenance == nil ? "Neue Wartung" : "Wartung bearbeiten")
+            .keyboardDoneToolbar()   // Zahlentastatur ohne Eingabetaste (U7)
             .formToolbar(canSave: store.canWrite && !title.trimmed.isEmpty
                             && (!reasonRequired || CorrectionReason.isValid(reason)),
                          hasChanges: hasChanges, save: save)
@@ -721,6 +729,14 @@ private struct MaterialEditView: View {
         return "Der Artikel wird beim Sichern der Wartung angelegt und steht danach zur Auswahl."
     }
 
+    /// Stepper-Bindung an die Texteingabe: −/+ um 1, nie unter 1 (leere/ungültige Eingabe zählt als 1)
+    private var quantityStep: Binding<Double> {
+        Binding(
+            get: { max(1, draft.quantity.asDouble ?? 1) },
+            set: { draft.quantity = Fmt.editQty(max(1, $0)) }
+        )
+    }
+
     // MARK: Validierung
 
     private var nameValid: Bool {
@@ -780,7 +796,18 @@ private struct MaterialEditView: View {
                 }
 
                 Section {
-                    UnitField("Menge", text: $draft.quantity, unit: draft.unit.nilIfEmpty ?? "Stk")
+                    LabeledContent("Menge") {
+                        HStack(spacing: 8) {
+                            TextField("Menge", text: $draft.quantity)
+                                .keyboardType(.decimalPad)
+                                .multilineTextAlignment(.trailing)
+                            Text(draft.unit.nilIfEmpty ?? "Stk").foregroundStyle(.secondary)
+                            // Menge ohne Tastatur ändern (ganze Schritte; Dezimalwerte bleiben per Eingabe möglich)
+                            Stepper("Menge", value: quantityStep, in: 1...MaintenanceMaterial.maxQuantity, step: 1)
+                                .labelsHidden()
+                                .fixedSize()
+                        }
+                    }
                     LabeledContent("Einheit") {
                         HStack(spacing: 8) {
                             TextField("Stk", text: $draft.unit)
@@ -812,6 +839,7 @@ private struct MaterialEditView: View {
                 catalogOptionsSection
             }
             .navigationTitle(isNew ? "Neues Material" : "Material bearbeiten")
+            .keyboardDoneToolbar()   // Zahlentastatur ohne Eingabetaste (U7)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -839,7 +867,8 @@ private struct MaterialEditView: View {
             }
             .discardGuard(hasChanges: draft != original, isAsking: $askDiscard)
         }
-        .presentationDetents([.medium, .large])
+        // volle Höhe: bei halber Höhe verdeckte die Zahlentastatur das Mengenfeld
+        .presentationDetents([.large])
     }
 
     private var catalogSection: some View {

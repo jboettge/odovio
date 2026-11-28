@@ -1,8 +1,8 @@
 # Build-Kontext: Repo-Root  (docker build -f server/Dockerfile .  bzw. docker compose, siehe .dockerignore)
 #
-# Stufe 1: Web-Frontend (Vue/Vite) → /web/dist. Image per Digest gepinnt (node:22-alpine). Aktualisieren:
-#   docker pull node:22-alpine && docker image inspect --format '{{index .RepoDigests 0}}' node:22-alpine
-FROM node:22-alpine@sha256:1314fb30ec37592d5845e5a160d522c0e680972aa534549940b8d73bde88481a AS web
+# Stufe 1: Web-Frontend (Vue/Vite) → /web/dist. Image per Digest gepinnt (node:24-alpine). Aktualisieren:
+#   docker pull node:24-alpine && docker image inspect --format '{{index .RepoDigests 0}}' node:24-alpine
+FROM node:24-alpine@sha256:116b800c3754b440ee0aa3ed2f20f5bf3d99a554bfd9adeea09ea8017f6e85f5 AS web
 WORKDIR /web
 COPY web/package.json web/package-lock.json ./
 # exakt nach Lock-Datei, ohne Install-Skripte der Abhängigkeiten
@@ -10,9 +10,9 @@ RUN npm ci --ignore-scripts --no-audit --no-fund
 COPY web/ ./
 RUN npm run build
 
-# Stufe 2: API. Basis-Image per Digest gepinnt (python:3.12-slim). Aktualisieren:
-#   docker pull python:3.12-slim && docker image inspect --format '{{index .RepoDigests 0}}' python:3.12-slim
-FROM python:3.12-slim@sha256:191083cdf6c7bda8c76158983163ead5d5cf7b77cf3033e805bb0f5296f51b4b
+# Stufe 2: API. Basis-Image per Digest gepinnt (python:3.14-slim). Aktualisieren:
+#   docker pull python:3.14-slim && docker image inspect --format '{{index .RepoDigests 0}}' python:3.14-slim
+FROM python:3.14-slim@sha256:22eafb370920ad8b429e0aec3fff433e0669968519f5d60469d83729c138b28b
 
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 FORWARDED_ALLOW_IPS=127.0.0.1
 WORKDIR /app

@@ -73,6 +73,34 @@ test('Stammdaten: Kunde erfassen mit Validierung (Sync-Op)', async ({ page, prob
   await expect(page.getByRole('cell', { name: 'Velo Kurier GmbH', exact: true })).toBeVisible()
 })
 
+test('Stammdaten: Fahrzeug mit VIN – Normalisierung, Validierung, Prüfziffer-Hinweis', async ({ page, problems: _p }) => {
+  await login(page, 'anna', '/stammdaten/fahrzeuge')
+  await page.getByRole('button', { name: 'Fahrzeug erfassen' }).click()
+  const dlg = page.getByRole('dialog', { name: 'Fahrzeug erfassen' })
+  await dlg.getByLabel('Name').fill('Testwagen')
+  const vin = dlg.getByLabel('VIN / Fahrgestellnummer')
+  await vin.fill('WVWZZZ1KZ6W00000O')
+  await vin.blur()
+  await expect(dlg.getByText('VIN ungültig: genau 17 Zeichen')).toBeVisible()
+  await vin.fill('1m8gdm9a1kp042788')
+  await vin.blur()
+  await expect(vin).toHaveValue('1M8GDM9A1KP042788')
+  await expect(dlg.getByText(/Prüfziffer \(Stelle 9\) passt nicht – erwartet «X»/)).toBeVisible()
+  await vin.fill(' wvw-zzz 1kz6w0 00001 ')
+  await vin.blur()
+  await expect(vin).toHaveValue('WVWZZZ1KZ6W000001')
+  await expect(dlg.getByText('VIN ungültig')).toBeHidden()
+  await dlg.getByRole('button', { name: 'Speichern' }).click()
+  await expect(dlg).toBeHidden()
+  await expect(page.getByRole('row', { name: /Testwagen/ })).toContainText('WVWZZZ1KZ6W000001')
+})
+
+test('Fahrzeugdetails zeigen die VIN', async ({ page, problems: _p }) => {
+  await login(page, 'anna')
+  await page.getByRole('link', { name: 'Skoda Octavia öffnen' }).click()
+  await expect(page.getByTestId('vehicle-vin')).toHaveText('TMBJJ7NE5L0123456')
+})
+
 test('Steuerparameter erfassen (nur Web-Client)', async ({ page, problems: _p }) => {
   await login(page, 'jakob', '/stammdaten/steuerparameter?buch=privat')
   await page.getByRole('button', { name: 'Parameter erfassen' }).click()
@@ -90,14 +118,105 @@ test('Mitglieder: einladen, Rolle ändern, entfernen, letzter Verwalter geschüt
   await page.getByLabel('Rolle', { exact: true }).selectOption('read')
   await page.getByRole('button', { name: 'Hinzufügen' }).click()
   await expect(page.getByRole('cell', { name: 'Nora Neu', exact: true })).toBeVisible()
+  // Auswahl ist nur ein Entwurf – erst «Übernehmen» speichert
   await page.getByLabel('Rolle von Nora Neu').selectOption('write')
+  await page.getByRole('button', { name: 'Rolle von Nora Neu übernehmen: Lesen → Bearbeiten' }).click()
   await expect(page.getByRole('status').filter({ hasText: 'Rolle von Nora Neu: Bearbeiten' })).toBeVisible()
+  await expect(page.getByRole('button', { name: /Rolle von Nora Neu übernehmen/ })).toHaveCount(0)
   await page.getByRole('button', { name: 'Nora Neu entfernen' }).click()
   await page.getByRole('dialog', { name: 'Mitglied entfernen' }).getByRole('button', { name: 'Entfernen' }).click()
   await expect(page.getByRole('cell', { name: 'Nora Neu', exact: true })).toHaveCount(0)
-  // letzter Verwalter
-  await page.getByLabel('Rolle von Jakob Muster').selectOption('write')
+  // letzter Verwalter: eigene Herabstufung wird zusätzlich bestätigt, Server lehnt ab
+  await page.getByLabel('Rolle von Jakob Muster (du)').selectOption('write')
+  await page.getByRole('button', { name: /Rolle von Jakob Muster übernehmen/ }).click()
+  const dlg = page.getByRole('dialog', { name: 'Eigene Rolle ändern' })
+  await expect(dlg).toContainText('Verwalten → Bearbeiten')
+  await expect(dlg).toContainText('Du verlierst damit sofort die Mitgliederverwaltung')
+  await dlg.getByRole('button', { name: 'Rolle trotzdem ändern' }).click()
   await expect(page.getByRole('alert').filter({ hasText: 'Letzter Verwalter' })).toBeVisible()
+})
+
+test('Mitglieder: Pfeiltaste im Rollen-Select speichert nichts, eigene Zeile markiert', async ({ page, problems: _p }) => {
+  await login(page, 'jakob', '/verwaltung/mitglieder?buch=privat')
+  const writes: string[] = []
+  page.on('request', (r) => {
+    if (r.method() !== 'GET' && r.url().includes('/members')) writes.push(`${r.method()} ${r.url()}`)
+  })
+  await expect(page.getByRole('row', { name: /Jakob Muster \(du\)/ })).toBeVisible()
+  await expect(page.getByRole('row', { name: /Anna Beispiel/ })).not.toContainText('(du)')
+  const sel = page.getByLabel('Rolle von Anna Beispiel', { exact: true })
+  await expect(sel).toHaveValue('write')
+  await sel.focus()
+  await page.keyboard.press('ArrowDown')
+  await expect(sel).toHaveValue('read')
+  await expect(page.getByRole('button', { name: 'Rolle von Anna Beispiel übernehmen: Bearbeiten → Lesen' })).toBeVisible()
+  await page.getByRole('button', { name: 'Rollenänderung von Anna Beispiel verwerfen' }).click()
+  await expect(sel).toHaveValue('write')
+  expect(writes).toEqual([])
+  // sich selbst entfernen: deutliche Warnung
+  await page.getByRole('button', { name: 'Jakob Muster entfernen' }).click()
+  const dlg = page.getByRole('dialog', { name: 'Dich selbst entfernen' })
+  await expect(dlg).toContainText('Du verlierst damit sofort den Zugriff')
+  await dlg.getByRole('button', { name: 'Abbrechen' }).click()
+  expect(writes).toEqual([])
+})
+
+test('Mitglieder: eigene Herabstufung nach Bestätigung → Verwaltung sofort weg', async ({ page, problems: _p }) => {
+  await login(page, 'jakob', '/verwaltung/mitglieder?buch=privat')
+  await page.getByLabel('Rolle von Anna Beispiel').selectOption('admin')
+  await page.getByRole('button', { name: /Rolle von Anna Beispiel übernehmen/ }).click()
+  await expect(page.getByRole('status').filter({ hasText: 'Rolle von Anna Beispiel: Verwalten' })).toBeVisible()
+  await page.getByLabel('Rolle von Jakob Muster (du)').selectOption('read')
+  await page.getByRole('button', { name: /Rolle von Jakob Muster übernehmen/ }).click()
+  const dlg = page.getByRole('dialog', { name: 'Eigene Rolle ändern' })
+  await expect(dlg).toContainText('Du verlierst damit sofort die Mitgliederverwaltung und das Erfassen von Einträgen')
+  await dlg.getByRole('button', { name: 'Rolle trotzdem ändern' }).click()
+  await expect(page).toHaveURL(/\/uebersicht$/)
+  await expect(page.locator('.topbar .badge')).toHaveText('Lesen')
+  await expect(page.getByRole('navigation', { name: 'Hauptnavigation' }).getByRole('link', { name: 'Mitglieder' })).toHaveCount(0)
+})
+
+test('Fahrzeugbuch-Wechsler: Pfeiltaste wählt nur vor, Enter oder «Wechseln» wechselt', async ({ page, problems: _p }) => {
+  await login(page, 'jakob', '/aktivitaet?buch=privat')
+  const nav = page.getByRole('navigation', { name: 'Hauptnavigation' })
+  await expect(nav.getByRole('link', { name: 'Skoda Octavia' })).toBeVisible()
+  const sel = page.locator('#tenant-select')
+  await expect(sel).toHaveValue('privat')
+  await sel.focus()
+  await page.keyboard.press('ArrowUp')
+  await expect(sel).toHaveValue('muster-ag')
+  await expect(page.getByRole('button', { name: 'Wechseln' })).toBeVisible()
+  await expect(page).toHaveURL(/\/aktivitaet/)
+  await expect(nav.getByRole('link', { name: 'Skoda Octavia' })).toBeVisible()
+  // Optionen: muster-ag, privat · Escape verwirft, erneut vorwählen und mit Enter wechseln
+  await page.keyboard.press('Escape')
+  await expect(sel).toHaveValue('privat')
+  await page.keyboard.press('ArrowUp')
+  await page.keyboard.press('Enter')
+  await expect(page).toHaveURL(/\/uebersicht$/)
+  await expect(nav.getByRole('link', { name: 'VW Caddy' })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Wechseln' })).toHaveCount(0)
+  // Auswahl per Maus (ohne Tastatur) wechselt direkt
+  await sel.selectOption('privat')
+  await expect(nav.getByRole('link', { name: 'Skoda Octavia' })).toBeVisible()
+})
+
+test('Stammdaten: verlorene Antwort + erneutes Speichern → genau ein Datensatz', async ({ page, request, problems: _p }) => {
+  await login(page, 'anna', '/stammdaten/kunden')
+  await page.getByRole('button', { name: 'Kunde erfassen' }).click()
+  const dlg = page.getByRole('dialog', { name: 'Kunde erfassen' })
+  await dlg.getByLabel('Name').fill('Doppel Test AG')
+  await request.post('/__mock/config', { data: { dropResponseOnce: true } })
+  await dlg.getByRole('button', { name: 'Speichern' }).click()
+  await expect(dlg.getByText('Keine Verbindung zum Server')).toBeVisible()
+  await expect(dlg.getByText('Erneutes Speichern legt nichts doppelt an')).toBeVisible()
+  const [res] = await Promise.all([
+    page.waitForResponse((r) => r.url().endsWith('/sync') && r.request().method() === 'POST'),
+    dlg.getByRole('button', { name: 'Speichern' }).click(),
+  ])
+  expect((await res.json()).results[0].status).toBe('duplicate')
+  await expect(dlg).toBeHidden()
+  await expect(page.getByRole('cell', { name: 'Doppel Test AG', exact: true })).toHaveCount(1)
 })
 
 test('Mitglieder ohne Keycloak-Verwaltung → Hinweis «In Keycloak verwalten», keine Mutationen', async ({ page, request, problems: _p }) => {
@@ -133,7 +252,7 @@ test('Belege-Vorschau als Blob-URL', async ({ page, problems: _p }) => {
   await login(page, 'anna')
   await page.getByRole('link', { name: 'Skoda Octavia öffnen' }).click()
   await page.getByRole('link', { name: 'Tankvorgänge' }).click()
-  await page.getByRole('button', { name: /Belege vom/ }).first().click()
+  await page.getByRole('button', { name: /Belege? vom .* anzeigen/ }).first().click()
   const img = page.getByRole('dialog').locator('img').first()
   await expect(img).toBeVisible()
   expect(await img.getAttribute('src')).toMatch(/^blob:/)

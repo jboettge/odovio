@@ -11,8 +11,8 @@ Env:
 
 Alle Schlüssel tragen das Präfix und eine TTL (kein unbegrenztes Wachstum); Uhrzeit aus Redis (TIME), damit alle
 Worker dieselbe Zeitbasis haben. Mehrschrittige Änderungen laufen atomar als Lua-Skript (EVALSHA).
-Ausweichverhalten bei Ausfall (StateUnavailable, siehe Aufrufer): Rate-Limits fail-open, Brute-Force-Sperren und
-Circuit-Breaker lokal je Prozess weiter; /health meldet "degraded", /health/ready 503.
+Ausweichverhalten bei Ausfall (StateUnavailable, siehe Aufrufer): Rate-Limits lokal (Anteil je Prozess),
+Brute-Force-Sperren und Circuit-Breaker lokal je Prozess weiter; /health meldet "degraded", /health/ready 503.
 Valkey ist nur ein Cache flüchtiger Zustände: Persistenz aus (--save "" --appendonly no), maxmemory + allkeys-lru.
 """
 import asyncio
@@ -364,6 +364,13 @@ class RedisState:
     def ping(self) -> bool:
         try:
             return bool(self._sync.ping())
+        except self._errors() as e:
+            raise self._failed(e) from None
+
+    async def aping(self) -> bool:
+        """Wie ping, aber in der Event-Loop (Readiness ohne Threadpool)."""
+        try:
+            return bool(await self._aclient().ping())
         except self._errors() as e:
             raise self._failed(e) from None
 

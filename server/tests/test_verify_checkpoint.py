@@ -4,11 +4,13 @@ monotones Fortschreiben (mehrere Worker) und ehrlicher PDF-Integritätsabschnitt
 import base64
 import datetime as dt
 import json
+import logging
 import os
 
+import pytest
 from sqlalchemy import select, text
 
-from app import integrity, models
+from app import integrity, jobs, models, security
 from app.db import SessionLocal, engine, snapshot_session
 from app.report import integrity_section
 
@@ -208,10 +210,114 @@ def test_full_check_due_after_interval(client, monkeypatch):
     assert _verify(client)["incremental_from"] is None
 
 
+@pytest.fixture
+def held_full_lock(monkeypatch):
+    """try-Lock "verify_full" dauerhaft belegt (z. B. von jemandem mit DB-Zugang festgehalten)."""
+    real = jobs.xact_lock
+
+    def fake(db, name, *parts, wait=True):
+        if name == "verify_full" and not wait:
+            return False
+        return real(db, name, *parts, wait=wait)
+    monkeypatch.setattr(jobs, "xact_lock", fake)
+
+
+@pytest.fixture
+def sec_events():
+    out: list[tuple[int, dict]] = []
+
+    class H(logging.Handler):
+        def emit(self, record):
+            out.append((record.levelno, record.security))
+    h = H()
+    security.log.addHandler(h)
+    yield out
+    security.log.removeHandler(h)
+
+
+def _ago(hours: float) -> str:
+    return (dt.datetime.now(dt.UTC) - dt.timedelta(hours=hours)).isoformat(timespec="seconds")
+
+
+def test_blocked_full_check_becomes_overdue_not_ok(client, held_full_lock, sec_events):
+    """X2: fällige Vollprüfung, die nicht laufen kann → bis 2× Intervall weiter inkrementell «OK», danach
+    «Vollprüfung überfällig» (ok=false) in API und PDF + Sicherheits-Log."""
+    _seed(client)
+    _verify(client)
+    _set_cp(full_at=_ago(25))                                    # fällig, Lock belegt → inkrementell
+    v = _verify(client)
+    assert v["ok"] and not v["full_overdue"] and v["incremental_from"] == 4
+    _set_cp(full_at=_ago(49))                                    # > 2 × 24 h
+    v = _verify(client)
+    assert v["ok"] is False and v["full_overdue"] and v["incremental_from"] == 4
+    assert v["chain_ok"] and v["state_ok"] and any(p.startswith("Vollprüfung überfällig") for p in v["problems"])
+    text_, audit = _section()
+    assert not audit["ok"] and "NICHT BESTÄTIGT – Vollprüfung überfällig" in text_ and "– OK" not in text_
+    ev = [(lvl, e) for lvl, e in sec_events if e["event"] == "integrity_full_overdue"]
+    assert ev and ev[0][0] == logging.WARNING and ev[0][1]["tenant"] == "privat" and ev[0][1]["age_h"] >= 49
+    assert not any(e["event"] == "integrity_failed" for _, e in sec_events)
+
+
+def test_overdue_cleared_by_full_check(client, sec_events):
+    _seed(client)
+    _verify(client)
+    _set_cp(full_at=_ago(49))
+    v = _verify(client)                                          # Lock frei → Vollprüfung läuft
+    assert v["ok"] and not v["full_overdue"] and v["incremental_from"] is None
+
+
+def test_repeated_409_on_full_logged(client, held_full_lock, sec_events):
+    _seed(client)
+    for _ in range(3):
+        r = client.get(f"{T}/audit/verify?full=1")
+        assert r.status_code == 409 and r.headers["retry-after"] == "30"
+    busy = [(lvl, e) for lvl, e in sec_events if e["event"] == "verify_full_busy"]
+    assert [e["count"] for _, e in busy] == [1, 2, 3] and busy[0][1]["status"] == 409
+    assert [lvl for lvl, _ in busy] == [logging.INFO, logging.INFO, logging.WARNING]
+
+
+def test_failed_seq_is_signed_and_old_format_rechecked_once(client, monkeypatch):
+    monkeypatch.setenv("ANCHOR_SIGNING_KEY", KEY)
+    _seed(client)
+    _verify(client)
+    assert _verify(client)["incremental_from"] == 4
+    _set_cp(failed_seq=2)                                        # nicht signierte Änderung → verworfen
+    assert _verify(client)["incremental_from"] is None
+    assert _cp().failed_seq is None and _verify(client)["incremental_from"] == 4
+    # Prüfstand mit Signatur im alten Format (ohne failed_seq, vor v2) → einmalig Vollprüfung, dann v2
+    row = _cp()
+    old = integrity.signing_key().sign(integrity.checkpoint_message("privat", row, version=1)).hex()
+    _set_cp(signature=old)
+    assert _verify(client)["incremental_from"] is None
+    assert _verify(client)["incremental_from"] == 4
+    assert _cp().signature != old
+
+
 def test_full_parameter_always_full(client):
     _seed(client)
     _verify(client)
     assert _verify(client, full=True)["incremental_from"] is None
+
+
+def test_fixed_finding_without_new_writes_restores_incremental(client):
+    """S10: Befund behoben (Datensatz zurückgesetzt), keine neuen Schreibvorgänge → die nächste fehlerfreie
+    Vollprüfung, die nach dem Befund begann, setzt den Prüfstand wieder (statt dauerhaft Vollprüfung)."""
+    _seed(client)
+    _verify(client)
+    with engine.begin() as conn:
+        conn.execute(text("UPDATE odometer_readings SET km = 1 WHERE km = 10001"))
+    assert not _verify(client, full=True)["state_ok"]
+    cp = _cp()
+    assert cp.full_at is None and cp.failed_seq == 4 and cp.verified_at
+    with engine.begin() as conn:
+        conn.execute(text("UPDATE odometer_readings SET km = 10001 WHERE km = 1"))
+        # Befund «vor» dieser Prüfung erfasst (Sekundenauflösung; im Test sonst dieselbe Sekunde)
+        conn.execute(text("UPDATE verify_checkpoints SET verified_at = '2000-01-01T00:00:00+00:00'"))
+    v = _verify(client)
+    assert v["ok"] and v["incremental_from"] is None
+    cp = _cp()
+    assert cp.failed_seq is None and cp.full_at and cp.seq == 4
+    assert _verify(client)["incremental_from"] == 4
 
 
 # ---------- monotones Fortschreiben (mehrere Worker) ----------

@@ -44,6 +44,7 @@ struct VehicleStats {
 
 enum StatsCalculator {
     /// Voll-zu-voll: Liter seit der letzten Volltankung (inkl. Teilbetankungen) / km dazwischen.
+    /// Erneute Volltankung beim gleichen km (nachgetankt): Liter zählen zur vorigen Etappe (wie Server, Review S7).
     static func consumptionPoints(_ entries: [FuelEntry]) -> [ConsumptionPoint] {
         let sorted = entries.sorted { ($0.km, $0.date, $0.id) < ($1.km, $1.date, $1.id) }
         var points: [ConsumptionPoint] = []
@@ -62,6 +63,12 @@ enum StatsCalculator {
                 points.append(ConsumptionPoint(
                     date: e.date, km: e.km, distance: dist, liters: accL, cost: accC,
                     consumption: accL / Double(dist) * 100, costPerKm: accC / Double(dist)))
+            } else if let last = points.last, last.km == e.km {
+                let liters = last.liters + accL
+                let cost = last.cost + accC
+                points[points.count - 1] = ConsumptionPoint(
+                    date: last.date, km: last.km, distance: last.distance, liters: liters, cost: cost,
+                    consumption: liters / Double(last.distance) * 100, costPerKm: cost / Double(last.distance))
             }
             accL = 0
             accC = 0
@@ -70,9 +77,12 @@ enum StatsCalculator {
         return points
     }
 
+    /// Höchster km-Stand inkl. km-Beginn/-Ende der nicht stornierten Fahrten (wie Server, Review S18).
     static func currentKm(vehicle: Vehicle, odometer: [OdometerReading], fuel: [FuelEntry],
-                          maintenance: [Maintenance]) -> Int {
-        ([vehicle.initialKm] + odometer.map(\.km) + fuel.map(\.km) + maintenance.compactMap(\.km)).max() ?? 0
+                          maintenance: [Maintenance], trips: [Trip] = []) -> Int {
+        let tripKms: [Int] = trips.filter { !$0.deleted }.flatMap { t in [t.kmStart, t.kmEnd].compactMap { $0 } }
+        let kms: [Int] = [vehicle.initialKm] + odometer.map(\.km) + fuel.map(\.km) + maintenance.compactMap(\.km)
+        return (kms + tripKms).max() ?? 0
     }
 
     /// Kosten einer Wartung für die Statistik: Rechnungsbetrag, sonst Materialsumme.
@@ -81,9 +91,10 @@ enum StatsCalculator {
     }
 
     static func stats(vehicle: Vehicle, odometer: [OdometerReading], fuel: [FuelEntry],
-                      maintenance: [Maintenance], materials: [MaintenanceMaterial],
+                      maintenance: [Maintenance], materials: [MaintenanceMaterial], trips: [Trip] = [],
                       today: Date = Date()) -> VehicleStats {
-        let current = currentKm(vehicle: vehicle, odometer: odometer, fuel: fuel, maintenance: maintenance)
+        let current = currentKm(vehicle: vehicle, odometer: odometer, fuel: fuel, maintenance: maintenance,
+                                trips: trips)
         let points = consumptionPoints(fuel)
         let dist = Double(points.reduce(0) { $0 + $1.distance })
         let liters = points.reduce(0) { $0 + $1.liters }

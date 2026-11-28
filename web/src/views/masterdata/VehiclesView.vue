@@ -14,16 +14,29 @@ import { role, session } from '../../store/session'
 import { canWrite } from '../../lib/roles'
 import { chf, km, byText } from '../../lib/format'
 import { FUEL_TYPE_LABELS, METHOD_LABELS, OWNERSHIP_LABELS } from '../../lib/labels'
+import { VIN_ERROR, isValidVin, normalizeVin, vinOrNull, vinWarning } from '../../lib/vin'
 
 const writable = computed(() => canWrite(role.value))
 const showDeleted = ref(false)
 const rows = computed(() => all('vehicle').filter((v) => showDeleted.value || !v.deleted).sort((a, b) => byText(a.name, b.name)))
 // Seitenaufteilung (50/100/200) – auch bei tausenden Einträgen kleines DOM
 const pager = usePager(rows, { resetOn: [showDeleted] })
-const ed = useEditor('vehicle', () => ({ name: '', make: '', model: '', plate: '', fuel_type: 'benzin', initial_km: 0, purchase_price: null, ownership: 'private', private_use_method: null, annual_fixed_costs: null }))
+const ed = useEditor('vehicle', () => ({ name: '', make: '', model: '', plate: '', vin: '', fuel_type: 'benzin', initial_km: 0, purchase_price: null, ownership: 'private', private_use_method: null, annual_fixed_costs: null }))
 const history = useHistory()
 const storno = useStorno()
 const e = computed(() => ed.state.errors)
+
+// VIN: beim Verlassen des Feldes normalisieren (ohne Leerzeichen/Bindestriche, Grossbuchstaben) und prüfen
+const VIN_HINT = '17 Zeichen – im Fahrzeugausweis (Fahrgestell-Nr.) oder unten an der Windschutzscheibe.'
+const vinHint = computed(() => vinWarning(normalizeVin(ed.state.form.vin)) ?? VIN_HINT)
+function onVinBlur() {
+  const v = normalizeVin(ed.state.form.vin)
+  ed.state.form.vin = v
+  const errors = { ...ed.state.errors }
+  if (v && !isValidVin(v)) errors.vin = VIN_ERROR
+  else delete errors.vin
+  ed.state.errors = errors
+}
 
 function save() {
   void ed.save((f) => ({
@@ -32,6 +45,7 @@ function save() {
     make: strOrNull(f.make),
     model: strOrNull(f.model),
     plate: strOrNull(f.plate),
+    vin: vinOrNull(f.vin),
     initial_km: numOrNull(f.initial_km) ?? 0,
     purchase_price: numOrNull(f.purchase_price),
     annual_fixed_costs: numOrNull(f.annual_fixed_costs),
@@ -56,7 +70,7 @@ function save() {
         <tbody>
           <tr v-for="v in pager.items" :key="v.id" :class="{ 'is-deleted': v.deleted }">
             <td class="strike-cell"><strong>{{ v.name }}</strong><span class="cell-sub">{{ [v.make, v.model].filter(Boolean).join(' ') }}</span><span v-if="v.deleted" class="badge badge-danger">storniert</span></td>
-            <td><span v-if="v.plate" class="plate">{{ v.plate }}</span></td>
+            <td><span v-if="v.plate" class="plate">{{ v.plate }}</span><span v-if="v.vin" class="cell-sub mono" :title="`VIN ${v.vin}`">{{ v.vin }}</span></td>
             <td>{{ FUEL_TYPE_LABELS[v.fuel_type] ?? v.fuel_type }}</td>
             <td class="num">{{ km(v.initial_km) }}</td>
             <td>{{ v.ownership ? OWNERSHIP_LABELS[v.ownership] : 'nicht erfasst' }}<span v-if="v.ownership === 'business'" class="cell-sub">{{ v.private_use_method ? METHOD_LABELS[v.private_use_method] : 'Methode nicht erfasst' }}</span></td>
@@ -70,9 +84,10 @@ function save() {
     <Pager v-model:page="pager.page" v-model:size="pager.size" :total="pager.total" label="Seiten der Fahrzeuge" />
   </section>
 
-  <EditorModal :open="ed.state.open" :title="ed.state.id ? 'Fahrzeug bearbeiten' : 'Fahrzeug erfassen'" :busy="ed.state.busy" :error="ed.state.error" @close="ed.close" @save="save">
+  <EditorModal :open="ed.state.open" :title="ed.state.id ? 'Fahrzeug bearbeiten' : 'Fahrzeug erfassen'" :busy="ed.state.busy" :error="ed.state.error" :dirty="ed.dirty" @close="ed.close" @save="save">
     <Field v-slot="f" label="Name" required :error="e.name"><input :id="f.id" v-model="ed.state.form.name" class="input" maxlength="100" :aria-invalid="f.invalid" :aria-describedby="f.describedby" /></Field>
     <Field v-slot="f" label="Kennzeichen" :error="e.plate"><input :id="f.id" v-model="ed.state.form.plate" class="input" maxlength="30" placeholder="ZH 123 456" :aria-invalid="f.invalid" /></Field>
+    <Field v-slot="f" label="VIN / Fahrgestellnummer" :hint="vinHint" :error="e.vin"><input :id="f.id" v-model="ed.state.form.vin" class="input mono" maxlength="40" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="z. B. WVWZZZ1KZ6W000001" :aria-invalid="f.invalid" :aria-describedby="f.describedby" @blur="onVinBlur" /></Field>
     <Field v-slot="f" label="Marke" :error="e.make"><input :id="f.id" v-model="ed.state.form.make" class="input" maxlength="100" /></Field>
     <Field v-slot="f" label="Modell" :error="e.model"><input :id="f.id" v-model="ed.state.form.model" class="input" maxlength="100" /></Field>
     <Field v-slot="f" label="Treibstoff" :error="e.fuel_type">

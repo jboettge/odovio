@@ -13,7 +13,8 @@
 #           ASSIGN_USERS ("jakob anna" → erhalten die Rolle), KCADM
 # Web-Frontend (öffentlicher Client, PKCE S256, KEIN offline_access; nur dort: Mitgliederverwaltung und
 # Steuerparameter – der Server prüft azp = OIDC_WEB_CLIENT_ID):
-#           WEB_URL ("https://fahrzeugbuch.j-mb.net"; leer → Web-Client wird nicht angelegt/geändert),
+#           WEB_URL ("https://www.odovio.ch" – kanonische Adresse, nicht die Apex-Domain odovio.ch;
+#                    leer → Web-Client wird nicht angelegt/geändert),
 #           WEB_CLIENT (fahrzeugbuch-web)
 # Mandanten (Gruppen /fahrzeugbuch/<mandant> = schreiben, …/<mandant>/lesen = lesen,
 #           …/<mandant>/admin = verwalten inkl. schreiben):

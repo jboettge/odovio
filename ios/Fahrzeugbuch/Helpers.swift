@@ -379,6 +379,30 @@ struct UnitField: View {
     }
 }
 
+/// Zahlentastaturen haben keine Eingabetaste (U7): «Fertig» in der Leiste über der Tastatur schliesst sie,
+/// Scrollen ebenfalls. Einmal je Formular anwenden (nicht je Feld – sonst erscheint der Knopf mehrfach).
+private struct KeyboardDoneToolbar: ViewModifier {
+    func body(content: Content) -> some View {
+        content
+            .scrollDismissesKeyboard(.interactively)
+            .toolbar {
+                ToolbarItemGroup(placement: .keyboard) {
+                    Spacer()
+                    Button("Fertig") {
+                        UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder),
+                                                        to: nil, from: nil, for: nil)
+                    }
+                    .fontWeight(.semibold)
+                }
+            }
+    }
+}
+
+extension View {
+    /// «Fertig» über der Tastatur und Schliessen beim Scrollen (Formulare mit Zahlenfeldern, U7).
+    func keyboardDoneToolbar() -> some View { modifier(KeyboardDoneToolbar()) }
+}
+
 /// Kleines Etikett (Teilbetankung, Überfällig, Ausstehend …): Text + optional Symbol, nie nur Farbe.
 /// Systemfarben werden auf kontrastreiche Varianten abgebildet (≥ 4.5:1).
 struct StatusTag: View {
