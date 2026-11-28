@@ -50,7 +50,8 @@ struct DefaultVehiclePicker: View {
 
 /// «Auto erkennen über»: CarPlay und/oder Bluetooth-Gerät(e), unabhängig wählbar. Mit Auto-Erkennung startet die Automatik nur,
 /// wenn CoreMotion «im Auto» meldet UND CarPlay bzw. ein gelerntes Gerät verbunden ist (weniger Fehlalarme in
-/// Zug/Tram/Bus); beim Verbinden startet sie direkt, beim Trennen endet die automatische Fahrt nach 2 min.
+/// Zug/Tram/Bus) – die Verbindung bestimmt auch das Fahrzeug. Verbinden allein startet nichts; beim Trennen
+/// endet die automatische Fahrt nach 2 min.
 struct CarDetectionSettingsView: View {
     let store: TenantStore
     @Environment(TripCoordinator.self) private var coordinator
@@ -102,20 +103,20 @@ struct CarDetectionSettingsView: View {
     }
 
     private var modeFooter: String {
+        let base = "Die Fahrt erkennt iOS («Bewegung & Fitness»: im Auto unterwegs). "
         switch (car.mode.useCarPlay, car.mode.useBluetooth) {
         case (false, false):
-            "Beides aus: Fahrten starten, sobald «Bewegung & Fitness» eine Autofahrt erkennt – auch in Zug, Tram "
-                + "oder Bus."
+            return base + "Ohne Auto-Erkennung startet jede erkannte Autofahrt – auch in Zug, Tram oder Bus – auf "
+                + "das Standardfahrzeug."
         case (true, false):
-            "Automatik nur mit verbundenem CarPlay. Ist die odovio-Oberfläche in CarPlay geöffnet, startet die "
-                + "Fahrt beim Verbinden und endet beim Trennen (nach 2 min Karenz, z. B. Tankstopp). Autos ohne "
-                + "CarPlay: zusätzlich Bluetooth einschalten."
+            return base + "Gestartet wird nur mit verbundenem CarPlay, gebucht auf das «Fahrzeug für CarPlay». Autos "
+                + "ohne CarPlay: zusätzlich Bluetooth einschalten."
         case (false, true):
-            "Automatik nur, wenn ein gelerntes Bluetooth-Gerät (Autoradio, Freisprecher) verbunden ist. Trennen "
-                + "beendet die automatische Fahrt nach 2 min Karenz (z. B. Tankstopp)."
+            return base + "Gestartet wird nur, wenn ein gelerntes Bluetooth-Gerät (Autoradio, Freisprecher) verbunden "
+                + "ist – gebucht auf das Fahrzeug dieses Geräts."
         case (true, true):
-            "Automatik, wenn CarPlay oder ein gelerntes Bluetooth-Gerät verbunden ist – so funktioniert sie auch "
-                + "in Autos ohne CarPlay. Trennen beendet die automatische Fahrt nach 2 min Karenz (z. B. Tankstopp)."
+            return base + "Gestartet wird nur, wenn CarPlay oder ein gelerntes Bluetooth-Gerät verbunden ist; die "
+                + "Verbindung bestimmt das Fahrzeug. So klappt es auch in Autos ohne CarPlay."
         }
     }
 

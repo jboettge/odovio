@@ -110,8 +110,10 @@ final class TripDetector: NSObject, CLLocationManagerDelegate {
     /// iOS meldet Stillstand (`CLLocationUpdate.isStationary`) seit
     private var stationarySince: Date?
 
-    /// Letzte CoreMotion-Aktivität (Startbedingung der Auto-Erkennung: «widerspricht Motion?»)
+    /// Letzte CoreMotion-Aktivität
     var latestMotion: MotionSample? { lastActivity }
+    /// Zuletzt «im Auto» (CoreMotion, mind. mittlere Sicherheit) – Startbedingung der Auto-Erkennung
+    var lastCarMotionAt: Date? { lastAutomotiveAt }
 
     override init() {
         super.init()

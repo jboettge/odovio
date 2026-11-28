@@ -82,11 +82,12 @@ Mit Mac alternativ: Schlüsselbundverwaltung → Zertifikatsassistent → «Zert
   Bluetooth: im Auto «Aktuell verbundenes Gerät als Auto übernehmen» (gelernt werden Name und Port-UID des
   Audio-Ausgangs aus `AVAudioSession.currentRoute`: A2DP/HFP/LE bzw. CarPlay-Audio), mehrere Geräte möglich, je
   Gerät optional ein Fahrzeug (Automatik bucht dann auf dieses Fahrzeug).
-- Mit Auto-Erkennung startet die Automatik nur, wenn CoreMotion «automotive» meldet **und** CarPlay bzw. ein
-  gelerntes Gerät verbunden ist (Route bei jedem Weck-Ereignis gelesen) – weniger Fehlalarme in Zug/Tram/Bus.
-  Läuft die App, startet sie zusätzlich direkt beim Verbinden (`routeChangeNotification`), ausser CoreMotion meldet
-  «zu Fuss». Trennen = Stopp-Signal mit 2 min Karenz (Tankstopp); fährt das Auto noch, entscheidet die normale
-  Stopp-Erkennung.
+- Intelligente Erkennung: **Die Fahrt erkennt iOS** (CoreMotion «automotive»); CarPlay bzw. ein gelerntes
+  Bluetooth-Gerät bestätigen, **dass** man im Auto sitzt (nicht Zug/Tram/Bus) und **in welchem** (Fahrzeug der
+  Verbindung). Beide Signale müssen innerhalb von 5 min zusammenkommen (`pairingWindow`): Verbindet das Autoradio
+  erst nach dem Losfahren, prüft die App die Route nach 15/45/90 s erneut bzw. startet beim Verbinden
+  (`routeChangeNotification`). Verbinden allein (Auto steht, Radio an) startet keine Fahrt. Trennen = Stopp-Signal
+  mit 2 min Karenz (Tankstopp); fährt das Auto noch, entscheidet die normale Stopp-Erkennung.
 - **iOS weckt Apps nicht, wenn sich ein Bluetooth-Gerät oder CarPlay verbindet.** Zuverlässig ergänzend (Hinweis
   auch in der Einstellung): App «Kurzbefehle» › Automation › «+» › **CarPlay** bzw. **Bluetooth** (das Auto) ›
   «Verbindet» → Aktion **Fahrt starten** (odovio, «Sofort ausführen»); «Trennt» → **Fahrt beenden**. Die Intents

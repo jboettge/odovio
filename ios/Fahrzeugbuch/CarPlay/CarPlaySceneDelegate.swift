@@ -10,8 +10,9 @@ import UIKit
 ///   Standardfahrzeug bzw. das einzige Fahrzeug.
 /// - Meldungen kurz (HIG, U4: «Fahrt gestartet», «Fahrt beendet · 12.4 km», «Kein Standardfahrzeug»);
 ///   was eine Handlung am iPhone braucht, kommt zusätzlich als Mitteilung aufs iPhone.
-/// - Verbinden/Trennen der Szene meldet `CarConnectionMonitor`: mit eingeschalteter Automatik startet beim
-///   Verbinden eine Fahrt, beim Trennen endet die automatisch gestartete Fahrt (nach kurzer Karenz).
+/// - Verbinden/Trennen der Szene meldet `CarConnectionMonitor`: Die Szene gilt als «im Auto»; die Fahrt startet
+///   die Automatik, sobald iOS «im Auto unterwegs» erkennt. Beim Trennen endet die automatisch gestartete Fahrt
+///   (nach kurzer Karenz).
 ///   Die Szene verbindet erst, wenn die App auf dem CarPlay-Bildschirm geöffnet ist bzw. war; verlässlich ist
 ///   ergänzend die Kurzbefehle-Automation «CarPlay verbunden → Fahrt starten» (docs/TESTFLIGHT.md).
 /// - Voraussetzung auf dem Gerät: CarPlay-Berechtigung `com.apple.developer.carplay-driving-task` (von Apple

@@ -276,16 +276,22 @@ final class TripDetectionTests: XCTestCase {
         XCTAssertFalse(CarRouteMatcher.motionStartAllowed(mode: .bluetooth, connection: nil), "Zug/Tram/Bus")
         XCTAssertTrue(CarRouteMatcher.motionStartAllowed(mode: .bluetooth, connection: bt))
         XCTAssertFalse(CarRouteMatcher.motionStartAllowed(mode: .carPlay, connection: nil))
-        // Verbinden: direkt starten, ausser CoreMotion meldet «zu Fuss»
-        let walking = MotionSample(automotive: false, onFoot: true, date: t0)
-        let sitting = MotionSample(automotive: false, stationary: true, date: t0)
-        XCTAssertTrue(CarRouteMatcher.connectStartAllowed(mode: .bluetooth, connection: bt, latestMotion: sitting))
-        XCTAssertTrue(CarRouteMatcher.connectStartAllowed(mode: .bluetooth, connection: bt, latestMotion: nil))
-        XCTAssertFalse(CarRouteMatcher.connectStartAllowed(mode: .bluetooth, connection: bt, latestMotion: walking))
-        XCTAssertFalse(CarRouteMatcher.connectStartAllowed(mode: .bluetooth, connection: nil, latestMotion: nil))
-        XCTAssertFalse(CarRouteMatcher.connectStartAllowed(mode: .off, connection: bt, latestMotion: sitting))
-        XCTAssertTrue(CarRouteMatcher.connectStartAllowed(mode: .off, connection: scene, latestMotion: walking),
-                      "CarPlay-Szene verbunden = im Auto")
+        // Verbinden startet nur, wenn iOS kürzlich «im Auto» gemeldet hat (Fahrt erkennt iOS, das Auto die
+        // Verbindung) – Verbinden allein (Radio an in der Garage) startet nichts
+        let now = t0.addingTimeInterval(1000)
+        let recent = now.addingTimeInterval(-60)
+        let old = now.addingTimeInterval(-(CarRouteMatcher.pairingWindow + 1))
+        XCTAssertTrue(CarRouteMatcher.connectStartAllowed(mode: .bluetooth, connection: bt, lastCarMotionAt: recent, now: now))
+        XCTAssertFalse(CarRouteMatcher.connectStartAllowed(mode: .bluetooth, connection: bt, lastCarMotionAt: nil, now: now),
+                       "ohne Fahrterkennung kein Start")
+        XCTAssertFalse(CarRouteMatcher.connectStartAllowed(mode: .bluetooth, connection: bt, lastCarMotionAt: old, now: now))
+        XCTAssertFalse(CarRouteMatcher.connectStartAllowed(mode: .bluetooth, connection: nil, lastCarMotionAt: recent, now: now))
+        XCTAssertFalse(CarRouteMatcher.connectStartAllowed(mode: .off, connection: bt, lastCarMotionAt: recent, now: now))
+        XCTAssertTrue(CarRouteMatcher.connectStartAllowed(mode: .off, connection: scene, lastCarMotionAt: recent, now: now),
+                      "CarPlay-Szene + Fahrterkennung")
+        XCTAssertFalse(CarRouteMatcher.connectStartAllowed(mode: .carPlayAndBluetooth, connection: scene,
+                                                           lastCarMotionAt: nil, now: now),
+                       "CarPlay-Szene allein (Auto steht) startet nicht")
     }
 
     // MARK: Einrichtungslink und Token-Bindung (I1)

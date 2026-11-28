@@ -149,19 +149,25 @@ enum CarRouteMatcher {
         return nil
     }
 
-    /// Start der Automatik auf «automotive» (CoreMotion): ohne Auto-Erkennung immer, sonst nur verbunden.
+    /// Fenster, in dem iOS-Fahrterkennung («im Auto») und Verbindung zum Auto zusammenkommen müssen
+    /// (das Autoradio verbindet sich oft erst einige Sekunden nach dem Losfahren – oder schon davor).
+    static let pairingWindow: TimeInterval = 300
+
+    /// Intelligente Erkennung: Die Fahrt erkennt iOS (CoreMotion «automotive»). Mit Auto-Erkennung bestätigt
+    /// CarPlay bzw. ein gelerntes Bluetooth-Gerät, DASS man im Auto sitzt (nicht in Zug/Tram/Bus) und in
+    /// WELCHEM (Fahrzeug der Verbindung). Ohne Auto-Erkennung genügt «automotive».
     static func motionStartAllowed(mode: CarDetectionMode, connection: CarConnection?) -> Bool {
         mode.isOff || connection != nil
     }
 
-    /// Start direkt beim Verbinden (Routenwechsel, CarPlay-Szene), wenn CoreMotion nicht widerspricht
-    /// (zu Fuss unterwegs = z. B. Garage neben dem Haus, Auto nur in Funkreichweite).
+    /// Verbindung kommt NACH der Fahrterkennung: starten, wenn iOS kürzlich (≤ `pairingWindow`) «im Auto»
+    /// gemeldet hat. Verbinden allein (Auto steht, Radio an, Garage neben dem Haus) startet keine Fahrt.
     static func connectStartAllowed(mode: CarDetectionMode, connection: CarConnection?,
-                                    latestMotion: MotionSample?) -> Bool {
+                                    lastCarMotionAt: Date?, now: Date = Date()) -> Bool {
         guard let connection else { return false }
-        if connection.kind == .carPlayScene { return true }
-        guard !mode.isOff else { return false }
-        return !(latestMotion?.isOnFoot ?? false)
+        guard connection.kind == .carPlayScene || !mode.isOff else { return false }
+        guard let lastCarMotionAt else { return false }
+        return now.timeIntervalSince(lastCarMotionAt) <= pairingWindow
     }
 }
 

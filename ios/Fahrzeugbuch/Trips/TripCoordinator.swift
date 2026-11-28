@@ -124,6 +124,8 @@ final class TripCoordinator {
     @ObservationIgnored private var gapCheckRunning = false
     @ObservationIgnored private var finishingParked = false
     @ObservationIgnored private var disconnectStopTask: Task<Void, Never>?
+    /// Nachprüfen der Auto-Verbindung nach «im Auto» ohne Verbindung (Bluetooth verbindet verzögert)
+    @ObservationIgnored private var connectionRecheckTask: Task<Void, Never>?
     /// Einstellungen werden nach der ersten Entsperrung nachgeladen (didSet schreibt nicht zurück, Q6)
     @ObservationIgnored private var restoringDefaults = false
 
@@ -788,7 +790,12 @@ final class TripCoordinator {
         #endif
         let car = CarConnectionMonitor.shared
         let connection = known ?? car.connectionNow()
-        guard known != nil || CarRouteMatcher.motionStartAllowed(mode: car.mode, connection: connection) else { return }
+        guard known != nil || CarRouteMatcher.motionStartAllowed(mode: car.mode, connection: connection) else {
+            // iOS meldet «im Auto», aber (noch) keine Verbindung: Autoradio/CarPlay verbindet oft erst nach
+            // dem Losfahren → Route kurz nachprüfen; eine neue Verbindung startet über handleCarEvent.
+            scheduleConnectionRecheck()
+            return
+        }
         guard let store = await currentStore(), store.canWrite else { return }
         guard let vehicle = automationVehicle(store, preferredId: connection?.vehicleId) else {
             lastError = "Automatik: " + DefaultVehicleChoice.missingText
@@ -809,7 +816,9 @@ final class TripCoordinator {
             disconnectStopTask = nil
             guard autoDetectEnabled, !isRecording, !isFinishing,
                   CarRouteMatcher.connectStartAllowed(mode: CarConnectionMonitor.shared.mode, connection: connection,
-                                                      latestMotion: detector.latestMotion) else { return }
+                                                      lastCarMotionAt: detector.lastCarMotionAt) else { return }
+            connectionRecheckTask?.cancel()
+            connectionRecheckTask = nil
             await autoStart(connection: connection)
         case .disconnected:
             // Starkes Stopp-Signal, aber mit Karenz (Tankstopp, kurz unterbrochene Verbindung)
@@ -820,6 +829,21 @@ final class TripCoordinator {
                 guard !Task.isCancelled else { return }
                 await self?.stopAfterDisconnect()
             }
+        }
+    }
+
+    /// Route nach 15 s, 45 s und 90 s erneut lesen (solange die App wach ist). Kommt eine Verbindung hinzu,
+    /// meldet der Monitor `.connected` und `handleCarEvent` startet die Fahrt (Fenster `pairingWindow`).
+    private func scheduleConnectionRecheck() {
+        guard connectionRecheckTask == nil, !CarConnectionMonitor.shared.mode.isOff else { return }
+        connectionRecheckTask = Task { [weak self] in
+            for delay in [15.0, 30.0, 45.0] {
+                try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                guard !Task.isCancelled, let self else { return }
+                if self.isRecording { break }
+                CarConnectionMonitor.shared.refresh()
+            }
+            self?.connectionRecheckTask = nil
         }
     }
 
