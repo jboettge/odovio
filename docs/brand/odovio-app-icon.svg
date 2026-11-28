@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200">
+  <!-- odovio App-Icon A «Instrument-O», randlos (iOS maskiert die Ecken). Farben: #12213A, #FFFFFF, Akzent #F2A541 -->
+  <rect width="200" height="200" fill="#12213A"/>
+  <path d="M58.3 133.7 A59 59 0 1 1 141.7 133.7" fill="none" stroke="#FFFFFF" stroke-opacity="0.22" stroke-width="12" stroke-linecap="round"/>
+  <path d="M58.3 133.7 A59 59 0 0 1 137.92 46.8" fill="none" stroke="#FFFFFF" stroke-width="12" stroke-linecap="round"/>
+  <line x1="100" y1="92" x2="127" y2="59.8" stroke="#F2A541" stroke-width="8" stroke-linecap="round"/>
+  <circle cx="100" cy="92" r="9" fill="#FFFFFF"/>
+  <g transform="translate(87 120) scale(1.1)" fill="none" stroke="#FFFFFF" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M4 21V5a2 2 0 0 1 2-2h6a2 2 0 0 1 2 2v16"/><path d="M3 21h12"/><path d="M14 9h2a2 2 0 0 1 2 2v5a1.5 1.5 0 0 0 3 0V8l-3-3"/>
+  </g>
+</svg>

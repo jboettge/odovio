@@ -3,6 +3,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import SourceLink from './components/SourceLink.vue'
 import { useRoute, useRouter } from 'vue-router'
 import Icon from './components/Icon.vue'
+import BrandMark from './components/BrandMark.vue'
 import RoleBadge from './components/RoleBadge.vue'
 import Toasts from './components/Toasts.vue'
 import AlertBox from './components/AlertBox.vue'
@@ -136,8 +137,8 @@ function onNavKeydown(e: KeyboardEvent) {
     <RouterView />
   </div>
   <div v-else class="shell">
-    <RouterLink to="/uebersicht" class="brand" aria-label="Fahrzeugbuch – Übersicht">
-      <span class="brand-logo"><Icon name="car" /></span>Fahrzeugbuch
+    <RouterLink to="/uebersicht" class="brand" aria-label="odovio – Übersicht">
+      <BrandMark :size="30" />odovio
     </RouterLink>
     <header class="topbar">
       <button

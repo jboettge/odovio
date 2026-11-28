@@ -3,6 +3,8 @@
   color-scheme: light;
   --bg: #f3f4f7;
   --surface: #ffffff;
+  --brand-ink: #12213a;
+  --brand-amber: #f2a541;
   --surface-2: #f0f2f5;
   --surface-3: #e5e8ed;
   --border: #d5dae1;
@@ -52,6 +54,7 @@
     color-scheme: dark;
     --bg: #0e1014;
     --surface: #171a20;
+    --brand-ink: #eef0f4;
     --surface-2: #1e222a;
     --surface-3: #282d37;
     --border: #2f3541;
@@ -204,14 +207,19 @@ a:hover {
   color: var(--text);
   text-decoration: none;
 }
-.brand-logo {
-  width: 30px;
-  height: 30px;
-  border-radius: 8px;
-  background: var(--accent);
-  color: var(--on-accent);
-  display: grid;
-  place-items: center;
+/* odovio-Bildmarke: Linien in Textfarbe, Nadeln im Marken-Akzent (Tankwarnleuchte) */
+.brand-mark {
+  flex: none;
+  color: var(--brand-ink);
+}
+.brand-needle {
+  stroke: var(--brand-amber);
+}
+.brand-knockout {
+  fill: var(--surface);
+}
+.brand {
+  letter-spacing: -0.02em;
 }
 
 .topbar {
@@ -1522,14 +1530,8 @@ details.data-table summary {
   padding: 32px;
 }
 .start-logo {
-  width: 52px;
-  height: 52px;
-  border-radius: 14px;
-  background: var(--accent);
-  color: var(--on-accent);
-  display: grid;
-  place-items: center;
-  margin-bottom: 18px;
+  display: flex;
+  margin-bottom: 14px;
 }
 .tenant-list {
   list-style: none;

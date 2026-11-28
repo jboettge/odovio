@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 220 200" role="img" aria-label="odovio">
+  <!-- odovio Bildmarke B «Doppelanzeige»: Tacho + Tankuhr. Farben: #12213A, Akzent #F2A541, Grund #FFFFFF -->
+  <path d="M42.75 145.25 A64 64 0 1 1 133.25 145.25" fill="none" stroke="#12213A" stroke-opacity="0.14" stroke-width="11" stroke-linecap="round"/>
+  <path d="M42.75 145.25 A64 64 0 0 1 120 44.57" fill="none" stroke="#12213A" stroke-width="11" stroke-linecap="round"/>
+  <path d="M49.82 138.18 L54.06 133.94 M35.04 110.53 L37.98 109.95 M38.11 79.34 L43.65 81.63 M58 55.1 L59.67 57.6 M88 46 L88 52 M118 55.1 L116.33 57.6 M137.89 79.34 L132.35 81.63" fill="none" stroke="#12213A" stroke-width="3" stroke-linecap="round"/>
+  <line x1="88" y1="100" x2="111" y2="60.16" stroke="#F2A541" stroke-width="6.5" stroke-linecap="round"/>
+  <circle cx="88" cy="100" r="8.5" fill="#12213A"/>
+  <circle cx="160" cy="118" r="45" fill="#FFFFFF"/>
+  <circle cx="160" cy="118" r="45" fill="none" stroke="#12213A" stroke-width="3"/>
+  <path d="M128.05 106.37 A34 34 0 0 1 191.95 106.37" fill="none" stroke="#12213A" stroke-opacity="0.14" stroke-width="8" stroke-linecap="round"/>
+  <path d="M128.05 106.37 A34 34 0 0 1 177 88.56" fill="none" stroke="#12213A" stroke-width="8" stroke-linecap="round"/>
+  <path d="M128.05 106.37 L134.63 108.77 M160 84 L160 91 M191.95 106.37 L185.37 108.77" fill="none" stroke="#12213A" stroke-width="2.5" stroke-linecap="round"/>
+  <line x1="160" y1="118" x2="174" y2="93.75" stroke="#F2A541" stroke-width="5" stroke-linecap="round"/>
+  <circle cx="160" cy="118" r="5.5" fill="#12213A"/>
+  <g transform="translate(151 127) scale(0.78)" fill="none" stroke="#12213A" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M4 21V5a2 2 0 0 1 2-2h6a2 2 0 0 1 2 2v16"/><path d="M3 21h12"/><path d="M14 9h2a2 2 0 0 1 2 2v5a1.5 1.5 0 0 0 3 0V8l-3-3"/>
+  </g>
+</svg>
